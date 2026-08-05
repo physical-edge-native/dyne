@@ -1,0 +1,4 @@
+[workspace]
+resolver = "2"
+members = ["crates/dyne-host", "crates/dyne-proto"]
+# heat1d-actor is built separately for wasm32 (excluded from the native workspace build)
