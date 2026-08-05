@@ -1,0 +1,27 @@
+# Rust ビルド成果物
+# ワークスペース (dyne-host, dyne-proto) のビルド出力
+/target/
+# heat1d-actor はワークスペース外で別ビルドするため個別に指定
+/crates/heat1d-actor/target/
+
+# Cargo.lock の方針:
+# - dyne-host はバイナリなので Cargo.lock をコミットするのが Rust の慣例
+#   (再現ビルドのため)。よってワークスペース直下の Cargo.lock は無視しない。
+# - heat1d-actor 側の Cargo.lock も同様にコミット対象とする (無視しない)。
+
+# 実行時の出力 (CSV は既定で %TEMP% / /tmp に出るが、リポジトリ内に
+# 出力した場合のための保険)
+*.csv
+
+# エディタ・IDE
+.vscode/
+.idea/
+*.swp
+
+# OS が勝手に作るファイル
+.DS_Store
+Thumbs.db
+
+# Windows で Unblock-File する前の Zone.Identifier が
+# WSL 側から見えた場合の残骸
+*:Zone.Identifier
