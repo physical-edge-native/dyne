@@ -1,0 +1,9 @@
+# Dyne M1 既定設定 (ESPr Developer 32 Type-C = ESP32-WROOM-32, フラッシュ4MB)
+CONFIG_IDF_TARGET="esp32"
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+# WAMR込みのアプリは1MBを超えるため大きめの単一アプリパーティションを使う
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+# 計測のため最適化を -O2 に (既定の -Og だと速度計測が不正確になる)
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+# メインタスクのスタックを増やす (WAMR呼び出し+printf系のため)
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384

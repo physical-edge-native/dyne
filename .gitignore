@@ -25,3 +25,10 @@ Thumbs.db
 # Windows で Unblock-File する前の Zone.Identifier が
 # WSL 側から見えた場合の残骸
 *:Zone.Identifier
+
+# ESP-IDF (m1-esp32/)
+m1-esp32/build/
+m1-esp32/managed_components/
+m1-esp32/sdkconfig
+m1-esp32/sdkconfig.old
+m1-esp32/dependencies.lock
