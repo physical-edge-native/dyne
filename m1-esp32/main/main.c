@@ -28,8 +28,8 @@
 #include "wasm_export.h"
 
 /* main/CMakeLists.txt の EMBED_FILES で埋め込まれる WASM バイナリ */
-extern const uint8_t wasm_start[] asm("_binary_heat1d_actor_wasm_start");
-extern const uint8_t wasm_end[]   asm("_binary_heat1d_actor_wasm_end");
+extern const uint8_t wasm_start[] asm("_binary_heat1d_actor_aot_start");
+extern const uint8_t wasm_end[]   asm("_binary_heat1d_actor_aot_end");
 
 #define N_POINTS 65
 #define STEPS    2000
