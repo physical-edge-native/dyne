@@ -1,0 +1,39 @@
+# This file was generated using idf.py save-defconfig or menuconfig [D] key. It can be edited manually.
+# Espressif IoT Development Framework (ESP-IDF) 5.5.5 Project Minimal Configuration
+#
+
+#
+# Serial flasher config
+#
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+# end of Serial flasher config
+
+#
+# Partition Table
+#
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+# end of Partition Table
+
+#
+# Compiler options
+#
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+# end of Compiler options
+
+#
+# Component config
+#
+
+#
+# ESP System Settings
+#
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
+# end of ESP System Settings
+
+#
+# WASM Micro Runtime
+#
+CONFIG_WAMR_INTERP_CLASSIC=y
+# end of WASM Micro Runtime
+# end of Component config

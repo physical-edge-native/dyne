@@ -1,0 +1,16 @@
+menu "Dyne M2"
+
+choice DYNE_ROLE
+    prompt "Node role"
+    default DYNE_ROLE_A
+    help
+        Node A = access point, domain [0, 0.5] (33 points)
+        Node B = station,      domain [0.5+h, 1.0] (32 points)
+
+config DYNE_ROLE_A
+    bool "Node A (access point, left half)"
+config DYNE_ROLE_B
+    bool "Node B (station, right half)"
+endchoice
+
+endmenu

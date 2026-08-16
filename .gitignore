@@ -12,7 +12,6 @@
 # 実行時の出力 (CSV は既定で %TEMP% / /tmp に出るが、リポジトリ内に
 # 出力した場合のための保険)
 *.csv
-*.aot
 
 # エディタ・IDE
 .vscode/
@@ -33,3 +32,13 @@ m1-esp32/managed_components/
 m1-esp32/sdkconfig
 m1-esp32/sdkconfig.old
 m1-esp32/dependencies.lock
+
+# ESP-IDF (m2-esp32/)
+m2-esp32/build/
+m2-esp32/managed_components/
+m2-esp32/sdkconfig
+m2-esp32/sdkconfig.old
+m2-esp32/dependencies.lock
+
+# AOT実験の生成物 (wamrcで再生成できるためコミットしない)
+*.aot
