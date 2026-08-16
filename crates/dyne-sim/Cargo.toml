@@ -1,0 +1,8 @@
+[package]
+name = "dyne-sim"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+wasmi = "0.47"
+dyne-proto = { path = "../dyne-proto" }

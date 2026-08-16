@@ -33,6 +33,14 @@ name = "dyne-proto"
 version = "0.1.0"
 
 [[package]]
+name = "dyne-sim"
+version = "0.1.0"
+dependencies = [
+ "dyne-proto",
+ "wasmi",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
