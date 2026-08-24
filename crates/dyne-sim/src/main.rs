@@ -54,6 +54,10 @@ struct Config {
     ram_cap_bytes: u64,
     /// (node, start_us, end_us)
     pauses: Vec<(usize, u64, u64)>,
+    /// 状態引き渡しつき離脱→復帰: (node, leave_us, rejoin_us)
+    /// 離脱時に u[] と現在ステップを取り出し、復帰時に**新しいアクターインスタンス**へ
+    /// dyne_init + dyne_set で移植する (M-S1a: REMOVE→ADDの機構検証)
+    handovers: Vec<(usize, u64, u64)>,
     /// (split_index k: ノードk-1|k間で分断, start_us, end_us)
     partitions: Vec<(usize, u64, u64)>,
     quiet: bool,
@@ -76,6 +80,7 @@ fn parse_args() -> Config {
         seed: 42,
         ram_cap_bytes: 250 * 1024, // ESP32実測ベースの実効上限
         pauses: Vec::new(),
+        handovers: Vec::new(),
         partitions: Vec::new(),
         quiet: false,
     };
@@ -98,6 +103,16 @@ fn parse_args() -> Config {
             "--timeout-ms" => c.timeout_us = (val().parse::<f64>().unwrap() * 1000.0) as u64,
             "--seed" => c.seed = val().parse().unwrap(),
             "--ram-cap-kb" => c.ram_cap_bytes = val().parse::<u64>().unwrap() * 1024,
+            "--handover" => {
+                let v = val();
+                let (n, rest) = v.split_once('@').expect("--handover node@leave:rejoin");
+                let (a, b) = rest.split_once(':').expect("--handover node@leave:rejoin");
+                c.handovers.push((
+                    n.parse().unwrap(),
+                    a.parse::<u64>().unwrap() * 1000,
+                    b.parse::<u64>().unwrap() * 1000,
+                ));
+            }
             "--pause" => {
                 // node@start_ms:end_ms
                 let v = val();
@@ -164,6 +179,7 @@ struct Actor {
     bval: wasmi::TypedFunc<u32, f64>,
     bgrad: wasmi::TypedFunc<u32, f64>,
     set_neighbor: wasmi::TypedFunc<(u32, f64, f64), ()>,
+    set: wasmi::TypedFunc<(u32, f64), ()>,
     get: wasmi::TypedFunc<u32, f64>,
     x: wasmi::TypedFunc<u32, f64>,
     len: wasmi::TypedFunc<(), u32>,
@@ -195,6 +211,7 @@ impl Actor {
             bval: func!("dyne_boundary_value", u32, f64),
             bgrad: func!("dyne_boundary_grad", u32, f64),
             set_neighbor: func!("dyne_set_neighbor", (u32, f64, f64), ()),
+            set: func!("dyne_set", (u32, f64), ()),
             get: func!("dyne_get", u32, f64),
             x: func!("dyne_x", u32, f64),
             len: func!("dyne_len", (), u32),
@@ -235,6 +252,8 @@ enum Phase {
 
 struct Node {
     actor: Actor,
+    /// dyne_init の引数一式 (handover 復帰時の新インスタンス構築用)
+    init_args: (u32, f64, f64, u32, u32),
     /// (界面ID, その界面の自分側の面)
     ifaces: Vec<(usize, u32)>,
     phase: Phase,
@@ -282,7 +301,81 @@ impl Sim {
             .iter()
             .find(|&&(n, a, b)| n == node && t >= a && t < b)
             .map(|&(_, _, b)| b)
+            .or_else(|| {
+                self.cfg
+                    .handovers
+                    .iter()
+                    .find(|&&(n, a, b)| n == node && t >= a && t < b)
+                    .map(|&(_, _, b)| b)
+            })
     }
+
+    /// 復帰時刻を過ぎた handover 対象を、新インスタンスへ移植する。
+    /// 旧インスタンスから u[] を読み出し、新インスタンスに dyne_init + dyne_set。
+    /// プロトコル状態 (現在ステップ・送信控え・取り置き) はホスト側が保持継続する。
+    fn apply_handovers(&mut self, engine: &wasmi::Engine, module: &wasmi::Module) {
+        let due: Vec<usize> = self
+            .cfg
+            .handovers
+            .iter()
+            .filter(|&&(_, _, b)| self.now_us >= b)
+            .map(|&(n, _, _)| n)
+            .collect();
+        if due.is_empty() {
+            return;
+        }
+        // 一度処理した handover は除去して再適用を防ぐ
+        let now = self.now_us;
+        self.cfg.handovers.retain(|&(_, _, b)| now < b);
+        for node in due {
+            let n_pts;
+            let mut saved = Vec::new();
+            {
+                let nd = &mut self.nodes[node];
+                n_pts = nd.init_args.0;
+                for i in 0..n_pts {
+                    let v = nd.actor.get.call(&mut nd.actor.store, i).unwrap();
+                    saved.push(v);
+                }
+            }
+            // 新インスタンス構築 (旧インスタンスは破棄 = REMOVE、新設 = ADD)
+            let mut actor = Actor::load(engine, module);
+            let (n, x0, x1, bcl, bcr) = self.nodes[node].init_args;
+            let rc = actor
+                .init
+                .call(
+                    &mut actor.store,
+                    (n, x0, x1, self.cfg_alpha(), self.cfg_dt(), bcl, bcr),
+                )
+                .unwrap();
+            assert_eq!(rc, 0, "handover re-init failed");
+            for (i, v) in saved.iter().enumerate() {
+                actor
+                    .set
+                    .call(&mut actor.store, (i as u32, *v))
+                    .unwrap();
+            }
+            self.nodes[node].actor = actor;
+            // 受領済み記録をリセット: 受領値は旧インスタンスのゴースト点にあり
+            // 新インスタンスには存在しない。falseに戻せば、繰り延べられていた
+            // Wakeが自ステップを再送し、相手の応答再送(replay)がゴーストを
+            // 新インスタンスへ再注入する (プロトコル本来の治癒力で回収)。
+            if matches!(self.nodes[node].phase, Phase::Waiting { .. }) {
+                for g in self.nodes[node].got.iter_mut() {
+                    *g = false;
+                }
+            }
+            eprintln!(
+                "[sim] handover applied: node {} reincarnated at t={}ms (state {} pts carried)",
+                node,
+                self.now_us / 1000,
+                n_pts
+            );
+        }
+    }
+
+    fn cfg_alpha(&self) -> f64 { self.cfg.alpha }
+    fn cfg_dt(&self) -> f64 { self.cfg.dt }
 
     fn partition_blocks(&self, from: usize, to: usize, t: u64) -> bool {
         self.cfg.partitions.iter().any(|&(k, a, b)| {
@@ -464,12 +557,13 @@ impl Sim {
         self.start_step(node, next);
     }
 
-    fn run(&mut self) {
+    fn run(&mut self, engine: &wasmi::Engine, module: &wasmi::Module) {
         for node in 0..self.nodes.len() {
             self.start_step(node, 0);
         }
         while let Some(Reverse((t, _, idx))) = self.heap.pop() {
             self.now_us = t;
+            self.apply_handovers(engine, module);
             let ev = self.events[idx].take().expect("event consumed twice");
             // 一時停止中のノード宛イベントは停止解除時刻へ繰り延べ
             let target = match &ev {
@@ -561,6 +655,7 @@ fn main() {
         }
         nodes.push(Node {
             actor,
+            init_args: (cnt as u32, x0, x1, bc_l, bc_r),
             ifaces,
             phase: Phase::Waiting { step: 0 },
             cur_step: 0,
@@ -586,7 +681,7 @@ fn main() {
         seq: 0,
         rng: Rng::new(cfg.seed),
     };
-    sim.run();
+    sim.run(&engine, &module);
 
     // 単一ノード参照解(同一wasm・全域)との突き合わせ
     let mut single = Actor::load(&engine, &module);

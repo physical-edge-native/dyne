@@ -36,7 +36,6 @@ version = "0.1.0"
 name = "dyne-sim"
 version = "0.1.0"
 dependencies = [
- "dyne-proto",
  "wasmi",
 ]
 

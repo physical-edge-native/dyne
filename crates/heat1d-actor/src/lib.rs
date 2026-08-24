@@ -13,6 +13,7 @@
 //!   boundary_out()  -> dyne_boundary_value(face) / dyne_boundary_grad(face)
 //!   (neighbors 入力) -> dyne_set_neighbor(face, value, grad)
 //!   状態の観測       -> dyne_len() / dyne_get(i) / dyne_x(i)
+//!   状態の書き込み   -> dyne_set(i, value)   (M-S1a追加)
 //!
 //! 数値法: 空間2次中心差分 + 時間前進オイラー (陽解法)。
 //!   u_i^{n+1} = u_i^n + alpha*dt/h^2 * (u_{i-1}^n - 2 u_i^n + u_{i+1}^n)
@@ -183,6 +184,18 @@ pub extern "C" fn dyne_get(i: u32) -> f64 {
         s.u[i as usize]
     } else {
         f64::NAN
+    }
+}
+
+/// 状態の書き込み (M-S1a追加: 状態移送つき復帰・引き継ぎ用)。
+/// dyne_init 後に、ホストが保存済みの値を格子点 i へ書き戻す。
+/// 初期条件を上書きするだけで、数値法・境界処理には一切影響しない。
+/// これにより「離脱ノードの状態を別インスタンスへ引き渡す」経路が成立する。
+#[no_mangle]
+pub extern "C" fn dyne_set(i: u32, value: f64) {
+    let s = st();
+    if (i as usize) < s.n {
+        s.u[i as usize] = value;
     }
 }
 

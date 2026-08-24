@@ -5,4 +5,3 @@ edition = "2021"
 
 [dependencies]
 wasmi = "0.47"
-dyne-proto = { path = "../dyne-proto" }
