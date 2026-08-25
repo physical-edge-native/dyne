@@ -25,6 +25,15 @@
 //!     --loss 0.10 --lat-ms 5 --lat-jitter-ms 3 --step-ms 79.5 --seed 42 \
 //!     --pause 7@20000:40000 --partition 8@60000:90000
 //!   (pause: ノード7を仮想20〜40秒停止。partition: ノード7|8間を仮想60〜90秒分断)
+//!
+//! M-S1a後半 (シナリオC = 解釈βの領域拡張ADD):
+//!   --add 5@30000        … ノード5は開始時不在。隣接ノードは当該面を外部境界u=0
+//!                          (BC_DIRICHLET_ZERO) として計算を止めずに進め、仮想30秒に
+//!                          ノード5が新規参加すると界面へ切り替える (再init+状態復元)。
+//!                          検証は複合参照解 (同じイベント時系列の単一配列逐次計算) との
+//!                          ビット一致。界面残差 |grad_A - grad_B| を毎ステップ記録し、
+//!                          参加直後の乱れピークと回復時間を報告する。
+//!   --residual-csv f.csv … 界面残差の時系列をCSVへ書き出す (省略可)
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
@@ -60,6 +69,12 @@ struct Config {
     handovers: Vec<(usize, u64, u64)>,
     /// (split_index k: ノードk-1|k間で分断, start_us, end_us)
     partitions: Vec<(usize, u64, u64)>,
+    /// シナリオC (M-S1a後半): 解釈βの領域拡張ADD。(node, t_add_us)
+    /// 指定ノードは開始時不在。隣接ノードは当該面を外部境界u=0
+    /// (BC_DIRICHLET_ZERO) として計算を止めずに進め、参加時に界面へ切り替える。
+    adds: Vec<(usize, u64)>,
+    /// 界面残差 |grad_A - grad_B| の毎ステップ記録をCSVに書き出す先 (省略可)
+    residual_csv: Option<String>,
     quiet: bool,
 }
 
@@ -82,6 +97,8 @@ fn parse_args() -> Config {
         pauses: Vec::new(),
         handovers: Vec::new(),
         partitions: Vec::new(),
+        adds: Vec::new(),
+        residual_csv: None,
         quiet: false,
     };
     let args: Vec<String> = std::env::args().collect();
@@ -113,6 +130,14 @@ fn parse_args() -> Config {
                     b.parse::<u64>().unwrap() * 1000,
                 ));
             }
+            "--add" => {
+                // node@t_ms: ノードを仮想時刻tにβ意味論で新規参加させる
+                let v = val();
+                let (n, t) = v.split_once('@').expect("--add node@t_ms");
+                c.adds
+                    .push((n.parse().unwrap(), t.parse::<u64>().unwrap() * 1000));
+            }
+            "--residual-csv" => c.residual_csv = Some(val()),
             "--pause" => {
                 // node@start_ms:end_ms
                 let v = val();
@@ -144,6 +169,14 @@ fn parse_args() -> Config {
     }
     assert!(!c.wasm.is_empty(), "--wasm is required");
     assert!(c.nodes >= 1);
+    for &(a, _) in &c.adds {
+        assert!(a < c.nodes, "--add: node {a} out of range");
+        // 隣接ノード同士のADDは、参加時のbc決定が適用順に依存するため未対応
+        assert!(
+            !c.adds.iter().any(|&(b, _)| b + 1 == a || a + 1 == b),
+            "--add: 隣接ノード同士のADDは未対応 (node {a})"
+        );
+    }
     c
 }
 
@@ -256,10 +289,18 @@ struct Node {
     init_args: (u32, f64, f64, u32, u32),
     /// (界面ID, その界面の自分側の面)
     ifaces: Vec<(usize, u32)>,
+    /// β意味論ADD: このノードがまだ参加していない間 false。イベントは発生しない。
+    present: bool,
+    /// 界面の動的登録の予約: (界面ID, 自分側の面, 有効化ステップ)。
+    /// 有効化ステップの start_step 冒頭で、bcの切り替え (再init+状態復元) と
+    /// ifaces への登録を行う (隣接ノードにADDが起きた側で使う)。
+    iface_adds: Vec<(usize, u32, u64)>,
     phase: Phase,
     cur_step: u64,
     /// 現ステップで受領済みの界面
     got: Vec<bool>,
+    /// 現ステップで受領した相手側勾配 (界面残差の計測用。got と同じ添字)
+    recv_grad: Vec<f64>,
     /// 先着した将来ステップ: (iface,step) -> msg
     pending: HashMap<(usize, u64), Msg>,
     /// 送信控え(直近2ステップ): (iface,step) -> msg
@@ -276,6 +317,17 @@ struct Node {
 
 // ---------- シミュレータ本体 ----------
 
+/// ADD参加の記録 (複合参照解と計測レポートの入力)
+#[derive(Clone, Copy, Debug)]
+struct JoinRec {
+    node: usize,
+    /// 参加ステップ S: このステップからノードは計算に加わる
+    step: u64,
+    /// 参加時に dyne_init へ渡した境界条件 (複合参照解の初期化に使う)
+    bc: (u32, u32),
+    t_us: u64,
+}
+
 struct Sim {
     cfg: Config,
     nodes: Vec<Node>,
@@ -285,6 +337,13 @@ struct Sim {
     events: Vec<Option<Ev>>,
     seq: u64,
     rng: Rng,
+    engine: wasmi::Engine,
+    module: wasmi::Module,
+    /// 実行中に確定したADD参加の記録
+    join_log: Vec<JoinRec>,
+    /// 界面残差 |grad_A - grad_B| の時系列: 界面ID -> (step, 残差)。
+    /// 界面の左側ノードが計算開始直前に記録する (M-S1cのT2トリガーのセンサー前倒し)。
+    residuals: HashMap<usize, Vec<(u64, f64)>>,
 }
 
 impl Sim {
@@ -313,7 +372,7 @@ impl Sim {
     /// 復帰時刻を過ぎた handover 対象を、新インスタンスへ移植する。
     /// 旧インスタンスから u[] を読み出し、新インスタンスに dyne_init + dyne_set。
     /// プロトコル状態 (現在ステップ・送信控え・取り置き) はホスト側が保持継続する。
-    fn apply_handovers(&mut self, engine: &wasmi::Engine, module: &wasmi::Module) {
+    fn apply_handovers(&mut self) {
         let due: Vec<usize> = self
             .cfg
             .handovers
@@ -339,7 +398,7 @@ impl Sim {
                 }
             }
             // 新インスタンス構築 (旧インスタンスは破棄 = REMOVE、新設 = ADD)
-            let mut actor = Actor::load(engine, module);
+            let mut actor = Actor::load(&self.engine, &self.module);
             let (n, x0, x1, bcl, bcr) = self.nodes[node].init_args;
             let rc = actor
                 .init
@@ -372,6 +431,161 @@ impl Sim {
                 n_pts
             );
         }
+    }
+
+    /// 参加時刻を過ぎたADD (シナリオC / 解釈β) を適用する。
+    /// - 参加ステップ S = 1 + max(現存する隣接ノードの現在ステップ)。
+    ///   これにより隣接ノードはまだステップ S の交換を始めていないことが保証される。
+    ///   (シミュレータ内では大域情報で揃える。実システムでの合わせ方はM3以降の課題)
+    /// - 参加ノード: 新インスタンスを dyne_init (現存隣接の面=BC_INTERFACE、
+    ///   外縁の面=BC_DIRICHLET_ZERO) し、初期条件 sin(pi x) でステップ S を開始する
+    ///   (引き継ぐ過去なし = B-16のADDの意味論)。
+    /// - 隣接ノード: 界面の動的登録を予約 (iface_adds)。ステップ S の開始時に
+    ///   bc切り替え (再init+状態復元 = handoverと同じ機構の再利用) と界面登録を行う。
+    fn apply_adds(&mut self) {
+        let due: Vec<(usize, u64)> = self
+            .cfg
+            .adds
+            .iter()
+            .filter(|&&(_, t)| self.now_us >= t)
+            .copied()
+            .collect();
+        if due.is_empty() {
+            return;
+        }
+        let now = self.now_us;
+        self.cfg.adds.retain(|&(_, t)| now < t);
+        for (node, t_add) in due {
+            assert!(
+                !self.nodes[node].present,
+                "--add: node {node} is already present"
+            );
+            let neighbors: Vec<usize> = [node.checked_sub(1), Some(node + 1)]
+                .into_iter()
+                .flatten()
+                .filter(|&p| p < self.nodes.len() && self.nodes[p].present)
+                .collect();
+            let s_join = 1 + neighbors
+                .iter()
+                .map(|&p| {
+                    assert!(
+                        self.nodes[p].phase != Phase::Done,
+                        "--add: node {node} の参加が遅すぎる (隣接ノード {p} は既に完了)"
+                    );
+                    self.nodes[p].cur_step
+                })
+                .max()
+                .unwrap_or(0);
+            assert!(
+                s_join < self.cfg.steps,
+                "--add: 参加ステップ {s_join} が総ステップ数以上"
+            );
+            // 参加ノードのbcと界面を決め、隣接ノードへ界面の動的登録を予約する
+            let mut bc = [BC_DIRICHLET, BC_DIRICHLET];
+            let mut ifaces = Vec::new();
+            if node > 0 && self.nodes[node - 1].present {
+                bc[0] = BC_INTERFACE;
+                ifaces.push((node - 1, FACE_LEFT));
+                self.nodes[node - 1]
+                    .iface_adds
+                    .push((node - 1, FACE_RIGHT, s_join));
+            }
+            if node + 1 < self.nodes.len() && self.nodes[node + 1].present {
+                bc[1] = BC_INTERFACE;
+                ifaces.push((node, FACE_RIGHT));
+                self.nodes[node + 1]
+                    .iface_adds
+                    .push((node, FACE_LEFT, s_join));
+            }
+            let mut actor = Actor::load(&self.engine, &self.module);
+            let (n, x0, x1, _, _) = self.nodes[node].init_args;
+            let rc = actor
+                .init
+                .call(
+                    &mut actor.store,
+                    (n, x0, x1, self.cfg_alpha(), self.cfg_dt(), bc[0], bc[1]),
+                )
+                .unwrap();
+            assert_eq!(rc, 0, "add init failed");
+            {
+                let nd = &mut self.nodes[node];
+                nd.actor = actor;
+                nd.init_args = (n, x0, x1, bc[0], bc[1]);
+                nd.ifaces = ifaces;
+                nd.present = true;
+            }
+            self.join_log.push(JoinRec {
+                node,
+                step: s_join,
+                bc: (bc[0], bc[1]),
+                t_us: t_add,
+            });
+            eprintln!(
+                "[sim] add applied: node {} joined at t={}ms as step {} (bc=[{},{}], β=領域拡張)",
+                node,
+                self.now_us / 1000,
+                s_join,
+                bc[0],
+                bc[1]
+            );
+            self.start_step(node, s_join);
+        }
+    }
+
+    /// 予約済みの界面の動的登録を適用する (start_step 冒頭、送信より前に呼ぶ)。
+    /// アクターのbcは初期化時固定なので、再init+状態復元で境界条件を切り替える。
+    /// u[] は保存→復元するので物理状態は不変 (運ぶのは物理状態のみの原則)。
+    fn apply_iface_adds(&mut self, node: usize, step: u64) {
+        let due: Vec<(usize, u32)> = self.nodes[node]
+            .iface_adds
+            .iter()
+            .filter(|&&(_, _, s)| s <= step)
+            .map(|&(j, f, _)| (j, f))
+            .collect();
+        if due.is_empty() {
+            return;
+        }
+        self.nodes[node].iface_adds.retain(|&(_, _, s)| s > step);
+        let (n, x0, x1, mut bcl, mut bcr) = self.nodes[node].init_args;
+        let mut saved = Vec::new();
+        {
+            let nd = &mut self.nodes[node];
+            for i in 0..n {
+                saved.push(nd.actor.get.call(&mut nd.actor.store, i).unwrap());
+            }
+        }
+        for &(_, f) in &due {
+            if f == FACE_LEFT {
+                bcl = BC_INTERFACE;
+            } else {
+                bcr = BC_INTERFACE;
+            }
+        }
+        let mut actor = Actor::load(&self.engine, &self.module);
+        let rc = actor
+            .init
+            .call(
+                &mut actor.store,
+                (n, x0, x1, self.cfg_alpha(), self.cfg_dt(), bcl, bcr),
+            )
+            .unwrap();
+        assert_eq!(rc, 0, "iface-add re-init failed");
+        for (i, v) in saved.iter().enumerate() {
+            actor.set.call(&mut actor.store, (i as u32, *v)).unwrap();
+        }
+        let nd = &mut self.nodes[node];
+        nd.actor = actor;
+        nd.init_args = (n, x0, x1, bcl, bcr);
+        for &(j, f) in &due {
+            nd.ifaces.push((j, f));
+        }
+        eprintln!(
+            "[sim] iface registered: node {} bc switched to interface {:?} from step {} (t={}ms)",
+            node,
+            due.iter().map(|&(j, _)| j).collect::<Vec<_>>(),
+            step,
+            self.now_us / 1000
+        );
     }
 
     fn cfg_alpha(&self) -> f64 { self.cfg.alpha }
@@ -428,6 +642,7 @@ impl Sim {
 
     /// stepを開始: 全界面へ送信し、待ち状態に入る
     fn start_step(&mut self, node: usize, step: u64) {
+        self.apply_iface_adds(node, step);
         let ifaces: Vec<usize> = self.nodes[node].ifaces.iter().map(|&(j, _)| j).collect();
         for j in &ifaces {
             self.send_iface(node, *j, step, false);
@@ -436,6 +651,7 @@ impl Sim {
         n.cur_step = step;
         n.phase = Phase::Waiting { step };
         n.got = vec![false; n.ifaces.len()];
+        n.recv_grad = vec![0.0; n.ifaces.len()];
         n.wait_since = self.now_us;
         n.last_resend_us = self.now_us;
         if n.ifaces.is_empty() {
@@ -469,6 +685,7 @@ impl Sim {
                     .call(&mut n.actor.store, (f, m.value, m.grad))
                     .unwrap();
                 n.got[k] = true;
+                n.recv_grad[k] = m.grad;
             }
         }
         if self.nodes[node].got.iter().all(|&g| g) {
@@ -477,6 +694,25 @@ impl Sim {
     }
 
     fn begin_compute(&mut self, node: usize) {
+        // 界面残差 |grad_A - grad_B| を記録 (状態は step 実行前 = 交換値と同時点)。
+        // 二重記録を避けるため、界面の左側 (自分の面が右) のノードだけが記録する。
+        // これは M-S1c の自動トリガー T2 のセンサーの前倒し実装。
+        let step = self.nodes[node].cur_step;
+        let right_ifaces: Vec<(usize, usize, u32)> = self.nodes[node]
+            .ifaces
+            .iter()
+            .enumerate()
+            .filter(|(_, &(_, f))| f == FACE_RIGHT)
+            .map(|(k, &(j, f))| (k, j, f))
+            .collect();
+        for (k, j, f) in right_ifaces {
+            let g = {
+                let n = &mut self.nodes[node];
+                n.actor.bgrad.call(&mut n.actor.store, f).unwrap()
+            };
+            let resid = (g - self.nodes[node].recv_grad[k]).abs();
+            self.residuals.entry(j).or_default().push((step, resid));
+        }
         {
             let n = &mut self.nodes[node];
             n.wait_us += self.now_us - n.wait_since;
@@ -490,7 +726,13 @@ impl Sim {
     fn on_deliver(&mut self, node: usize, msg: Msg) {
         // 自分にとってその界面がどの面か
         let Some(k) = self.nodes[node].ifaces.iter().position(|&(j, _)| j == msg.iface) else {
-            return; // 自分の界面でない(ありえないが安全側)
+            // 未登録の界面宛 = 参加したばかりの隣接ノードからの先行送信。
+            // 取り置いておけば、界面登録後の start_step → try_pending が消費する。
+            let nd = &mut self.nodes[node];
+            if (msg.iface == node || msg.iface + 1 == node) && msg.step >= nd.cur_step {
+                nd.pending.insert((msg.iface, msg.step), msg);
+            }
+            return;
         };
         let my_face = self.nodes[node].ifaces[k].1;
         match self.nodes[node].phase {
@@ -502,6 +744,7 @@ impl Sim {
                         .call(&mut n.actor.store, (my_face, msg.value, msg.grad))
                         .unwrap();
                     n.got[k] = true;
+                    n.recv_grad[k] = msg.grad;
                     if n.got.iter().all(|&g| g) {
                         self.begin_compute(node);
                     }
@@ -557,13 +800,22 @@ impl Sim {
         self.start_step(node, next);
     }
 
-    fn run(&mut self, engine: &wasmi::Engine, module: &wasmi::Module) {
+    fn run(&mut self) {
         for node in 0..self.nodes.len() {
-            self.start_step(node, 0);
+            if self.nodes[node].present {
+                self.start_step(node, 0);
+            }
+        }
+        // 参加時刻に確実にイベント処理が走るよう、ADD対象へWakeを予約しておく
+        // (全ノードが早期にDoneになってもヒープが空にならないための保険)
+        let adds: Vec<(usize, u64)> = self.cfg.adds.clone();
+        for (node, t) in adds {
+            self.schedule(t, Ev::Wake { node });
         }
         while let Some(Reverse((t, _, idx))) = self.heap.pop() {
             self.now_us = t;
-            self.apply_handovers(engine, module);
+            self.apply_handovers();
+            self.apply_adds();
             let ev = self.events[idx].take().expect("event consumed twice");
             // 一時停止中のノード宛イベントは停止解除時刻へ繰り延べ
             let target = match &ev {
@@ -629,37 +881,63 @@ fn main() {
     }
     drop(probe);
 
-    // ノード生成
+    // ノード生成。--add 指定ノードは開始時不在 (β意味論):
+    // 隣接ノードは当該面を BC_DIRICHLET_ZERO (外部境界u=0)・界面登録なしで初期化する。
+    let absent_at_start: Vec<bool> = (0..n_nodes)
+        .map(|i| cfg.adds.iter().any(|&(a, _)| a == i))
+        .collect();
     let mut nodes = Vec::new();
     for i in 0..n_nodes {
         let (s, cnt) = starts[i];
         let x0 = (s as f64) * h;
         let x1 = ((s + cnt - 1) as f64) * h;
-        let bc_l = if i == 0 { BC_DIRICHLET } else { BC_INTERFACE };
-        let bc_r = if i == n_nodes - 1 { BC_DIRICHLET } else { BC_INTERFACE };
-        let mut actor = Actor::load(&engine, &module);
-        let rc = actor
-            .init
-            .call(
-                &mut actor.store,
-                (cnt as u32, x0, x1, cfg.alpha, cfg.dt, bc_l, bc_r),
-            )
-            .unwrap();
-        assert_eq!(rc, 0, "dyne_init failed on node {i}");
-        let mut ifaces = Vec::new();
-        if i > 0 {
-            ifaces.push((i - 1, FACE_LEFT)); // 界面 i-1 = 左隣との境界
+        // ローカル格子幅がグローバルとビット一致しない分割では、参照解との
+        // ビット一致は保証されない (既定の points=65 等の2べき系格子では一致する)
+        let h_local = (x1 - x0) / ((cnt - 1) as f64);
+        if h_local.to_bits() != h.to_bits() {
+            eprintln!("[sim] WARN: node {i} local h != global h (ビット一致は保証されない)");
         }
-        if i < n_nodes - 1 {
-            ifaces.push((i, FACE_RIGHT)); // 界面 i = 右隣との境界
+        let present = !absent_at_start[i];
+        let bc_l = if i == 0 || absent_at_start[i - 1] {
+            BC_DIRICHLET
+        } else {
+            BC_INTERFACE
+        };
+        let bc_r = if i == n_nodes - 1 || absent_at_start[i + 1] {
+            BC_DIRICHLET
+        } else {
+            BC_INTERFACE
+        };
+        let mut actor = Actor::load(&engine, &module);
+        if present {
+            let rc = actor
+                .init
+                .call(
+                    &mut actor.store,
+                    (cnt as u32, x0, x1, cfg.alpha, cfg.dt, bc_l, bc_r),
+                )
+                .unwrap();
+            assert_eq!(rc, 0, "dyne_init failed on node {i}");
+        }
+        let mut ifaces = Vec::new();
+        if present {
+            if i > 0 && !absent_at_start[i - 1] {
+                ifaces.push((i - 1, FACE_LEFT)); // 界面 i-1 = 左隣との境界
+            }
+            if i < n_nodes - 1 && !absent_at_start[i + 1] {
+                ifaces.push((i, FACE_RIGHT)); // 界面 i = 右隣との境界
+            }
         }
         nodes.push(Node {
             actor,
             init_args: (cnt as u32, x0, x1, bc_l, bc_r),
             ifaces,
+            present,
+            iface_adds: Vec::new(),
             phase: Phase::Waiting { step: 0 },
             cur_step: 0,
             got: Vec::new(),
+            recv_grad: Vec::new(),
             pending: HashMap::new(),
             sent: HashMap::new(),
             last_resend_us: 0,
@@ -680,22 +958,40 @@ fn main() {
         events: Vec::new(),
         seq: 0,
         rng: Rng::new(cfg.seed),
+        engine,
+        module,
+        join_log: Vec::new(),
+        residuals: HashMap::new(),
     };
-    sim.run(&engine, &module);
+    sim.run();
+    assert_eq!(
+        sim.join_log.len(),
+        cfg.adds.len(),
+        "一部のADDが適用されなかった (参加時刻が実行時間より後の可能性)"
+    );
 
-    // 単一ノード参照解(同一wasm・全域)との突き合わせ
-    let mut single = Actor::load(&engine, &module);
-    let rc = single
-        .init
-        .call(
-            &mut single.store,
-            (n_pts as u32, 0.0, 1.0, cfg.alpha, cfg.dt, BC_DIRICHLET, BC_DIRICHLET),
-        )
-        .unwrap();
-    assert_eq!(rc, 0);
-    for _ in 0..cfg.steps {
-        single.step.call(&mut single.store, ()).unwrap();
-    }
+    // 参照解:
+    //   ADDなし → 単一ノード参照解 (同一wasm・全域) — 従来どおり
+    //   ADDあり → 複合参照解 (同じイベント時系列を単一配列で再現、ホスト側純Rust)
+    let reference: Vec<f64> = if cfg.adds.is_empty() {
+        let mut single = Actor::load(&sim.engine, &sim.module);
+        let rc = single
+            .init
+            .call(
+                &mut single.store,
+                (n_pts as u32, 0.0, 1.0, cfg.alpha, cfg.dt, BC_DIRICHLET, BC_DIRICHLET),
+            )
+            .unwrap();
+        assert_eq!(rc, 0);
+        for _ in 0..cfg.steps {
+            single.step.call(&mut single.store, ()).unwrap();
+        }
+        (0..n_pts)
+            .map(|i| single.get.call(&mut single.store, i as u32).unwrap())
+            .collect()
+    } else {
+        composite_reference(&cfg, &starts, h, &absent_at_start, &sim.join_log)
+    };
 
     let mut exact = 0usize;
     let mut max_diff = 0.0f64;
@@ -706,11 +1002,11 @@ fn main() {
     for i in 0..n_nodes {
         let (s, cnt) = starts[i];
         for k in 0..cnt {
-            let gi = (s + k) as u32;
+            let gi = s + k;
             let n = &mut sim.nodes[i];
             let u = n.actor.get.call(&mut n.actor.store, k as u32).unwrap();
             let x = n.actor.x.call(&mut n.actor.store, k as u32).unwrap();
-            let us = single.get.call(&mut single.store, gi).unwrap();
+            let us = reference[gi];
             let d = (u - us).abs();
             if u == us {
                 exact += 1;
@@ -754,11 +1050,137 @@ fn main() {
     if !cfg.partitions.is_empty() {
         println!("partitions={:?} (k@us)", cfg.partitions);
     }
+    if !cfg.adds.is_empty() {
+        println!("adds={:?} (node@us, β=領域拡張)", cfg.adds);
+    }
+    let ref_name = if cfg.adds.is_empty() { "single" } else { "composite" };
     println!(
-        "bit-exact vs single: {}/{} points, max_diff={:.3e}",
-        exact, n_pts, max_diff
+        "bit-exact vs {}: {}/{} points, max_diff={:.3e}",
+        ref_name, exact, n_pts, max_diff
     );
-    println!("L2 vs analytic = {:.3e}, Linf = {:.3e}", l2, linf);
+    if cfg.adds.is_empty() {
+        println!("L2 vs analytic = {:.3e}, Linf = {:.3e}", l2, linf);
+    } else {
+        // 領域が途中から拡張されるため sin減衰の解析解は適用外
+        println!("L2 vs analytic: n/a (領域拡張シナリオ)");
+    }
+
+    // ---- シナリオC計測: 界面残差の乱れ (ピーク) と回復時間 ----
+    if !sim.join_log.is_empty() {
+        println!("==== ADD REPORT (scenario C / 解釈β) ====");
+        let s_min = sim.join_log.iter().map(|j| j.step).min().unwrap();
+        let new_ifaces: Vec<usize> = sim
+            .join_log
+            .iter()
+            .flat_map(|j| {
+                let mut v = Vec::new();
+                if j.bc.0 == BC_INTERFACE {
+                    v.push(j.node - 1);
+                }
+                if j.bc.1 == BC_INTERFACE {
+                    v.push(j.node);
+                }
+                v
+            })
+            .collect();
+        // ベースライン: 参加直前100ステップの既存界面の残差の中央値
+        // (全期間だと序盤の過渡で膨らむため、参加直前の水準を取る)。
+        // 既存界面がない構成 (2ノード等) では、参加界面の末尾25%区間の中央値で代用。
+        let w_lo = s_min.saturating_sub(100);
+        let mut pre: Vec<f64> = sim
+            .residuals
+            .iter()
+            .filter(|(j, _)| !new_ifaces.contains(j))
+            .flat_map(|(_, v)| {
+                v.iter()
+                    .filter(|&&(s, _)| s >= w_lo && s < s_min)
+                    .map(|&(_, r)| r)
+            })
+            .collect();
+        let (baseline, base_src) = if !pre.is_empty() {
+            (median(&mut pre), "参加直前100ステップの既存界面の残差の中央値")
+        } else {
+            let mut tail: Vec<f64> = new_ifaces
+                .iter()
+                .flat_map(|j| {
+                    let v = &sim.residuals[j];
+                    v[v.len() - v.len() / 4..].iter().map(|&(_, r)| r)
+                })
+                .collect();
+            (
+                median(&mut tail),
+                "参加界面の末尾25%の中央値 (既存界面なしのため代用)",
+            )
+        };
+        println!("residual baseline = {:.3e} ({})", baseline, base_src);
+        for jr in &sim.join_log {
+            let mut own = Vec::new();
+            if jr.bc.0 == BC_INTERFACE {
+                own.push(jr.node - 1);
+            }
+            if jr.bc.1 == BC_INTERFACE {
+                own.push(jr.node);
+            }
+            println!(
+                "join: node {} at t={}ms -> 参加ステップ {}",
+                jr.node,
+                jr.t_us / 1000,
+                jr.step
+            );
+            for ifc in own {
+                let series = &sim.residuals[&ifc];
+                let (pk_step, pk) = series
+                    .iter()
+                    .fold((0u64, 0.0f64), |acc, &(s, r)| if r > acc.1 { (s, r) } else { acc });
+                // 回復時間 = 参加からのステップ数で、乱れピーク後に残差が最初に
+                // 閾値を下回るまで (乱れは参加の数十ステップ後にピークを迎えることが
+                // あるため、探索はピーク以降から)。ピークが閾値未満なら乱れ自体が
+                // 平常変動の範囲内なので「対象外」とする。
+                let recovery = |threshold: f64| -> String {
+                    if pk < threshold {
+                        return "対象外 (ピークが閾値未満)".to_string();
+                    }
+                    series
+                        .iter()
+                        .filter(|&&(s, _)| s >= pk_step)
+                        .find(|&&(_, r)| r < threshold)
+                        .map(|&(s, _)| format!("{} steps", s - jr.step))
+                        .unwrap_or_else(|| "未回復".to_string())
+                };
+                println!(
+                    "  iface {}: 乱れピーク={:.3e} (step {}), 回復時間(<2x baseline)={}",
+                    ifc,
+                    pk,
+                    pk_step,
+                    recovery(2.0 * baseline)
+                );
+                // 補助指標: 残差は局所曲率に依存し界面ごとに水準が違うため、
+                // 参加界面自身の定常値 (末尾25%中央値) に対する回復も併記する
+                let mut tail: Vec<f64> = series[series.len() - series.len() / 4..]
+                    .iter()
+                    .map(|&(_, r)| r)
+                    .collect();
+                let own_steady = median(&mut tail);
+                println!(
+                    "           自定常値={:.3e} (末尾25%中央値), 回復時間(<2x 自定常)={}",
+                    own_steady,
+                    recovery(2.0 * own_steady)
+                );
+            }
+        }
+    }
+    if let Some(path) = &cfg.residual_csv {
+        let mut out = String::from("iface,step,residual\n");
+        let mut keys: Vec<&usize> = sim.residuals.keys().collect();
+        keys.sort();
+        for k in keys {
+            for &(s, r) in &sim.residuals[k] {
+                out.push_str(&format!("{},{},{:e}\n", k, s, r));
+            }
+        }
+        std::fs::write(path, out).expect("write residual csv");
+        eprintln!("[sim] residual csv written: {path}");
+    }
     println!(
         "virtual makespan = {:.1} ms (ideal compute = {:.1} ms, sync overhead = {:.1}%)",
         makespan_ms,
@@ -773,5 +1195,121 @@ fn main() {
     println!("RESULT: {}", if pass { "PASS (bit-exact)" } else { "FAIL" });
     if !pass {
         std::process::exit(1);
+    }
+}
+
+/// 複合参照解 (シナリオC): 「同じイベント時系列を単一の配列で再現する逐次計算」。
+/// 演算式・適用順序はアクター (heat1d-actor) と厳密に同一に保つこと。
+/// - 各ノードの初期化はアクターの dyne_init と同じ式 (x = x0 + i*h_node, sin_pi)。
+/// - 1ステップの更新は u[i] + r*(u[i-1] - 2.0*u[i] + u[i+1])。区間端は
+///   BC_DIRICHLET_ZERO 相当の 0.0 (不在領域に接する面もβ意味論で外部境界 u=0)。
+/// - 界面交換で結ばれた隣接ノード群は単一配列の連続区間と数値的に等価
+///   (M-S0でビット一致を実証済み) なので、アクティブな連続区間ごとに更新する。
+/// - 参加ステップ S のノードは、ステップ S の計算前に sin 初期値で編入される。
+fn composite_reference(
+    cfg: &Config,
+    starts: &[(usize, usize)],
+    h: f64,
+    absent_at_start: &[bool],
+    joins: &[JoinRec],
+) -> Vec<f64> {
+    let n_nodes = starts.len();
+    let n_pts = starts[n_nodes - 1].0 + starts[n_nodes - 1].1;
+    let r = cfg.alpha * cfg.dt / (h * h);
+    let mut u = vec![0.0f64; n_pts];
+    let mut un = vec![0.0f64; n_pts];
+    let mut active: Vec<bool> = absent_at_start.iter().map(|&a| !a).collect();
+    // dyne_init と同一の初期化 (bcがDirichletの端は0に丸め落とす)
+    let fill = |u: &mut Vec<f64>, i: usize, bcl: u32, bcr: u32| {
+        let (s, cnt) = starts[i];
+        let x0 = (s as f64) * h;
+        let x1 = ((s + cnt - 1) as f64) * h;
+        let hn = (x1 - x0) / ((cnt - 1) as f64);
+        for k in 0..cnt {
+            u[s + k] = sin_pi(x0 + (k as f64) * hn);
+        }
+        if bcl == BC_DIRICHLET {
+            u[s] = 0.0;
+        }
+        if bcr == BC_DIRICHLET {
+            u[s + cnt - 1] = 0.0;
+        }
+    };
+    for i in 0..n_nodes {
+        if active[i] {
+            // 起動時のbc: 外縁と不在隣接の面が Dirichlet (シミュレータ本体と同一の規則)
+            let bcl = if i == 0 || absent_at_start[i - 1] {
+                BC_DIRICHLET
+            } else {
+                BC_INTERFACE
+            };
+            let bcr = if i == n_nodes - 1 || absent_at_start[i + 1] {
+                BC_DIRICHLET
+            } else {
+                BC_INTERFACE
+            };
+            fill(&mut u, i, bcl, bcr);
+        }
+    }
+    for step in 0..cfg.steps {
+        // このステップから参加するノードを sin 初期値で編入 (実行時に記録したbcを使う)
+        for jr in joins.iter().filter(|j| j.step == step) {
+            active[jr.node] = true;
+            fill(&mut u, jr.node, jr.bc.0, jr.bc.1);
+        }
+        // アクティブな連続区間ごとに1ステップ。区間端は 0.0 (グローバル境界または
+        // 不在領域への面 = どちらも Dirichlet 0)
+        let mut i = 0;
+        while i < n_nodes {
+            if !active[i] {
+                i += 1;
+                continue;
+            }
+            let p = i;
+            while i + 1 < n_nodes && active[i + 1] {
+                i += 1;
+            }
+            let a = starts[p].0;
+            let b = starts[i].0 + starts[i].1 - 1;
+            for k in a + 1..b {
+                un[k] = u[k] + r * (u[k - 1] - 2.0 * u[k] + u[k + 1]);
+            }
+            un[a] = 0.0;
+            un[b] = 0.0;
+            i += 1;
+        }
+        std::mem::swap(&mut u, &mut un);
+    }
+    u
+}
+
+/// sin(pi*x) — アクター (heat1d-actor) の sin_pi と厳密に同一の式 (複合参照解用)。
+/// アクター側を変更したら必ずここも揃えること (ビット一致の前提)。
+/// ※アクター側にある「上書きされる無効な最初の代入」は数値に影響しないため省略。
+fn sin_pi(x: f64) -> f64 {
+    const PI: f64 = std::f64::consts::PI;
+    let mut t = PI * x;
+    // 引数簡約: sin(t) = sin(pi - t)
+    if t > PI / 2.0 {
+        t = PI - t;
+    }
+    let t2 = t * t;
+    // テイラー: t - t^3/3! + t^5/5! - t^7/7! + t^9/9! - t^11/11!
+    t * (1.0
+        + t2 * (-1.0 / 6.0
+            + t2 * (1.0 / 120.0
+                + t2 * (-1.0 / 5040.0 + t2 * (1.0 / 362880.0 + t2 * (-1.0 / 39916800.0))))))
+}
+
+fn median(v: &mut Vec<f64>) -> f64 {
+    if v.is_empty() {
+        return f64::NAN;
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let n = v.len();
+    if n % 2 == 1 {
+        v[n / 2]
+    } else {
+        0.5 * (v[n / 2 - 1] + v[n / 2])
     }
 }
