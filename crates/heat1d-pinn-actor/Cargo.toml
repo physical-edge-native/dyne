@@ -1,0 +1,19 @@
+[package]
+name = "heat1d-pinn-actor"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+# cdylib = WASMアクター本体 / rlib = ネイティブの単体テストと参照実装 (共有クレート方針)
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# 純Rustの数学関数 (tanh/sqrt/exp)。プラットフォーム非依存で決定論を保つ
+libm = "0.2"
+
+[profile.release]
+panic = "abort"
+opt-level = "z"
+lto = true
+
+[workspace]

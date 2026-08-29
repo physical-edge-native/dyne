@@ -3,6 +3,7 @@
 /target/
 # heat1d-actor はワークスペース外で別ビルドするため個別に指定
 /crates/heat1d-actor/target/
+/crates/heat1d-pinn-actor/target/
 
 # Cargo.lock の方針:
 # - dyne-host はバイナリなので Cargo.lock をコミットするのが Rust の慣例

@@ -75,7 +75,37 @@ struct Config {
     adds: Vec<(usize, u64)>,
     /// 界面残差 |grad_A - grad_B| の毎ステップ記録をCSVに書き出す先 (省略可)
     residual_csv: Option<String>,
+    /// M-S1b: 学習型アクター (heat1d-pinn-actor) のハイパーパラメータ (dyne_cfg のキー, 値)。
+    /// 全インスタンス (初期・handover復帰・ADD・bc切替の再init) の dyne_init 前に適用する
+    pinn_cfg: Vec<(u32, f64)>,
+    /// M-S1b: ADDで参加するインスタンスだけ温め反復回数を上書き (白紙=0 との比較用)
+    add_warm: Option<f64>,
+    /// M-S1b: GROW/SHRINK。(node, t_us, new_width)。dyne_resize を持つアクターのみ
+    resizes: Vec<(usize, u64, u32)>,
+    /// ノードごと・ステップごとの参照解との誤差をCSVに書き出す先 (省略可)
+    error_csv: Option<String>,
     quiet: bool,
+}
+
+/// --pinn のキー名 → dyne_cfg のキー番号 (heat1d-pinn-actor の CFG_* と一致させる)
+fn pinn_key(name: &str) -> u32 {
+    match name {
+        "iters" => 0,
+        "lr" => 1,
+        "warm" => 2,
+        "width" => 3,
+        "depth" => 4,
+        "lambda_b" => 5,
+        "seed" => 6,
+        "warm_resize" => 7,
+        "lambda_g" => 8,
+        "opt" => 9,
+        "lr_step" => 10,
+        "momentum" => 11,
+        "iface" => 12,
+        "sub" => 13,
+        _ => panic!("--pinn: unknown key {name}"),
+    }
 }
 
 fn parse_args() -> Config {
@@ -99,6 +129,10 @@ fn parse_args() -> Config {
         partitions: Vec::new(),
         adds: Vec::new(),
         residual_csv: None,
+        pinn_cfg: Vec::new(),
+        add_warm: None,
+        resizes: Vec::new(),
+        error_csv: None,
         quiet: false,
     };
     let args: Vec<String> = std::env::args().collect();
@@ -138,6 +172,26 @@ fn parse_args() -> Config {
                     .push((n.parse().unwrap(), t.parse::<u64>().unwrap() * 1000));
             }
             "--residual-csv" => c.residual_csv = Some(val()),
+            "--error-csv" => c.error_csv = Some(val()),
+            "--pinn" => {
+                // key=val[,key=val...]: 学習型アクターのハイパーパラメータ
+                for kv in val().split(',') {
+                    let (k, v) = kv.split_once('=').expect("--pinn key=val[,key=val]");
+                    c.pinn_cfg.push((pinn_key(k), v.parse().expect("--pinn value")));
+                }
+            }
+            "--add-warm" => c.add_warm = Some(val().parse().unwrap()),
+            "--resize" => {
+                // node@t_ms:width: 仮想時刻 t に隠れ層の幅を変更 (GROW/SHRINK)
+                let v = val();
+                let (n, rest) = v.split_once('@').expect("--resize node@t_ms:width");
+                let (t, w) = rest.split_once(':').expect("--resize node@t_ms:width");
+                c.resizes.push((
+                    n.parse().unwrap(),
+                    t.parse::<u64>().unwrap() * 1000,
+                    w.parse().unwrap(),
+                ));
+            }
             "--pause" => {
                 // node@start_ms:end_ms
                 let v = val();
@@ -216,6 +270,15 @@ struct Actor {
     get: wasmi::TypedFunc<u32, f64>,
     x: wasmi::TypedFunc<u32, f64>,
     len: wasmi::TypedFunc<(), u32>,
+    // ---- 学習型アクター (heat1d-pinn-actor) の任意エクスポート。差分法アクターには無い ----
+    /// ハイパーパラメータ設定 (dyne_init の前に呼ぶ)
+    cfg: Option<wasmi::TypedFunc<(u32, f64), ()>>,
+    /// 境界条件の切り替え (重みを保ったまま。無ければ再init+状態復元で代替)
+    set_bc: Option<wasmi::TypedFunc<(u32, u32), ()>>,
+    /// 隠れ層の幅変更 = GROW/SHRINK
+    resize: Option<wasmi::TypedFunc<u32, i32>>,
+    /// 現在のモデルを格子点で評価 (ステップを進めない。機能保存の検査用)
+    eval: Option<wasmi::TypedFunc<u32, f64>>,
     /// wasm宣言の線形メモリ(ページ) — RAM上限チェック用
     memory_pages: u64,
 }
@@ -248,9 +311,29 @@ impl Actor {
             get: func!("dyne_get", u32, f64),
             x: func!("dyne_x", u32, f64),
             len: func!("dyne_len", (), u32),
+            cfg: instance.get_typed_func::<(u32, f64), ()>(&store, "dyne_cfg").ok(),
+            set_bc: instance.get_typed_func::<(u32, u32), ()>(&store, "dyne_set_bc").ok(),
+            resize: instance.get_typed_func::<u32, i32>(&store, "dyne_resize").ok(),
+            eval: instance.get_typed_func::<u32, f64>(&store, "dyne_eval").ok(),
             store,
             memory_pages,
         }
+    }
+
+    /// load + ハイパーパラメータ適用 (学習型アクターのみ。差分法アクターでは無視)
+    fn load_with(engine: &wasmi::Engine, module: &wasmi::Module, pinn_cfg: &[(u32, f64)]) -> Self {
+        let mut a = Actor::load(engine, module);
+        if let Some(f) = a.cfg {
+            for &(k, v) in pinn_cfg {
+                f.call(&mut a.store, (k, v)).unwrap();
+            }
+        }
+        a
+    }
+
+    /// 学習型アクターか (dyne_cfg を持つ = heat1d-pinn-actor)
+    fn is_learning(&self) -> bool {
+        self.cfg.is_some()
     }
 }
 
@@ -328,6 +411,18 @@ struct JoinRec {
     t_us: u64,
 }
 
+/// GROW/SHRINK の適用記録 (レポート用)
+#[derive(Clone, Debug)]
+struct ResizeRec {
+    node: usize,
+    t_us: u64,
+    step: u64,
+    width: u32,
+    /// 変更直後にモデル出力がビット単位で保たれた格子点数 (GROW は全点保存が期待値)
+    preserved: usize,
+    n: usize,
+}
+
 struct Sim {
     cfg: Config,
     nodes: Vec<Node>,
@@ -344,9 +439,70 @@ struct Sim {
     /// 界面残差 |grad_A - grad_B| の時系列: 界面ID -> (step, 残差)。
     /// 界面の左側ノードが計算開始直前に記録する (M-S1cのT2トリガーのセンサー前倒し)。
     residuals: HashMap<usize, Vec<(u64, f64)>>,
+    /// M-S1b: GROW/SHRINK の適用記録
+    resize_log: Vec<ResizeRec>,
+    /// --error-csv 指定時: ステップ完了ごとの各ノードの状態 (node, step, u[])
+    snap_log: Vec<(usize, u64, Vec<f64>)>,
 }
 
 impl Sim {
+    /// 時刻を過ぎた GROW/SHRINK (--resize) を適用する。
+    /// 適用前後で dyne_eval を比較し、機能保存 (ビット一致点数) を記録する。
+    fn apply_resizes(&mut self) {
+        let due: Vec<(usize, u64, u32)> = self
+            .cfg
+            .resizes
+            .iter()
+            .filter(|&&(_, t, _)| self.now_us >= t)
+            .copied()
+            .collect();
+        if due.is_empty() {
+            return;
+        }
+        let now = self.now_us;
+        self.cfg.resizes.retain(|&(_, t, _)| now < t);
+        for (node, t, width) in due {
+            let nd = &mut self.nodes[node];
+            assert!(nd.present, "--resize: node {node} is absent");
+            let (Some(resize), Some(eval)) = (nd.actor.resize, nd.actor.eval) else {
+                eprintln!("[sim] resize ignored: node {node} のアクターは dyne_resize を持たない");
+                continue;
+            };
+            let n = nd.init_args.0;
+            let before: Vec<f64> = (0..n)
+                .map(|i| eval.call(&mut nd.actor.store, i).unwrap())
+                .collect();
+            let rc = resize.call(&mut nd.actor.store, width).unwrap();
+            assert_eq!(rc, 0, "dyne_resize({width}) failed on node {node}");
+            let after: Vec<f64> = (0..n)
+                .map(|i| eval.call(&mut nd.actor.store, i).unwrap())
+                .collect();
+            let preserved = before
+                .iter()
+                .zip(&after)
+                .filter(|(a, b)| a.to_bits() == b.to_bits())
+                .count();
+            let step = nd.cur_step;
+            self.resize_log.push(ResizeRec {
+                node,
+                t_us: t,
+                step,
+                width,
+                preserved,
+                n: n as usize,
+            });
+            eprintln!(
+                "[sim] resize applied: node {} width -> {} at t={}ms (step {}), model output preserved {}/{} pts bit-exact",
+                node,
+                width,
+                self.now_us / 1000,
+                step,
+                preserved,
+                n
+            );
+        }
+    }
+
     fn schedule(&mut self, t: u64, ev: Ev) {
         self.events.push(Some(ev));
         let idx = self.events.len() - 1;
@@ -398,7 +554,7 @@ impl Sim {
                 }
             }
             // 新インスタンス構築 (旧インスタンスは破棄 = REMOVE、新設 = ADD)
-            let mut actor = Actor::load(&self.engine, &self.module);
+            let mut actor = Actor::load_with(&self.engine, &self.module, &self.cfg.pinn_cfg);
             let (n, x0, x1, bcl, bcr) = self.nodes[node].init_args;
             let rc = actor
                 .init
@@ -497,7 +653,11 @@ impl Sim {
                     .iface_adds
                     .push((node, FACE_LEFT, s_join));
             }
-            let mut actor = Actor::load(&self.engine, &self.module);
+            let mut actor = Actor::load_with(&self.engine, &self.module, &self.cfg.pinn_cfg);
+            // 学習型アクター: ADDで参加するインスタンスの温め回数を上書き (--add-warm)
+            if let (Some(w), Some(f)) = (self.cfg.add_warm, actor.cfg) {
+                f.call(&mut actor.store, (2, w)).unwrap();
+            }
             let (n, x0, x1, _, _) = self.nodes[node].init_args;
             let rc = actor
                 .init
@@ -561,7 +721,27 @@ impl Sim {
                 bcr = BC_INTERFACE;
             }
         }
-        let mut actor = Actor::load(&self.engine, &self.module);
+        if let Some(set_bc) = self.nodes[node].actor.set_bc {
+            // 学習型アクター: 重み (学習結果) を保ったまま境界条件だけ切り替える。
+            // 再init+状態復元だと重みが乱数初期値に戻り、標本からの温め直しになる。
+            let nd = &mut self.nodes[node];
+            for &(_, f) in &due {
+                set_bc.call(&mut nd.actor.store, (f, BC_INTERFACE)).unwrap();
+            }
+            nd.init_args = (n, x0, x1, bcl, bcr);
+            for &(j, f) in &due {
+                nd.ifaces.push((j, f));
+            }
+            eprintln!(
+                "[sim] iface registered (in-place bc switch, weights kept): node {} interface {:?} from step {} (t={}ms)",
+                node,
+                due.iter().map(|&(j, _)| j).collect::<Vec<_>>(),
+                step,
+                self.now_us / 1000
+            );
+            return;
+        }
+        let mut actor = Actor::load_with(&self.engine, &self.module, &self.cfg.pinn_cfg);
         let rc = actor
             .init
             .call(
@@ -791,6 +971,14 @@ impl Sim {
     }
 
     fn on_step_done(&mut self, node: usize) {
+        if self.cfg.error_csv.is_some() {
+            let nd = &mut self.nodes[node];
+            let n = nd.init_args.0;
+            let u: Vec<f64> = (0..n)
+                .map(|i| nd.actor.get.call(&mut nd.actor.store, i).unwrap())
+                .collect();
+            self.snap_log.push((node, nd.cur_step, u));
+        }
         let next = self.nodes[node].cur_step + 1;
         if next >= self.cfg.steps {
             self.nodes[node].phase = Phase::Done;
@@ -816,6 +1004,7 @@ impl Sim {
             self.now_us = t;
             self.apply_handovers();
             self.apply_adds();
+            self.apply_resizes();
             let ev = self.events[idx].take().expect("event consumed twice");
             // 一時停止中のノード宛イベントは停止解除時刻へ繰り延べ
             let target = match &ev {
@@ -867,7 +1056,7 @@ fn main() {
     }
 
     // RAM上限チェック(実機校正: 線形メモリ+ランタイム概算がノード上限を超えないか)
-    let probe = Actor::load(&engine, &module);
+    let probe = Actor::load_with(&engine, &module, &cfg.pinn_cfg);
     let linear_bytes = probe.memory_pages * 64 * 1024;
     let runtime_overhead = 10 * 1024; // M1実測: 使用129KBのうち線形メモリ128KB → 管理構造は約1KB+余裕
     let need = linear_bytes + runtime_overhead;
@@ -908,7 +1097,7 @@ fn main() {
         } else {
             BC_INTERFACE
         };
-        let mut actor = Actor::load(&engine, &module);
+        let mut actor = Actor::load_with(&engine, &module, &cfg.pinn_cfg);
         if present {
             let rc = actor
                 .init
@@ -962,6 +1151,8 @@ fn main() {
         module,
         join_log: Vec::new(),
         residuals: HashMap::new(),
+        resize_log: Vec::new(),
+        snap_log: Vec::new(),
     };
     sim.run();
     assert_eq!(
@@ -973,8 +1164,9 @@ fn main() {
     // 参照解:
     //   ADDなし → 単一ノード参照解 (同一wasm・全域) — 従来どおり
     //   ADDあり → 複合参照解 (同じイベント時系列を単一配列で再現、ホスト側純Rust)
+    let mut ref_history: Vec<Vec<f64>> = Vec::new();
     let reference: Vec<f64> = if cfg.adds.is_empty() {
-        let mut single = Actor::load(&sim.engine, &sim.module);
+        let mut single = Actor::load_with(&sim.engine, &sim.module, &cfg.pinn_cfg);
         let rc = single
             .init
             .call(
@@ -990,8 +1182,18 @@ fn main() {
             .map(|i| single.get.call(&mut single.store, i as u32).unwrap())
             .collect()
     } else {
-        composite_reference(&cfg, &starts, h, &absent_at_start, &sim.join_log)
+        let (r, hist) = composite_reference(
+            &cfg,
+            &starts,
+            h,
+            &absent_at_start,
+            &sim.join_log,
+            cfg.error_csv.is_some(),
+        );
+        ref_history = hist;
+        r
     };
+    let learning = sim.nodes[0].actor.is_learning();
 
     let mut exact = 0usize;
     let mut max_diff = 0.0f64;
@@ -999,6 +1201,7 @@ fn main() {
     let mut linf = 0.0f64;
     let t_final = cfg.dt * (cfg.steps as f64);
     let decay = (-cfg.alpha * std::f64::consts::PI.powi(2) * t_final).exp();
+    let mut node_linf_ref = vec![0.0f64; n_nodes];
     for i in 0..n_nodes {
         let (s, cnt) = starts[i];
         for k in 0..cnt {
@@ -1012,6 +1215,7 @@ fn main() {
                 exact += 1;
             }
             max_diff = max_diff.max(d);
+            node_linf_ref[i] = node_linf_ref[i].max(d);
             let e = (u - (std::f64::consts::PI * x).sin() * decay).abs();
             l2 += e * e;
             linf = linf.max(e);
@@ -1054,10 +1258,30 @@ fn main() {
         println!("adds={:?} (node@us, β=領域拡張)", cfg.adds);
     }
     let ref_name = if cfg.adds.is_empty() { "single" } else { "composite" };
-    println!(
-        "bit-exact vs {}: {}/{} points, max_diff={:.3e}",
-        ref_name, exact, n_pts, max_diff
-    );
+    if learning {
+        // 学習型アクター: モデルが違うのでビット一致は定義されない。誤差で報告する。
+        // 参照解は single = 全域1ノードの同一アクター (学習型同士)、composite = 差分法の逐次計算。
+        println!(
+            "actor = learning (heat1d-pinn-actor), pinn_cfg={:?} add_warm={:?}",
+            cfg.pinn_cfg, cfg.add_warm
+        );
+        println!(
+            "bit-exact vs {}: n/a (学習型) | Linf vs {} = {:.3e}, per-node Linf = [{}]",
+            ref_name,
+            ref_name,
+            max_diff,
+            node_linf_ref
+                .iter()
+                .map(|v| format!("{:.1e}", v))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    } else {
+        println!(
+            "bit-exact vs {}: {}/{} points, max_diff={:.3e}",
+            ref_name, exact, n_pts, max_diff
+        );
+    }
     if cfg.adds.is_empty() {
         println!("L2 vs analytic = {:.3e}, Linf = {:.3e}", l2, linf);
     } else {
@@ -1169,6 +1393,49 @@ fn main() {
             }
         }
     }
+    if !sim.resize_log.is_empty() {
+        println!("==== RESIZE REPORT (GROW/SHRINK) ====");
+        for r in &sim.resize_log {
+            println!(
+                "node {} width -> {} at t={}ms (step {}): model output preserved {}/{} pts bit-exact ({})",
+                r.node,
+                r.width,
+                r.t_us / 1000,
+                r.step,
+                r.preserved,
+                r.n,
+                if r.preserved == r.n { "機能保存" } else { "関数が変化 (SHRINK は温めで回復)" }
+            );
+        }
+    }
+    if let Some(path) = &cfg.error_csv {
+        // ノードごと・ステップごとの参照解との誤差。参照解は ADD なし = 解析解、
+        // ADD あり = 複合参照解の履歴 (領域拡張シナリオでは解析解が定義できないため)
+        let mut out = String::from("node,step,t,linf,l2\n");
+        sim.snap_log.sort_by_key(|(n, s, _)| (*s, *n));
+        for (node, step, u) in &sim.snap_log {
+            let (s, cnt) = starts[*node];
+            let t = cfg.dt * ((*step + 1) as f64);
+            let dec = (-cfg.alpha * std::f64::consts::PI.powi(2) * t).exp();
+            let mut linf = 0.0f64;
+            let mut l2 = 0.0f64;
+            for k in 0..cnt {
+                let gi = s + k;
+                let r = if cfg.adds.is_empty() {
+                    (std::f64::consts::PI * (gi as f64) * h).sin() * dec
+                } else {
+                    ref_history[*step as usize][gi]
+                };
+                let e = (u[k] - r).abs();
+                linf = linf.max(e);
+                l2 += e * e;
+            }
+            l2 = (l2 / (cnt as f64)).sqrt();
+            out.push_str(&format!("{},{},{:e},{:e},{:e}\n", node, step, t, linf, l2));
+        }
+        std::fs::write(path, out).expect("write error csv");
+        eprintln!("[sim] error csv written: {path}");
+    }
     if let Some(path) = &cfg.residual_csv {
         let mut out = String::from("iface,step,residual\n");
         let mut keys: Vec<&usize> = sim.residuals.keys().collect();
@@ -1191,8 +1458,19 @@ fn main() {
         "msgs: sent={} lost={} resend={} replay={} | max node wait = {:.1} ms",
         sent, lost, resend, replay, max_wait_ms
     );
-    let pass = exact == n_pts;
-    println!("RESULT: {}", if pass { "PASS (bit-exact)" } else { "FAIL" });
+    let pass = if learning { max_diff.is_finite() } else { exact == n_pts };
+    if learning {
+        println!(
+            "RESULT: {}",
+            if pass {
+                format!("DONE (learning actor, Linf vs {ref_name} = {max_diff:.3e})")
+            } else {
+                "FAIL (NaN/inf in learning actor)".to_string()
+            }
+        );
+    } else {
+        println!("RESULT: {}", if pass { "PASS (bit-exact)" } else { "FAIL" });
+    }
     if !pass {
         std::process::exit(1);
     }
@@ -1212,7 +1490,9 @@ fn composite_reference(
     h: f64,
     absent_at_start: &[bool],
     joins: &[JoinRec],
-) -> Vec<f64> {
+    want_history: bool,
+) -> (Vec<f64>, Vec<Vec<f64>>) {
+    let mut history = Vec::new();
     let n_nodes = starts.len();
     let n_pts = starts[n_nodes - 1].0 + starts[n_nodes - 1].1;
     let r = cfg.alpha * cfg.dt / (h * h);
@@ -1279,8 +1559,11 @@ fn composite_reference(
             i += 1;
         }
         std::mem::swap(&mut u, &mut un);
+        if want_history {
+            history.push(u.clone());
+        }
     }
-    u
+    (u, history)
 }
 
 /// sin(pi*x) — アクター (heat1d-actor) の sin_pi と厳密に同一の式 (複合参照解用)。
