@@ -34,6 +34,16 @@
 //!                          ビット一致。界面残差 |grad_A - grad_B| を毎ステップ記録し、
 //!                          参加直後の乱れピークと回復時間を報告する。
 //!   --residual-csv f.csv … 界面残差の時系列をCSVへ書き出す (省略可)
+//!
+//! M-S1c (T2 自動トリガー, 2026-08-29):
+//!   --auto-grow on | ratio=4,window=10,base=100,cooldown=100,step=8,max=32,min=20
+//!       各界面の残差を移動窓 (直近 window ステップの中央値) で監視し、移動ベースライン
+//!       (その直前 base ステップの中央値) の ratio 倍を超えたら、界面を挟む両ノードの
+//!       隠れ層幅を step だけ広げる (GROW、max まで)。ヒステリシス: 発火後 cooldown
+//!       ステップは再評価せず、さらに残差が ratio/2 倍を下回って再武装するまで発火しない。
+//!       界面の履歴が min 未満 (参加直後の新界面) の間は隣の界面のベースラインで代用する。
+//!   --event-csv f.csv … 参加・GROW/SHRINK・自動GROW・handover の時系列 (ダッシュボード用)
+//!   --field-csv f.csv [--field-every k] … 温度場のスナップショット (kステップごと)
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
@@ -84,7 +94,58 @@ struct Config {
     resizes: Vec<(usize, u64, u32)>,
     /// ノードごと・ステップごとの参照解との誤差をCSVに書き出す先 (省略可)
     error_csv: Option<String>,
+    /// M-S1c: T2 自動トリガー (None = 無効)
+    auto_grow: Option<AutoGrow>,
+    /// イベント時系列 (参加・幅変更・handover) の CSV 出力先
+    event_csv: Option<String>,
+    /// 温度場スナップショットの CSV 出力先
+    field_csv: Option<String>,
+    /// 温度場スナップショットの間隔 (ステップ)
+    field_every: u64,
     quiet: bool,
+}
+
+/// M-S1c: 界面残差による自動 GROW (T2) のパラメータ
+#[derive(Clone, Copy, Debug)]
+struct AutoGrow {
+    /// 発火条件: 現在値 > ratio × ベースライン
+    ratio: f64,
+    /// 現在値 = 直近 window ステップの残差の中央値
+    window: usize,
+    /// ベースライン = 現在窓の直前 base ステップの残差の中央値
+    base: usize,
+    /// ベースラインに必要な最小標本数 (未満なら隣の界面で代用)
+    min: usize,
+    /// 発火後の不応期 (ステップ)
+    cooldown: u64,
+    /// 1回の GROW で広げる幅
+    step: u32,
+    /// 幅の上限
+    max: u32,
+}
+
+impl AutoGrow {
+    fn parse(spec: &str) -> Self {
+        let mut a = AutoGrow { ratio: 4.0, window: 10, base: 100, min: 20, cooldown: 100, step: 8, max: 32 };
+        if spec == "on" || spec.is_empty() {
+            return a;
+        }
+        for kv in spec.split(',') {
+            let (k, v) = kv.split_once('=').expect("--auto-grow key=val[,key=val] | on");
+            match k {
+                "ratio" => a.ratio = v.parse().unwrap(),
+                "window" => a.window = v.parse().unwrap(),
+                "base" => a.base = v.parse().unwrap(),
+                "min" => a.min = v.parse().unwrap(),
+                "cooldown" => a.cooldown = v.parse().unwrap(),
+                "step" => a.step = v.parse().unwrap(),
+                "max" => a.max = v.parse().unwrap(),
+                _ => panic!("--auto-grow: unknown key {k}"),
+            }
+        }
+        assert!(a.window >= 1 && a.min >= 1 && a.step >= 1);
+        a
+    }
 }
 
 /// --pinn のキー名 → dyne_cfg のキー番号 (heat1d-pinn-actor の CFG_* と一致させる)
@@ -133,6 +194,10 @@ fn parse_args() -> Config {
         add_warm: None,
         resizes: Vec::new(),
         error_csv: None,
+        auto_grow: None,
+        event_csv: None,
+        field_csv: None,
+        field_every: 10,
         quiet: false,
     };
     let args: Vec<String> = std::env::args().collect();
@@ -173,6 +238,10 @@ fn parse_args() -> Config {
             }
             "--residual-csv" => c.residual_csv = Some(val()),
             "--error-csv" => c.error_csv = Some(val()),
+            "--event-csv" => c.event_csv = Some(val()),
+            "--field-csv" => c.field_csv = Some(val()),
+            "--field-every" => c.field_every = val().parse().unwrap(),
+            "--auto-grow" => c.auto_grow = Some(AutoGrow::parse(&val())),
             "--pinn" => {
                 // key=val[,key=val...]: 学習型アクターのハイパーパラメータ
                 for kv in val().split(',') {
@@ -423,6 +492,39 @@ struct ResizeRec {
     n: usize,
 }
 
+/// 自動 GROW (T2) の発火記録
+#[derive(Clone, Debug)]
+struct AutoRec {
+    step: u64,
+    t_us: u64,
+    iface: usize,
+    node: usize,
+    from: u32,
+    to: u32,
+    current: f64,
+    baseline: f64,
+}
+
+/// 界面ごとのトリガー状態 (ヒステリシス)
+#[derive(Clone, Copy, Debug)]
+struct TrigState {
+    last_fire: Option<u64>,
+    armed: bool,
+}
+
+/// ダッシュボード向けのイベント
+#[derive(Clone, Debug)]
+struct EventRec {
+    kind: &'static str,
+    step: u64,
+    t_us: u64,
+    node: usize,
+    iface: Option<usize>,
+    width: Option<u32>,
+    current: f64,
+    baseline: f64,
+}
+
 struct Sim {
     cfg: Config,
     nodes: Vec<Node>,
@@ -443,6 +545,16 @@ struct Sim {
     resize_log: Vec<ResizeRec>,
     /// --error-csv 指定時: ステップ完了ごとの各ノードの状態 (node, step, u[])
     snap_log: Vec<(usize, u64, Vec<f64>)>,
+    /// M-S1c: ノードごとの現在の隠れ層幅 (学習型のみ意味を持つ。handover 復帰時に引き継ぐ)
+    width: Vec<u32>,
+    /// M-S1c: 界面ごとのトリガー状態
+    trig: HashMap<usize, TrigState>,
+    /// M-S1c: 自動 GROW の発火記録
+    auto_log: Vec<AutoRec>,
+    /// ダッシュボード向けイベント時系列
+    event_log: Vec<EventRec>,
+    /// --field-csv 指定時: (node, step, x[], u[])
+    field_log: Vec<(usize, u64, Vec<f64>, Vec<f64>)>,
 }
 
 impl Sim {
@@ -462,11 +574,25 @@ impl Sim {
         let now = self.now_us;
         self.cfg.resizes.retain(|&(_, t, _)| now < t);
         for (node, t, width) in due {
+            assert!(self.nodes[node].present, "--resize: node {node} is absent");
+            if let Some(r) = self.do_resize(node, width) {
+                self.event_log.push(EventRec {
+                    kind: "resize", step: r.step, t_us: t, node, iface: None,
+                    width: Some(width), current: 0.0, baseline: 0.0,
+                });
+                self.resize_log.push(ResizeRec { t_us: t, ..r });
+            }
+        }
+    }
+
+    /// 幅変更を実行し、前後の機能保存 (ビット一致点数) を記録して返す。
+    /// dyne_resize を持たないアクター (差分法) では None。
+    fn do_resize(&mut self, node: usize, width: u32) -> Option<ResizeRec> {
+        {
             let nd = &mut self.nodes[node];
-            assert!(nd.present, "--resize: node {node} is absent");
             let (Some(resize), Some(eval)) = (nd.actor.resize, nd.actor.eval) else {
                 eprintln!("[sim] resize ignored: node {node} のアクターは dyne_resize を持たない");
-                continue;
+                return None;
             };
             let n = nd.init_args.0;
             let before: Vec<f64> = (0..n)
@@ -483,14 +609,7 @@ impl Sim {
                 .filter(|(a, b)| a.to_bits() == b.to_bits())
                 .count();
             let step = nd.cur_step;
-            self.resize_log.push(ResizeRec {
-                node,
-                t_us: t,
-                step,
-                width,
-                preserved,
-                n: n as usize,
-            });
+            self.width[node] = width;
             eprintln!(
                 "[sim] resize applied: node {} width -> {} at t={}ms (step {}), model output preserved {}/{} pts bit-exact",
                 node,
@@ -500,6 +619,91 @@ impl Sim {
                 preserved,
                 n
             );
+            Some(ResizeRec { node, t_us: self.now_us, step, width, preserved, n: n as usize })
+        }
+    }
+
+    /// M-S1c T2: 界面 j の残差が更新された直後に呼ぶ。移動窓と移動ベースラインを比較し、
+    /// 閾値超過なら界面を挟む両ノードを GROW する。使う情報は界面 j (と履歴不足時は隣の
+    /// 界面) の残差だけ = 界面の両側ノードが自分で持てる局所情報。
+    fn check_trigger(&mut self, j: usize, step: u64) {
+        let Some(ag) = self.cfg.auto_grow else { return };
+        let series = &self.residuals[&j];
+        if series.len() < ag.window {
+            return;
+        }
+        let cur = {
+            let mut w: Vec<f64> = series[series.len() - ag.window..].iter().map(|&(_, r)| r).collect();
+            median(&mut w)
+        };
+        // ベースライン窓 = 現在窓の直前 base 標本
+        let base_of = |v: &Vec<(u64, f64)>| -> Option<f64> {
+            if v.len() < ag.window + ag.min {
+                return None;
+            }
+            let hi = v.len() - ag.window;
+            let lo = hi.saturating_sub(ag.base);
+            let mut b: Vec<f64> = v[lo..hi].iter().map(|&(_, r)| r).collect();
+            Some(median(&mut b))
+        };
+        let baseline = match base_of(series) {
+            Some(b) => b,
+            None => {
+                // 新界面 (参加直後): 隣の界面 j-1, j+1 のベースラインの中央値で代用
+                let mut nb: Vec<f64> = [j.checked_sub(1), Some(j + 1)]
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|k| self.residuals.get(&k).and_then(base_of))
+                    .collect();
+                if nb.is_empty() {
+                    return;
+                }
+                median(&mut nb)
+            }
+        };
+        if baseline <= 0.0 {
+            return;
+        }
+        let st = self.trig.entry(j).or_insert(TrigState { last_fire: None, armed: true });
+        if let Some(lf) = st.last_fire {
+            if step < lf + ag.cooldown {
+                return;
+            }
+        }
+        if !st.armed {
+            if cur < 0.5 * ag.ratio * baseline {
+                st.armed = true;
+            }
+            return;
+        }
+        if cur <= ag.ratio * baseline {
+            return;
+        }
+        // 発火: 界面 j の両側 (ノード j, j+1) を GROW
+        st.armed = false;
+        st.last_fire = Some(step);
+        for node in [j, j + 1] {
+            if node >= self.nodes.len() || !self.nodes[node].present {
+                continue;
+            }
+            let from = self.width[node];
+            if from >= ag.max {
+                eprintln!("[sim] auto-grow: iface {j} step {step} node {node} は幅上限 {} のため見送り", ag.max);
+                continue;
+            }
+            let to = (from + ag.step).min(ag.max);
+            if let Some(r) = self.do_resize(node, to) {
+                eprintln!(
+                    "[sim] auto-grow fired: iface {j} step {step} current={cur:.3e} baseline={baseline:.3e} (x{:.1}) -> node {node} width {from} -> {to}",
+                    cur / baseline
+                );
+                self.auto_log.push(AutoRec { step, t_us: self.now_us, iface: j, node, from, to, current: cur, baseline });
+                self.event_log.push(EventRec {
+                    kind: "auto_grow", step, t_us: self.now_us, node, iface: Some(j),
+                    width: Some(to), current: cur, baseline,
+                });
+                self.resize_log.push(r);
+            }
         }
     }
 
@@ -555,6 +759,10 @@ impl Sim {
             }
             // 新インスタンス構築 (旧インスタンスは破棄 = REMOVE、新設 = ADD)
             let mut actor = Actor::load_with(&self.engine, &self.module, &self.cfg.pinn_cfg);
+            // M-S1c: GROW 済みの幅は引き継ぐ (学習型のみ。差分法では dyne_cfg が無く無視)
+            if let Some(f) = actor.cfg {
+                f.call(&mut actor.store, (3, self.width[node] as f64)).unwrap();
+            }
             let (n, x0, x1, bcl, bcr) = self.nodes[node].init_args;
             let rc = actor
                 .init
@@ -580,6 +788,11 @@ impl Sim {
                     *g = false;
                 }
             }
+            let st = self.nodes[node].cur_step;
+            self.event_log.push(EventRec {
+                kind: "handover", step: st, t_us: self.now_us, node, iface: None,
+                width: None, current: 0.0, baseline: 0.0,
+            });
             eprintln!(
                 "[sim] handover applied: node {} reincarnated at t={}ms (state {} pts carried)",
                 node,
@@ -679,6 +892,10 @@ impl Sim {
                 step: s_join,
                 bc: (bc[0], bc[1]),
                 t_us: t_add,
+            });
+            self.event_log.push(EventRec {
+                kind: "join", step: s_join, t_us: self.now_us, node, iface: None,
+                width: None, current: 0.0, baseline: 0.0,
             });
             eprintln!(
                 "[sim] add applied: node {} joined at t={}ms as step {} (bc=[{},{}], β=領域拡張)",
@@ -892,6 +1109,7 @@ impl Sim {
             };
             let resid = (g - self.nodes[node].recv_grad[k]).abs();
             self.residuals.entry(j).or_default().push((step, resid));
+            self.check_trigger(j, step);
         }
         {
             let n = &mut self.nodes[node];
@@ -971,6 +1189,13 @@ impl Sim {
     }
 
     fn on_step_done(&mut self, node: usize) {
+        if self.cfg.field_csv.is_some() && self.nodes[node].cur_step % self.cfg.field_every == 0 {
+            let nd = &mut self.nodes[node];
+            let n = nd.init_args.0;
+            let xs: Vec<f64> = (0..n).map(|i| nd.actor.x.call(&mut nd.actor.store, i).unwrap()).collect();
+            let us: Vec<f64> = (0..n).map(|i| nd.actor.get.call(&mut nd.actor.store, i).unwrap()).collect();
+            self.field_log.push((node, nd.cur_step, xs, us));
+        }
         if self.cfg.error_csv.is_some() {
             let nd = &mut self.nodes[node];
             let n = nd.init_args.0;
@@ -1139,6 +1364,14 @@ fn main() {
         });
     }
 
+    // 学習型アクターの初期幅 (--pinn width=… 指定があればそれ、無ければアクター既定16)
+    let init_width: u32 = cfg
+        .pinn_cfg
+        .iter()
+        .rev()
+        .find(|&&(k, _)| k == 3)
+        .map(|&(_, v)| v as u32)
+        .unwrap_or(16);
     let mut sim = Sim {
         cfg: cfg.clone(),
         nodes,
@@ -1153,6 +1386,11 @@ fn main() {
         residuals: HashMap::new(),
         resize_log: Vec::new(),
         snap_log: Vec::new(),
+        width: vec![init_width; n_nodes],
+        trig: HashMap::new(),
+        auto_log: Vec::new(),
+        event_log: Vec::new(),
+        field_log: Vec::new(),
     };
     sim.run();
     assert_eq!(
@@ -1407,6 +1645,50 @@ fn main() {
                 if r.preserved == r.n { "機能保存" } else { "関数が変化 (SHRINK は温めで回復)" }
             );
         }
+    }
+    if cfg.auto_grow.is_some() {
+        println!("==== AUTO-GROW REPORT (T2) ====");
+        println!("params = {:?}", cfg.auto_grow.unwrap());
+        println!("fires = {}", sim.auto_log.len());
+        for r in &sim.auto_log {
+            println!(
+                "step {} (t={}ms): iface {} current={:.3e} baseline={:.3e} (x{:.1}) -> node {} width {} -> {}",
+                r.step, r.t_us / 1000, r.iface, r.current, r.baseline, r.current / r.baseline, r.node, r.from, r.to
+            );
+        }
+        let widths: Vec<String> = sim.width.iter().map(|w| w.to_string()).collect();
+        println!("final widths = [{}]", widths.join(","));
+    }
+    if let Some(path) = &cfg.event_csv {
+        let mut out = String::from("kind,step,t_ms,node,iface,width,current,baseline\n");
+        let mut ev = sim.event_log.clone();
+        ev.sort_by_key(|e| (e.t_us, e.step));
+        for e in &ev {
+            out.push_str(&format!(
+                "{},{},{},{},{},{},{:e},{:e}\n",
+                e.kind,
+                e.step,
+                e.t_us / 1000,
+                e.node,
+                e.iface.map(|j| j.to_string()).unwrap_or_default(),
+                e.width.map(|w| w.to_string()).unwrap_or_default(),
+                e.current,
+                e.baseline
+            ));
+        }
+        std::fs::write(path, out).expect("write event csv");
+        eprintln!("[sim] event csv written: {path}");
+    }
+    if let Some(path) = &cfg.field_csv {
+        let mut out = String::from("node,step,i,x,u\n");
+        sim.field_log.sort_by_key(|(n, s, _, _)| (*s, *n));
+        for (node, step, xs, us) in &sim.field_log {
+            for (i, (x, u)) in xs.iter().zip(us).enumerate() {
+                out.push_str(&format!("{},{},{},{:e},{:e}\n", node, step, i, x, u));
+            }
+        }
+        std::fs::write(path, out).expect("write field csv");
+        eprintln!("[sim] field csv written: {path}");
     }
     if let Some(path) = &cfg.error_csv {
         // ノードごと・ステップごとの参照解との誤差。参照解は ADD なし = 解析解、

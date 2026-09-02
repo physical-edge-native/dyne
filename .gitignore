@@ -43,3 +43,8 @@ m2-esp32/dependencies.lock
 
 # AOT実験の生成物 (wamrcで再生成できるためコミットしない)
 *.aot
+
+# demo outputs (scripts/demo_task*.ps1)
+demo_out/
+swarm_out/
+
