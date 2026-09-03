@@ -167,7 +167,29 @@ MTGで見せることを最優先とし、既存の残課題は「後で取り�
   Trig4/Trig5、docs全体)。理論ノートの改訂版配置は会話版の担当分が残り。
 - 発注5: 学習型アクターの安定領域の実測(パラメータ掃引→予想N7へ)。未着手。
 - 発注6(優先): 群れデモ(crates/dyne-swarm)のDyne土台への移植。
-  移植方針の選択肢を提示済み(2026-09-02)、ユーザーの選択待ち。実装は選択後。
+  **案Bで進行中**(2026-09-02ユーザー決定: 差込口=汎用メッセージバッファ
+  [v2と同一規約・固定長・あふれは破棄+計数]、乱数=アクター内蔵+固定式シード
+  導出、受け入れに定量帯93〜98%)。決定の記録は
+  docs\2026-09-02-swarm-port-options.md §6、具体設計は
+  docs\2026-09-02-swarm-port-design.md。
+  第1段=共通基盤の切り出し**完了(2026-09-02)**: crates/dyne-wire(ワイヤ形式v2の
+  単一定義、no_std)と crates/dyne-core(rng/event/net/actor)を新設し、dyne-sim を
+  その上に再構成。全12回帰シナリオ(基本/カオス/pause/partition/handover/ADD/
+  複合/CSV出力/auto-grow/学習型3種)の出力31ファイルが切り出し前とビット一致
+  (Claude Code環境)。単体テスト10件パス。
+  **現在ユーザーの手元でのビット一致確認待ち(確認コマンドは下記)。
+  第2段(群れアクター+dyne-swarm-sim)はその確認後に着手**。
+
+  手元確認コマンド(いずれも PASS (bit-exact) が出ること):
+  ```
+  cargo build --release
+  cd crates\heat1d-actor && cargo build --release --target wasm32-unknown-unknown && cd ..\..
+  target\release\dyne-sim.exe --wasm crates\heat1d-actor\target\wasm32-unknown-unknown\release\heat1d_actor.wasm --nodes 16 --points 65 --steps 2000
+  target\release\dyne-sim.exe --wasm crates\heat1d-actor\target\wasm32-unknown-unknown\release\heat1d_actor.wasm --nodes 16 --points 65 --steps 2000 --loss 0.10 --lat-ms 5 --lat-jitter-ms 3
+  target\release\dyne-sim.exe --wasm crates\heat1d-actor\target\wasm32-unknown-unknown\release\heat1d_actor.wasm --nodes 8 --points 65 --steps 2000 --handover 3@30000:60000
+  target\release\dyne-sim.exe --wasm crates\heat1d-actor\target\wasm32-unknown-unknown\release\heat1d_actor.wasm --nodes 4 --points 65 --steps 2000 --add 3@30000
+  cargo test -p dyne-core -p dyne-wire --release
+  ```
 
 ## 残課題(破棄しない。pivot文書 §4 に準拠。以下は2026-08-26時点の候補の記録)
 

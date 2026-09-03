@@ -1,0 +1,8 @@
+[package]
+name = "dyne-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+wasmi = "0.47"
+dyne-wire = { path = "../dyne-wire" }

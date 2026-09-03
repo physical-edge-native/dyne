@@ -45,13 +45,15 @@
 //!   --event-csv f.csv … 参加・GROW/SHRINK・自動GROW・handover の時系列 (ダッシュボード用)
 //!   --field-csv f.csv [--field-every k] … 温度場のスナップショット (kステップごと)
 
-use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap};
+// 2026-09-02 (発注6・案B): モデル非依存の部品 (wasmi実行ラッパ・決定論乱数・
+// 離散イベント・仮想ネットワーク) を crates/dyne-core へ切り出した。移設のみで
+// ロジックは不変 (全回帰のビット一致で証明)。
 
-const FACE_LEFT: u32 = 0;
-const FACE_RIGHT: u32 = 1;
-const BC_DIRICHLET: u32 = 0;
-const BC_INTERFACE: u32 = 1;
+use std::collections::HashMap;
+
+use dyne_core::actor::{Actor, BC_DIRICHLET, BC_INTERFACE, FACE_LEFT, FACE_RIGHT};
+use dyne_core::event::EventQueue;
+use dyne_core::net::VirtNet;
 
 // ---------- 設定 ----------
 
@@ -303,110 +305,8 @@ fn parse_args() -> Config {
     c
 }
 
-// ---------- 決定論的乱数 (xorshift64*) ----------
-
-struct Rng(u64);
-impl Rng {
-    fn new(seed: u64) -> Self {
-        Rng(seed.max(1))
-    }
-    fn next_u64(&mut self) -> u64 {
-        let mut x = self.0;
-        x ^= x >> 12;
-        x ^= x << 25;
-        x ^= x >> 27;
-        self.0 = x;
-        x.wrapping_mul(0x2545F4914F6CDD1D)
-    }
-    fn uniform(&mut self) -> f64 {
-        (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
-    }
-    fn range_u64(&mut self, hi: u64) -> u64 {
-        if hi == 0 { 0 } else { self.next_u64() % (hi * 2 + 1) }
-    }
-}
-
-// ---------- アクター(wasmi) ----------
-
-struct Actor {
-    store: wasmi::Store<()>,
-    init: wasmi::TypedFunc<(u32, f64, f64, f64, f64, u32, u32), i32>,
-    step: wasmi::TypedFunc<(), ()>,
-    bval: wasmi::TypedFunc<u32, f64>,
-    bgrad: wasmi::TypedFunc<u32, f64>,
-    set_neighbor: wasmi::TypedFunc<(u32, f64, f64), ()>,
-    set: wasmi::TypedFunc<(u32, f64), ()>,
-    get: wasmi::TypedFunc<u32, f64>,
-    x: wasmi::TypedFunc<u32, f64>,
-    len: wasmi::TypedFunc<(), u32>,
-    // ---- 学習型アクター (heat1d-pinn-actor) の任意エクスポート。差分法アクターには無い ----
-    /// ハイパーパラメータ設定 (dyne_init の前に呼ぶ)
-    cfg: Option<wasmi::TypedFunc<(u32, f64), ()>>,
-    /// 境界条件の切り替え (重みを保ったまま。無ければ再init+状態復元で代替)
-    set_bc: Option<wasmi::TypedFunc<(u32, u32), ()>>,
-    /// 隠れ層の幅変更 = GROW/SHRINK
-    resize: Option<wasmi::TypedFunc<u32, i32>>,
-    /// 現在のモデルを格子点で評価 (ステップを進めない。機能保存の検査用)
-    eval: Option<wasmi::TypedFunc<u32, f64>>,
-    /// wasm宣言の線形メモリ(ページ) — RAM上限チェック用
-    memory_pages: u64,
-}
-
-impl Actor {
-    fn load(engine: &wasmi::Engine, module: &wasmi::Module) -> Self {
-        let mut store = wasmi::Store::new(engine, ());
-        let linker: wasmi::Linker<()> = wasmi::Linker::new(engine);
-        let instance = linker
-            .instantiate(&mut store, module)
-            .expect("instantiate")
-            .start(&mut store)
-            .expect("start");
-        let memory_pages = instance
-            .get_memory(&store, "memory")
-            .map(|m| m.size(&store) as u64)
-            .unwrap_or(0);
-        macro_rules! func {
-            ($name:literal, $p:ty, $r:ty) => {
-                instance.get_typed_func::<$p, $r>(&store, $name).expect($name)
-            };
-        }
-        Actor {
-            init: func!("dyne_init", (u32, f64, f64, f64, f64, u32, u32), i32),
-            step: func!("dyne_step", (), ()),
-            bval: func!("dyne_boundary_value", u32, f64),
-            bgrad: func!("dyne_boundary_grad", u32, f64),
-            set_neighbor: func!("dyne_set_neighbor", (u32, f64, f64), ()),
-            set: func!("dyne_set", (u32, f64), ()),
-            get: func!("dyne_get", u32, f64),
-            x: func!("dyne_x", u32, f64),
-            len: func!("dyne_len", (), u32),
-            cfg: instance.get_typed_func::<(u32, f64), ()>(&store, "dyne_cfg").ok(),
-            set_bc: instance.get_typed_func::<(u32, u32), ()>(&store, "dyne_set_bc").ok(),
-            resize: instance.get_typed_func::<u32, i32>(&store, "dyne_resize").ok(),
-            eval: instance.get_typed_func::<u32, f64>(&store, "dyne_eval").ok(),
-            store,
-            memory_pages,
-        }
-    }
-
-    /// load + ハイパーパラメータ適用 (学習型アクターのみ。差分法アクターでは無視)
-    fn load_with(engine: &wasmi::Engine, module: &wasmi::Module, pinn_cfg: &[(u32, f64)]) -> Self {
-        let mut a = Actor::load(engine, module);
-        if let Some(f) = a.cfg {
-            for &(k, v) in pinn_cfg {
-                f.call(&mut a.store, (k, v)).unwrap();
-            }
-        }
-        a
-    }
-
-    /// 学習型アクターか (dyne_cfg を持つ = heat1d-pinn-actor)
-    fn is_learning(&self) -> bool {
-        self.cfg.is_some()
-    }
-}
-
 // ---------- メッセージとイベント ----------
+// (決定論的乱数 Rng とアクター実行ラッパ Actor は dyne-core へ移設)
 
 /// 界面メッセージ。iface はクラスタ全体で一意な界面ID(ノードjとj+1の間 = j)。
 /// M0の「送信者から見た面」方式を廃止(M0知見3)。
@@ -530,10 +430,10 @@ struct Sim {
     nodes: Vec<Node>,
     /// 界面ID j はノード j と j+1 を結ぶ
     now_us: u64,
-    heap: BinaryHeap<Reverse<(u64, u64, usize)>>, // (time, seq, ev_index)
-    events: Vec<Option<Ev>>,
-    seq: u64,
-    rng: Rng,
+    /// 離散イベントキュー (dyne-core::event へ移設)
+    queue: EventQueue<Ev>,
+    /// 仮想ネットワーク (dyne-core::net へ移設。損失・遅延・分断と乱数を保有)
+    net: VirtNet,
     engine: wasmi::Engine,
     module: wasmi::Module,
     /// 実行中に確定したADD参加の記録
@@ -708,10 +608,7 @@ impl Sim {
     }
 
     fn schedule(&mut self, t: u64, ev: Ev) {
-        self.events.push(Some(ev));
-        let idx = self.events.len() - 1;
-        self.seq += 1;
-        self.heap.push(Reverse((t, self.seq, idx)));
+        self.queue.schedule(t, ev);
     }
 
     fn in_pause(&self, node: usize, t: u64) -> Option<u64> {
@@ -988,12 +885,6 @@ impl Sim {
     fn cfg_alpha(&self) -> f64 { self.cfg.alpha }
     fn cfg_dt(&self) -> f64 { self.cfg.dt }
 
-    fn partition_blocks(&self, from: usize, to: usize, t: u64) -> bool {
-        self.cfg.partitions.iter().any(|&(k, a, b)| {
-            t >= a && t < b && ((from < k) != (to < k))
-        })
-    }
-
     /// 界面IDから相手ノードを引く
     fn peer_of(&self, node: usize, iface: usize) -> usize {
         if iface == node { node + 1 } else { node - 1 }
@@ -1024,16 +915,11 @@ impl Sim {
         if is_resend {
             n.stat_resend += 1;
         }
-        if self.partition_blocks(from, to, self.now_us) {
+        // 損失・分断・遅延の判定は dyne-core::net (乱数の消費順も従来と同一)
+        let Some(t) = self.net.transit(from, to, self.now_us) else {
             self.nodes[from].stat_lost += 1;
             return;
-        }
-        if self.cfg.loss > 0.0 && self.rng.uniform() < self.cfg.loss {
-            self.nodes[from].stat_lost += 1;
-            return;
-        }
-        let lat = self.cfg.lat_us + self.rng.range_u64(self.cfg.lat_jitter_us);
-        let t = self.now_us + lat.max(1);
+        };
         self.schedule(t, Ev::Deliver { node: to, msg });
     }
 
@@ -1225,12 +1111,11 @@ impl Sim {
         for (node, t) in adds {
             self.schedule(t, Ev::Wake { node });
         }
-        while let Some(Reverse((t, _, idx))) = self.heap.pop() {
+        while let Some((t, ev)) = self.queue.pop() {
             self.now_us = t;
             self.apply_handovers();
             self.apply_adds();
             self.apply_resizes();
-            let ev = self.events[idx].take().expect("event consumed twice");
             // 一時停止中のノード宛イベントは停止解除時刻へ繰り延べ
             let target = match &ev {
                 Ev::Deliver { node, .. } | Ev::Wake { node } | Ev::StepDone { node } => *node,
@@ -1376,10 +1261,8 @@ fn main() {
         cfg: cfg.clone(),
         nodes,
         now_us: 0,
-        heap: BinaryHeap::new(),
-        events: Vec::new(),
-        seq: 0,
-        rng: Rng::new(cfg.seed),
+        queue: EventQueue::new(),
+        net: VirtNet::new(cfg.loss, cfg.lat_us, cfg.lat_jitter_us, cfg.partitions.clone(), cfg.seed),
         engine,
         module,
         join_log: Vec::new(),

@@ -21,6 +21,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 
 [[package]]
+name = "dyne-core"
+version = "0.1.0"
+dependencies = [
+ "dyne-wire",
+ "wasmi",
+]
+
+[[package]]
 name = "dyne-host"
 version = "0.1.0"
 dependencies = [
@@ -36,11 +44,16 @@ version = "0.1.0"
 name = "dyne-sim"
 version = "0.1.0"
 dependencies = [
+ "dyne-core",
  "wasmi",
 ]
 
 [[package]]
 name = "dyne-swarm"
+version = "0.1.0"
+
+[[package]]
+name = "dyne-wire"
 version = "0.1.0"
 
 [[package]]
