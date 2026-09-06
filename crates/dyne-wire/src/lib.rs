@@ -44,6 +44,8 @@
 
 #![cfg_attr(not(test), no_std)]
 
+pub mod abi;
+
 pub const VERSION: u8 = 2;
 
 /// メッセージ種別

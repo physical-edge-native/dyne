@@ -53,6 +53,15 @@ name = "dyne-swarm"
 version = "0.1.0"
 
 [[package]]
+name = "dyne-swarm-sim"
+version = "0.1.0"
+dependencies = [
+ "dyne-core",
+ "dyne-wire",
+ "wasmi",
+]
+
+[[package]]
 name = "dyne-wire"
 version = "0.1.0"
 

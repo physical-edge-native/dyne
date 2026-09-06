@@ -1,9 +1,10 @@
 # Rust ビルド成果物
 # ワークスペース (dyne-host, dyne-proto) のビルド出力
 /target/
-# heat1d-actor はワークスペース外で別ビルドするため個別に指定
+# ワークスペース外で別ビルドするアクターは個別に指定
 /crates/heat1d-actor/target/
 /crates/heat1d-pinn-actor/target/
+/crates/swarm-agent-actor/target/
 
 # Cargo.lock の方針:
 # - dyne-host はバイナリなので Cargo.lock をコミットするのが Rust の慣例
@@ -47,4 +48,8 @@ m2-esp32/dependencies.lock
 # demo outputs (scripts/demo_task*.ps1)
 demo_out/
 swarm_out/
+
+# 群れ移植の実験出力 (dyne-swarm-sim / 参照実装の比較実行。再生成可能)
+swarm_sim_out/
+swarm_old_out/
 

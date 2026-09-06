@@ -1,4 +1,4 @@
-# docs/STATUS.md — 現在地と次の作業(2026-09-02更新)
+# docs/STATUS.md — 現在地と次の作業(2026-09-06更新)
 
 このファイルは「いま何が途中で、次に何をするか」の1枚。作業のたびに更新する。
 
@@ -130,6 +130,8 @@ MTGで見せることを最優先とし、既存の残課題は「後で取り�
   consensus(位置+温度→勾配合意)/gossip(+最良地点の伝聞)。決定論確認済み。
 - 結果(800ステップ): gossip は**93〜98%が最適域へ**(90%到達178〜346ステップ)、
   consensus 45〜70%(罠の丘に吸われる)、follow 53〜75%、solo 45〜58%。シード4本で同傾向。
+  (2026-09-06訂正: 93〜98%はシード4本の標本の偏り。シードを広げた分布は
+  2026-09-04-swarm-port-report.md §3・§7を参照。定性的結論は不変)
 - アニメ scripts/swarm_anim.py、再現 scripts/demo_task4.ps1(数秒)、成果物
   docs/demo/2026-08-29-task4-swarm.html。
 - 4a(流れ場)は未実装(Field差し替えで対応可)。
@@ -166,30 +168,25 @@ MTGで見せることを最優先とし、既存の残課題は「後で取り�
   記号の衝突解消(理論ノートM1〜M5→E1〜E5、トリガーT1/T2/T4/T5→Trig1/Trig2/
   Trig4/Trig5、docs全体)。理論ノートの改訂版配置は会話版の担当分が残り。
 - 発注5: 学習型アクターの安定領域の実測(パラメータ掃引→予想N7へ)。未着手。
-- 発注6(優先): 群れデモ(crates/dyne-swarm)のDyne土台への移植。
-  **案Bで進行中**(2026-09-02ユーザー決定: 差込口=汎用メッセージバッファ
-  [v2と同一規約・固定長・あふれは破棄+計数]、乱数=アクター内蔵+固定式シード
-  導出、受け入れに定量帯93〜98%)。決定の記録は
-  docs\2026-09-02-swarm-port-options.md §6、具体設計は
-  docs\2026-09-02-swarm-port-design.md。
-  第1段=共通基盤の切り出し**完了(2026-09-02)**: crates/dyne-wire(ワイヤ形式v2の
-  単一定義、no_std)と crates/dyne-core(rng/event/net/actor)を新設し、dyne-sim を
-  その上に再構成。全12回帰シナリオ(基本/カオス/pause/partition/handover/ADD/
-  複合/CSV出力/auto-grow/学習型3種)の出力31ファイルが切り出し前とビット一致
-  (Claude Code環境)。単体テスト10件パス。
-  **現在ユーザーの手元でのビット一致確認待ち(確認コマンドは下記)。
-  第2段(群れアクター+dyne-swarm-sim)はその確認後に着手**。
-
-  手元確認コマンド(いずれも PASS (bit-exact) が出ること):
-  ```
-  cargo build --release
-  cd crates\heat1d-actor && cargo build --release --target wasm32-unknown-unknown && cd ..\..
-  target\release\dyne-sim.exe --wasm crates\heat1d-actor\target\wasm32-unknown-unknown\release\heat1d_actor.wasm --nodes 16 --points 65 --steps 2000
-  target\release\dyne-sim.exe --wasm crates\heat1d-actor\target\wasm32-unknown-unknown\release\heat1d_actor.wasm --nodes 16 --points 65 --steps 2000 --loss 0.10 --lat-ms 5 --lat-jitter-ms 3
-  target\release\dyne-sim.exe --wasm crates\heat1d-actor\target\wasm32-unknown-unknown\release\heat1d_actor.wasm --nodes 8 --points 65 --steps 2000 --handover 3@30000:60000
-  target\release\dyne-sim.exe --wasm crates\heat1d-actor\target\wasm32-unknown-unknown\release\heat1d_actor.wasm --nodes 4 --points 65 --steps 2000 --add 3@30000
-  cargo test -p dyne-core -p dyne-wire --release
-  ```
+- 発注6 → **完了(2026-09-06、全4基準合格で検収)**: 群れデモ
+  (crates/dyne-swarm)のDyne土台への移植(案B)。詳細レポート:
+  docs/2026-09-04-swarm-port-report.md、設計: docs/2026-09-02-swarm-port-design.md。
+  - 第1段=共通基盤の切り出し(2026-09-02): crates/dyne-wire(ワイヤ形式v2の
+    単一定義、no_std)+ crates/dyne-core(rng/event/net/actor)、dyne-sim を再構成。
+    ユーザーの手元でも確認済み(2026-09-04)。
+  - 第2段=群れアクター+新ホスト(2026-09-04): crates/swarm-agent-actor
+    (個体規則のWASM化、内蔵乱数+シード注入、汎用メッセージバッファ)、
+    crates/dyne-swarm-sim(dyne-core上のホスト。2位相ステップ+仮想ネットワーク
+    配送)、dyne-wire::abi(差込口定数の一元定義)。
+  - 検収(2026-09-06): ①既存回帰=切り出し前コミットと現行で**全12シナリオ・
+    30出力ファイルがビット一致**(レポート§6)。②決定論・③定性的再現は合格済み。
+    ④定量帯は基準を「シード50本の分布比較(平均±10pt・中央値±10pt・90%以上
+    到達本数の差8本以内)」へ改訂(ユーザー指示。旧93〜98%は当たりシード4本の
+    標本の偏り)し、**3条件すべて合格**(旧85.6/93.3/28本 vs 新84.5/91.7/26本。
+    分布は両実装とも90〜100%主峰+60〜80%の裾の二山型で一致。レポート§7)。
+    docs/2026-08-29-swarm-report.md の93〜98%記載に訂正注記を追加済み。
+  - 旧 crates/dyne-swarm は参照実装として凍結。混沌注入の系統的掃引は
+    ロードマップの混沌実験の段で実施。
 
 ## 残課題(破棄しない。pivot文書 §4 に準拠。以下は2026-08-26時点の候補の記録)
 
