@@ -34,9 +34,16 @@ const N_MAX: usize = 4096;
 const FACE_LEFT: u32 = 0;
 const FACE_RIGHT: u32 = 1;
 
-/// 境界条件タイプ
-const BC_DIRICHLET_ZERO: u32 = 0; // u = 0 固定 (グローバル境界)
+/// 境界条件タイプ (dyne-core::actor の BC_* と一致させる)
+const BC_DIRICHLET_ZERO: u32 = 0; // u = 値固定 (既定0。dyne_set_bc_value で変更可)
 const BC_INTERFACE: u32 = 1; // 隣接ノードとの内部境界 (ゴースト点を使う)
+// ---- F1 (発注3、2026-09-14): 未観測領域境界の設定情報化で追加 ----
+const BC_ZERO_GRAD: u32 = 2; // ゼロ勾配 (断熱端)。ゴースト点は鏡映 u_{-1} = u_1
+const BC_LINEAR_EXTRAP: u32 = 3; // 線形外挿ゴースト u_{-1} = 2u_0 − u_1 (端点は時間凍結する: 理論ノートT8)
+const BC_TRANSPARENT: u32 = 4; // 半無限透過境界 (理論ノートT10)
+
+/// 透過境界の指数和の項数上限 (dyne-core::transparent::SOE_M_MAX と一致させる)
+const M_SOE: usize = 64;
 
 struct State {
     /// u[0..n]: 担当格子点。u[0] と u[n-1] が自領域の端。
@@ -51,6 +58,18 @@ struct State {
     alpha: f64,
     dt: f64,
     bc: [u32; 2],
+    /// Dirichlet境界の値 (face ごと)。既定 0.0。init をまたいで保持される
+    bc_value: [f64; 2],
+    // ---- 透過境界 (BC_TRANSPARENT) の状態 ----
+    // 係数 (ホストが dyne_transparent_coef で注入。init をまたいで保持される)
+    t_decay: [f64; M_SOE],
+    t_half: [f64; M_SOE],
+    t_weight: [f64; M_SOE],
+    t_m: usize,
+    // 補助変数 (漏れバケツ)。**ノード内状態であり可搬状態 u[] には含めない**。
+    // 担当替え (handover / ADD に伴う再init) では dyne_init でリセット =
+    // 透過境界の再発動として扱う (理論ノートT10、モデルアーキテクチャノートE3注記)
+    t_y: [[f64; M_SOE]; 2],
 }
 
 static mut STATE: State = State {
@@ -64,6 +83,12 @@ static mut STATE: State = State {
     alpha: 0.0,
     dt: 0.0,
     bc: [BC_DIRICHLET_ZERO, BC_DIRICHLET_ZERO],
+    bc_value: [0.0; 2],
+    t_decay: [0.0; M_SOE],
+    t_half: [0.0; M_SOE],
+    t_weight: [0.0; M_SOE],
+    t_m: 0,
+    t_y: [[0.0; M_SOE]; 2],
 };
 
 #[allow(static_mut_refs)]
@@ -101,18 +126,47 @@ pub extern "C" fn dyne_init(
     s.bc = [bc_left, bc_right];
     s.ghost = [0.0; 2];
     s.ghost_grad = [0.0; 2];
+    // 透過境界の補助変数はリセット (係数 t_decay/t_half/t_weight と bc_value は
+    // init をまたいで保持)。担当替え時の再init = 透過境界の再発動 (理論ノートT10)
+    s.t_y = [[0.0; M_SOE]; 2];
     for i in 0..n {
         let x = x0 + (i as f64) * s.h;
         s.u[i] = sin_pi(x);
     }
-    // グローバル境界は厳密に 0 (sin(0)=sin(pi)=0 だが丸めを消す)
+    // Dirichlet境界は厳密に境界値 (既定0。sin(0)=sin(pi)=0 だが丸めを消す)
     if bc_left == BC_DIRICHLET_ZERO {
-        s.u[0] = 0.0;
+        s.u[0] = s.bc_value[0];
     }
     if bc_right == BC_DIRICHLET_ZERO {
-        s.u[n - 1] = 0.0;
+        s.u[n - 1] = s.bc_value[1];
     }
     0
+}
+
+/// Dirichlet境界の値を設定する (F1)。dyne_init の前に呼ぶ (init 時の端点の
+/// 丸め落としに使われる)。既定 0.0 = 従来の u=0 固定端とビット同一。
+#[no_mangle]
+pub extern "C" fn dyne_set_bc_value(face: u32, value: f64) {
+    let s = st();
+    if face <= 1 {
+        s.bc_value[face as usize] = value;
+    }
+}
+
+/// 透過境界の指数和係数を1項ずつ注入する (F1)。ホストが dyne-core::transparent の
+/// 構成 (パラメータ固定・libm) で計算した値をそのまま渡す。init をまたいで保持。
+#[no_mangle]
+pub extern "C" fn dyne_transparent_coef(j: u32, decay: f64, half: f64, weight: f64) {
+    let s = st();
+    let j = j as usize;
+    if j < M_SOE {
+        s.t_decay[j] = decay;
+        s.t_half[j] = half;
+        s.t_weight[j] = weight;
+        if j + 1 > s.t_m {
+            s.t_m = j + 1;
+        }
+    }
 }
 
 /// 隣接ノードの境界値をホストが注入する。
@@ -147,27 +201,80 @@ pub extern "C" fn dyne_boundary_grad(face: u32) -> f64 {
     }
 }
 
+/// 透過境界の端点更新 (半陰的結合)。戻り値は端点の増分 Δ。
+///
+/// 陽的結合 (前ステップの境界変化 Δg から流束を作る) は、1/√t 核の t→0 の大きさ
+/// ゆえに応答ゲイン ≈ (2/h)√(2αΔt/π) が r≈0.5 で 1 を超え、振動発散する
+/// (2026-09-14 実測。理論ノートN10(ii) が予見した「記憶項による増幅」)。
+/// そこで当ステップの境界変化 Δ 自身への応答だけを陰的に解く:
+///   Δ·(1 + 2rh·S0) = r·(内側ステンシル) − 2rh·K_hist
+///   K_hist = Σ_j w_j·(decay_j·y_j)  (過去の変化の寄与を1ステップ減衰させた値)
+///   S0     = Σ_j w_j·half_j          (当ステップの変化への即時応答)
+///   y_j ← decay_j·y_j + half_j·Δ    (漸化式そのもの: 導出 §5 と同一)
+/// 半群性による漸化式は不変で、結合のみ半陰的。K=0 の極限は zero_grad の鏡映に
+/// (分母 1+2rh·S0 の減衰を除き) 一致する。総和順は j 昇順の逐次加算に固定 (決定論)。
+fn transparent_delta(s: &mut State, face: usize, stencil: f64, r: f64) -> f64 {
+    let mut k_hist = 0.0;
+    let mut s0 = 0.0;
+    for j in 0..s.t_m {
+        k_hist += s.t_weight[j] * (s.t_decay[j] * s.t_y[face][j]);
+        s0 += s.t_weight[j] * s.t_half[j];
+    }
+    let c2 = 2.0 * r * s.h;
+    let delta = (r * stencil - c2 * k_hist) / (1.0 + c2 * s0);
+    for j in 0..s.t_m {
+        s.t_y[face][j] = s.t_decay[j] * s.t_y[face][j] + s.t_half[j] * delta;
+    }
+    delta
+}
+
 /// 1 ステップ進める。事前に必要な面へ dyne_set_neighbor 済みであること。
+///
+/// 未観測領域境界 (F1) の離散化 (複合参照解と式・演算順を厳密に一致させること):
+/// - zero_grad: 鏡映ゴースト u_{-1} = u_1 → u_next[0] = u_0 + r(u_1 − 2u_0 + u_1)
+/// - linear_extrap: ゴースト u_{-1} = 2u_0 − u_1。端点の離散ラプラシアンが恒等的に
+///   0 になり端点は時間凍結する (理論ノートT8。選択はホストが警告する)
+/// - transparent: transparent_delta の半陰的結合 (上記)
 #[no_mangle]
 pub extern "C" fn dyne_step() {
     let s = st();
     let r = s.alpha * s.dt / (s.h * s.h);
     let n = s.n;
 
+    // 端点を先に確定する (transparent は補助変数の更新を伴うため u_next 代入と分離)
+    let left = match s.bc[0] {
+        BC_INTERFACE => s.u[0] + r * (s.ghost[0] - 2.0 * s.u[0] + s.u[1]),
+        BC_ZERO_GRAD => s.u[0] + r * (s.u[1] - 2.0 * s.u[0] + s.u[1]),
+        BC_LINEAR_EXTRAP => {
+            let gh = 2.0 * s.u[0] - s.u[1];
+            s.u[0] + r * (gh - 2.0 * s.u[0] + s.u[1])
+        }
+        BC_TRANSPARENT => {
+            let stencil = s.u[1] - 2.0 * s.u[0] + s.u[1];
+            s.u[0] + transparent_delta(s, 0, stencil, r)
+        }
+        _ => s.bc_value[0], // Dirichlet (既定 0.0)
+    };
+    let right = match s.bc[1] {
+        BC_INTERFACE => s.u[n - 1] + r * (s.u[n - 2] - 2.0 * s.u[n - 1] + s.ghost[1]),
+        BC_ZERO_GRAD => s.u[n - 1] + r * (s.u[n - 2] - 2.0 * s.u[n - 1] + s.u[n - 2]),
+        BC_LINEAR_EXTRAP => {
+            let gh = 2.0 * s.u[n - 1] - s.u[n - 2];
+            s.u[n - 1] + r * (s.u[n - 2] - 2.0 * s.u[n - 1] + gh)
+        }
+        BC_TRANSPARENT => {
+            let stencil = s.u[n - 2] - 2.0 * s.u[n - 1] + s.u[n - 2];
+            s.u[n - 1] + transparent_delta(s, 1, stencil, r)
+        }
+        _ => s.bc_value[1],
+    };
+
     // 内部点
     for i in 1..n - 1 {
         s.u_next[i] = s.u[i] + r * (s.u[i - 1] - 2.0 * s.u[i] + s.u[i + 1]);
     }
-    // 左端
-    s.u_next[0] = match s.bc[0] {
-        BC_INTERFACE => s.u[0] + r * (s.ghost[0] - 2.0 * s.u[0] + s.u[1]),
-        _ => 0.0, // Dirichlet
-    };
-    // 右端
-    s.u_next[n - 1] = match s.bc[1] {
-        BC_INTERFACE => s.u[n - 1] + r * (s.u[n - 2] - 2.0 * s.u[n - 1] + s.ghost[1]),
-        _ => 0.0,
-    };
+    s.u_next[0] = left;
+    s.u_next[n - 1] = right;
 
     core::mem::swap(&mut s.u, &mut s.u_next);
 }

@@ -17,5 +17,6 @@ pub mod actor;
 pub mod event;
 pub mod net;
 pub mod rng;
+pub mod transparent;
 
 pub use dyne_wire as wire;

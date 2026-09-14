@@ -10,10 +10,17 @@
 pub const FACE_LEFT: u32 = 0;
 /// 面ID: 右
 pub const FACE_RIGHT: u32 = 1;
-/// 境界条件: 外部境界 (Dirichlet u=0)
+/// 境界条件: 値固定 (Dirichlet)。値は既定 0 (dyne_set_bc_value で変更可)
 pub const BC_DIRICHLET: u32 = 0;
 /// 境界条件: 界面 (隣接ノードと交換)
 pub const BC_INTERFACE: u32 = 1;
+// ---- F1 (発注3、2026-09-14): 未観測領域境界の設定情報化で追加した3種 ----
+/// 境界条件: ゼロ勾配 (断熱端)。ゴースト点は鏡映 u_{-1} = u_1
+pub const BC_ZERO_GRAD: u32 = 2;
+/// 境界条件: 線形外挿。拡散系では端点が時間凍結する (理論ノートT8) — 選択時に警告
+pub const BC_LINEAR_EXTRAP: u32 = 3;
+/// 境界条件: 半無限透過境界 (理論ノートT10)。補助変数は transparent モジュール参照
+pub const BC_TRANSPARENT: u32 = 4;
 
 pub struct Actor {
     pub store: wasmi::Store<()>,
@@ -35,6 +42,12 @@ pub struct Actor {
     pub resize: Option<wasmi::TypedFunc<u32, i32>>,
     /// 現在のモデルを格子点で評価 (ステップを進めない。機能保存の検査用)
     pub eval: Option<wasmi::TypedFunc<u32, f64>>,
+    // ---- F1 (発注3): 未観測領域境界の設定情報化で追加した任意エクスポート ----
+    /// Dirichlet境界の値 (face, value)。既定 0.0。dyne_init の前に呼ぶ
+    pub set_bc_value: Option<wasmi::TypedFunc<(u32, f64), ()>>,
+    /// 透過境界の指数和係数 (j, decay, half, weight) を1項ずつ渡す。
+    /// dyne_init をまたいで保持される (補助変数のみ init でリセット)
+    pub transparent_coef: Option<wasmi::TypedFunc<(u32, f64, f64, f64), ()>>,
     /// wasm宣言の線形メモリ(ページ) — RAM上限チェック用
     pub memory_pages: u64,
 }
@@ -71,6 +84,12 @@ impl Actor {
             set_bc: instance.get_typed_func::<(u32, u32), ()>(&store, "dyne_set_bc").ok(),
             resize: instance.get_typed_func::<u32, i32>(&store, "dyne_resize").ok(),
             eval: instance.get_typed_func::<u32, f64>(&store, "dyne_eval").ok(),
+            set_bc_value: instance
+                .get_typed_func::<(u32, f64), ()>(&store, "dyne_set_bc_value")
+                .ok(),
+            transparent_coef: instance
+                .get_typed_func::<(u32, f64, f64, f64), ()>(&store, "dyne_transparent_coef")
+                .ok(),
             store,
             memory_pages,
         }

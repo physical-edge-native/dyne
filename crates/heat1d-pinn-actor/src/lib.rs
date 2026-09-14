@@ -51,8 +51,19 @@ pub const P_LM: usize = 256;
 
 const FACE_LEFT: u32 = 0;
 const FACE_RIGHT: u32 = 1;
-const BC_DIRICHLET_ZERO: u32 = 0;
+const BC_DIRICHLET_ZERO: u32 = 0; // 値固定 (既定0。dyne_set_bc_value で変更可)
 const BC_INTERFACE: u32 = 1;
+// ---- F1 (発注3、2026-09-14): 未観測領域境界の設定情報化で追加。
+// 学習型では境界損失の形で実装する ----
+const BC_ZERO_GRAD: u32 = 2; // 端点で u' = 0 を損失に課す (断熱端)
+const BC_LINEAR_EXTRAP: u32 = 3; // 端点で u'' = 0 を損失に課す (線形延長と等価)
+// 透過境界: 差分法アクターの半陰的な端点更新式で u_prev から端点の値目標を作り、
+// u(端) = 目標 を損失に課す (iface_mode=1 と同じ「差分法式で端点目標を作る」方式。
+// 陽的な流束目標 u'=±K は 1/√t 核の即時応答の硬さで端点が振動することを実測し不採用)
+const BC_TRANSPARENT: u32 = 4;
+
+/// 透過境界の指数和の項数上限 (dyne-core::transparent::SOE_M_MAX と一致させる)
+pub const M_SOE: usize = 64;
 
 /// dyne_cfg のキー
 pub const CFG_ITERS: u32 = 0; // 1ステップあたりの最適化反復回数 (既定 5)
@@ -173,6 +184,17 @@ pub struct Pinn {
     alpha: f64,
     dt: f64,
     bc: [u32; 2],
+    /// Dirichlet境界の値 (face ごと)。既定 0.0。init をまたいで保持される
+    bc_value: [f64; 2],
+    // ---- 透過境界 (BC_TRANSPARENT) の状態。補助変数はノード内状態であり
+    // 可搬状態 u[] には含めない。再init でリセット = 再発動 (理論ノートT10) ----
+    t_decay: [f64; M_SOE],
+    t_half: [f64; M_SOE],
+    t_weight: [f64; M_SOE],
+    t_m: usize,
+    t_y: [[f64; M_SOE]; 2],
+    /// 当ステップの透過境界の端点の値目標 (差分法の半陰的更新式で u_prev から作る)
+    t_target: [f64; 2],
     /// 次の dyne_step の冒頭で行う温め反復回数 (dyne_init / SHRINK で予約)
     pending_warm: u32,
     jet: Jet,
@@ -224,6 +246,13 @@ impl Pinn {
             alpha: 0.0,
             dt: 0.0,
             bc: [BC_DIRICHLET_ZERO, BC_DIRICHLET_ZERO],
+            bc_value: [0.0; 2],
+            t_decay: [0.0; M_SOE],
+            t_half: [0.0; M_SOE],
+            t_weight: [0.0; M_SOE],
+            t_m: 0,
+            t_y: [[0.0; M_SOE]; 2],
+            t_target: [0.0; 2],
             pending_warm: 0,
             lm_lambda: 1e-3,
             lm_a: [0.0; P_LM * P_LM],
@@ -331,15 +360,19 @@ impl Pinn {
         self.bc = [bc_left, bc_right];
         self.ghost = [0.0; 2];
         self.ghost_grad = [0.0; 2];
+        // 透過境界の補助変数はリセット (係数と bc_value は init をまたいで保持)。
+        // 担当替え時の再init = 透過境界の再発動 (理論ノートT10)
+        self.t_y = [[0.0; M_SOE]; 2];
+        self.t_target = [0.0; 2];
         for i in 0..n {
             let x = x0 + (i as f64) * self.h;
             self.u[i] = sin_pi(x);
         }
         if bc_left == BC_DIRICHLET_ZERO {
-            self.u[0] = 0.0;
+            self.u[0] = self.bc_value[0];
         }
         if bc_right == BC_DIRICHLET_ZERO {
-            self.u[n - 1] = 0.0;
+            self.u[n - 1] = self.bc_value[1];
         }
         self.u_prev[..n].copy_from_slice(&self.u[..n]);
         self.mid_valid = false;
@@ -522,12 +555,38 @@ impl Pinn {
             }
             for face in 0..2 {
                 let end = if face == 0 { self.x0 } else { self.x1 };
+                // F1: 未観測領域境界は微分量への損失で課す (値の押し付けをしない)
+                match self.bc[face] {
+                    BC_ZERO_GRAD => {
+                        self.forward(end);
+                        let rg = self.jet.y1;
+                        loss += self.lambda_b * rg * rg;
+                        self.backward(end, 0.0, 2.0 * self.lambda_b * rg, 0.0);
+                        continue;
+                    }
+                    BC_LINEAR_EXTRAP => {
+                        self.forward(end);
+                        let r2 = self.jet.y2;
+                        loss += self.lambda_b * r2 * r2;
+                        self.backward(end, 0.0, 0.0, 2.0 * self.lambda_b * r2);
+                        continue;
+                    }
+                    BC_TRANSPARENT => {
+                        let tgt = self.t_target[face];
+                        self.forward(end);
+                        let r = self.jet.y - tgt;
+                        loss += self.lambda_b * r * r;
+                        self.backward(end, 2.0 * self.lambda_b * r, 0.0, 0.0);
+                        continue;
+                    }
+                    _ => {}
+                }
                 let (x, target, grad) = if self.bc[face] == BC_INTERFACE {
                     // 隣接ノードの端点 = 自領域の端から h だけ外側のゴースト点
                     let xg = if face == 0 { end - self.h } else { end + self.h };
                     (xg, self.ghost[face], Some(self.ghost_grad[face]))
                 } else {
-                    (end, 0.0, None)
+                    (end, self.bc_value[face], None)
                 };
                 self.forward(x);
                 let r = self.jet.y - target;
@@ -678,6 +737,29 @@ impl Pinn {
             let s_g = libm::sqrt(self.lambda_g);
             for face in 0..2 {
                 let end = if face == 0 { self.x0 } else { self.x1 };
+                // F1: 未観測領域境界は微分量への残差で課す (値の押し付けをしない)
+                match self.bc[face] {
+                    BC_ZERO_GRAD => {
+                        self.forward(end);
+                        let rg = s_b * self.jet.y1;
+                        f(self, end, rg, 0.0, s_b, 0.0);
+                        continue;
+                    }
+                    BC_LINEAR_EXTRAP => {
+                        self.forward(end);
+                        let r2 = s_b * self.jet.y2;
+                        f(self, end, r2, 0.0, 0.0, s_b);
+                        continue;
+                    }
+                    BC_TRANSPARENT => {
+                        let tgt = self.t_target[face];
+                        self.forward(end);
+                        let r = s_b * (self.jet.y - tgt);
+                        f(self, end, r, s_b, 0.0, 0.0);
+                        continue;
+                    }
+                    _ => {}
+                }
                 let (x, target, grad) = if self.bc[face] == BC_INTERFACE {
                     if self.iface_mode == 1 {
                         let (ie, ii) = if face == 0 { (0, 1) } else { (n - 1, n - 2) };
@@ -690,7 +772,7 @@ impl Pinn {
                         (xg, self.ghost[face], Some(self.ghost_grad[face]))
                     }
                 } else {
-                    (end, 0.0, None)
+                    (end, self.bc_value[face], None)
                 };
                 self.forward(x);
                 let r = s_b * (self.jet.y - target);
@@ -839,11 +921,48 @@ impl Pinn {
             // NN を「前ステップの関数」とみなして細分点の u_prev を作る
             self.fill_mid();
         }
+        // 透過境界 (F1): 差分法アクターの半陰的な端点更新式 (transparent_delta と
+        // 同一の式・同じ総和順) で u_prev から当ステップの端点の値目標を作る。
+        // iface_mode=1 の「差分法式で端点目標を作る」方式の透過境界版。
+        // ここでは目標の導出のみ行い、補助変数 y は**まだ更新しない**——
+        // 履歴更新は最適化後に NN が実際に出力した端点値で行う (下記。
+        // 値目標化の等価性3条件の(i)、2026-09-15 理論確認)。
+        let mut g_old = [0.0f64; 2];
+        for face in 0..2 {
+            if self.bc[face] == BC_TRANSPARENT {
+                let (ie, ii) = if face == 0 { (0, 1) } else { (self.n - 1, self.n - 2) };
+                let rc = self.alpha * self.dt / (self.h * self.h);
+                let stencil = self.u_prev[ii] - 2.0 * self.u_prev[ie] + self.u_prev[ii];
+                let mut k_hist = 0.0;
+                let mut s0 = 0.0;
+                for j in 0..self.t_m {
+                    k_hist += self.t_weight[j] * (self.t_decay[j] * self.t_y[face][j]);
+                    s0 += self.t_weight[j] * self.t_half[j];
+                }
+                let c2 = 2.0 * rc * self.h;
+                let delta = (rc * stencil - c2 * k_hist) / (1.0 + c2 * s0);
+                g_old[face] = self.u_prev[ie];
+                self.t_target[face] = g_old[face] + delta;
+            }
+        }
         self.optimize(true, self.iters, self.lr_step);
         for i in 0..self.n {
             let x = self.x_of(i);
             self.forward(x);
             self.u[i] = self.jet.y;
+        }
+        // 透過境界の履歴更新: 目標値 g* ではなく、最適化後に NN が実際に出力した
+        // 端点値の変化 Δ = u_new[端] − u_old[端] で補助変数を進める。目標値で
+        // 更新すると「NNが目標に届かなかった分」が履歴に蓄積しドリフトを生む
+        // (等価性3条件の(i))。
+        for face in 0..2 {
+            if self.bc[face] == BC_TRANSPARENT {
+                let ie = if face == 0 { 0 } else { self.n - 1 };
+                let dg = self.u[ie] - g_old[face];
+                for j in 0..self.t_m {
+                    self.t_y[face][j] = self.t_decay[j] * self.t_y[face][j] + self.t_half[j] * dg;
+                }
+            }
         }
         self.u_prev[..self.n].copy_from_slice(&self.u[..self.n]);
         if self.sub > 1 {
@@ -968,7 +1087,38 @@ pub extern "C" fn dyne_set_neighbor(face: u32, value: f64, grad: f64) {
 pub extern "C" fn dyne_set_bc(face: u32, bc: u32) {
     let s = st();
     if face <= 1 {
-        s.bc[face as usize] = bc;
+        let f = face as usize;
+        if s.bc[f] != bc {
+            // 境界条件が変わる面の透過境界の補助変数はリセットする
+            // (次に BC_TRANSPARENT になったときは再発動から始まる)
+            s.t_y[f] = [0.0; M_SOE];
+            s.t_target[f] = 0.0;
+        }
+        s.bc[f] = bc;
+    }
+}
+
+/// Dirichlet境界の値を設定する (F1)。dyne_init の前に呼ぶ。既定 0.0。
+#[no_mangle]
+pub extern "C" fn dyne_set_bc_value(face: u32, value: f64) {
+    let s = st();
+    if face <= 1 {
+        s.bc_value[face as usize] = value;
+    }
+}
+
+/// 透過境界の指数和係数を1項ずつ注入する (F1)。init をまたいで保持される。
+#[no_mangle]
+pub extern "C" fn dyne_transparent_coef(j: u32, decay: f64, half: f64, weight: f64) {
+    let s = st();
+    let j = j as usize;
+    if j < M_SOE {
+        s.t_decay[j] = decay;
+        s.t_half[j] = half;
+        s.t_weight[j] = weight;
+        if j + 1 > s.t_m {
+            s.t_m = j + 1;
+        }
     }
 }
 

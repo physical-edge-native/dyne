@@ -51,9 +51,13 @@
 
 use std::collections::HashMap;
 
-use dyne_core::actor::{Actor, BC_DIRICHLET, BC_INTERFACE, FACE_LEFT, FACE_RIGHT};
+use dyne_core::actor::{
+    Actor, BC_DIRICHLET, BC_INTERFACE, BC_LINEAR_EXTRAP, BC_TRANSPARENT, BC_ZERO_GRAD, FACE_LEFT,
+    FACE_RIGHT,
+};
 use dyne_core::event::EventQueue;
 use dyne_core::net::VirtNet;
+use dyne_core::transparent::TransparentCoef;
 
 // ---------- 設定 ----------
 
@@ -105,6 +109,63 @@ struct Config {
     /// 温度場スナップショットの間隔 (ステップ)
     field_every: u64,
     quiet: bool,
+    /// F1 (発注3、2026-09-14): 未観測領域との境界の扱い (設定情報。コードに焼き込まない)。
+    /// 適用されるのは「不在の隣接ノードに接する面」のみ。全域の外縁 (x=0, x=1) は
+    /// 問題設定そのものの境界であり、常に u=0 の Dirichlet (F1 の対象外)。
+    unobserved_bc: UBc,
+    /// F1: 恒久不在ノード (部分観測シナリオ用。実行中の参加はしない)。--add と排他
+    absent: Vec<usize>,
+    /// F2: ADD参加ノードの初期場の作り方。false = 白紙 (sin初期値、従来どおり)、
+    /// true = 両隣の値+勾配から外挿した場を初期値にする (学習型は短い事前学習つき)
+    join_warm: bool,
+    /// transparent の指数和構成の刻み (実験用。既定 SOE_H=0.6 → M=32。
+    /// 0.3 → M=64。誤差床の切り分け用で、既定運用では変えない)
+    soe_h: f64,
+}
+
+/// F1: 未観測領域境界の設定キー (docs/2026-09-14-f1-boundary-design.md)
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum UBc {
+    /// 値固定。現行の u=0 は dirichlet(0) として残し回帰比較に用いる
+    Dirichlet(f64),
+    /// ゼロ勾配 (断熱端)。ゴースト点は鏡映 u_{-1}=u_1。当面の既定 (理論ノートT9)
+    ZeroGrad,
+    /// 線形外挿。拡散系では端点が時間凍結する (理論ノートT8) — 選択時に警告
+    LinearExtrap,
+    /// 半無限透過境界 (理論ノートT10)。1/√t核の指数和近似+補助変数の漸化式
+    Transparent,
+}
+
+impl UBc {
+    fn parse(spec: &str) -> Self {
+        if let Some(v) = spec.strip_prefix("dirichlet") {
+            let v = v.strip_prefix(':').unwrap_or("0");
+            return UBc::Dirichlet(v.parse().expect("--unobserved-bc dirichlet:<値>"));
+        }
+        match spec {
+            "zero_grad" => UBc::ZeroGrad,
+            "linear_extrap" => UBc::LinearExtrap,
+            "transparent" => UBc::Transparent,
+            _ => panic!("--unobserved-bc dirichlet[:v] | zero_grad | linear_extrap | transparent"),
+        }
+    }
+    /// アクターへ渡す境界条件コード
+    fn code(&self) -> u32 {
+        match self {
+            UBc::Dirichlet(_) => BC_DIRICHLET,
+            UBc::ZeroGrad => BC_ZERO_GRAD,
+            UBc::LinearExtrap => BC_LINEAR_EXTRAP,
+            UBc::Transparent => BC_TRANSPARENT,
+        }
+    }
+    fn label(&self) -> String {
+        match self {
+            UBc::Dirichlet(v) => format!("dirichlet({v})"),
+            UBc::ZeroGrad => "zero_grad".to_string(),
+            UBc::LinearExtrap => "linear_extrap".to_string(),
+            UBc::Transparent => "transparent".to_string(),
+        }
+    }
 }
 
 /// M-S1c: 界面残差による自動 GROW (T2) のパラメータ
@@ -201,6 +262,10 @@ fn parse_args() -> Config {
         field_csv: None,
         field_every: 10,
         quiet: false,
+        unobserved_bc: UBc::ZeroGrad, // 既定 (2026-09-14 ユーザー決定。理論ノートT9)
+        absent: Vec::new(),
+        join_warm: false, // 既定は白紙 (dirichlet(0)指定だけで既存回帰とビット一致を保つ)
+        soe_h: dyne_core::transparent::SOE_H,
     };
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -284,6 +349,19 @@ fn parse_args() -> Config {
                     b.parse::<u64>().unwrap() * 1000,
                 ));
             }
+            "--unobserved-bc" => c.unobserved_bc = UBc::parse(&val()),
+            "--soe-h" => c.soe_h = val().parse().expect("--soe-h <正の実数>"),
+            "--absent" => {
+                // 恒久不在ノードのカンマ区切りリスト (部分観測シナリオ)
+                c.absent = val().split(',').map(|s| s.parse().expect("--absent n,n,...")).collect();
+            }
+            "--join-init" => {
+                c.join_warm = match val().as_str() {
+                    "blank" => false,
+                    "warm" => true,
+                    _ => panic!("--join-init blank | warm"),
+                };
+            }
             "--quiet" => {
                 c.quiet = true;
                 i -= 1;
@@ -301,6 +379,20 @@ fn parse_args() -> Config {
             !c.adds.iter().any(|&(b, _)| b + 1 == a || a + 1 == b),
             "--add: 隣接ノード同士のADDは未対応 (node {a})"
         );
+    }
+    if !c.absent.is_empty() {
+        for &a in &c.absent {
+            assert!(a < c.nodes, "--absent: node {a} out of range");
+        }
+        assert!(c.absent.len() < c.nodes, "--absent: 全ノード不在は不可");
+        // 部分観測は誤差計測 (全域基準解との比較) の意味を単純に保つため --add と排他
+        assert!(c.adds.is_empty(), "--absent は --add と併用不可 (部分観測シナリオ専用)");
+        for &(n, _, _) in c.pauses.iter().chain(&c.handovers) {
+            assert!(!c.absent.contains(&n), "--absent のノード {n} は pause/handover 対象にできない");
+        }
+        for &(n, _, _) in &c.resizes {
+            assert!(!c.absent.contains(&n), "--absent のノード {n} は resize 対象にできない");
+        }
     }
     c
 }
@@ -353,6 +445,13 @@ struct Node {
     got: Vec<bool>,
     /// 現ステップで受領した相手側勾配 (界面残差の計測用。got と同じ添字)
     recv_grad: Vec<f64>,
+    /// 現ステップで受領した相手側の値 (F2ウォームスタートの初期場構成用。got と同じ添字)
+    recv_val: Vec<f64>,
+    /// F1: 恒久不在 (部分観測シナリオ)。参加イベントは起きない
+    permanent_absent: bool,
+    /// F2: 参加直後の最初のステップで、受領した両隣の値+勾配から初期場を構成する予約。
+    /// 予約中は自分の送信を初期場の構成後まで遅らせる (構成前の白紙値を送らないため)
+    warm_join_pending: bool,
     /// 先着した将来ステップ: (iface,step) -> msg
     pending: HashMap<(usize, u64), Msg>,
     /// 送信控え(直近2ステップ): (iface,step) -> msg
@@ -378,6 +477,8 @@ struct JoinRec {
     /// 参加時に dyne_init へ渡した境界条件 (複合参照解の初期化に使う)
     bc: (u32, u32),
     t_us: u64,
+    /// F2: ウォームスタート参加 (複合参照解の編入時の初期場構成に使う)
+    warm: bool,
 }
 
 /// GROW/SHRINK の適用記録 (レポート用)
@@ -455,6 +556,79 @@ struct Sim {
     event_log: Vec<EventRec>,
     /// --field-csv 指定時: (node, step, x[], u[])
     field_log: Vec<(usize, u64, Vec<f64>, Vec<f64>)>,
+    // ---- F1/F2 (発注3) ----
+    /// 格子の分割 (node -> (開始添字, 点数))。F2の初期場構成で座標を引くのに使う
+    starts: Vec<(usize, usize)>,
+    /// グローバル格子幅
+    h_global: f64,
+    /// 透過境界の指数和係数 (unobserved_bc = transparent のときのみ Some)
+    t_coef: Option<TransparentCoef>,
+    /// handover による透過境界の補助変数リセットの記録: (node, 有効ステップ)。
+    /// 複合参照解が同じ位置でリセットする (担当替え = 透過境界の再発動、理論ノートT10)
+    reset_log: Vec<(usize, u64)>,
+}
+
+/// F1: 未観測領域境界の面ごとの設定をアクターへ注入する。dyne_init の**前**に呼ぶ
+/// (init 時の Dirichlet 端の丸め落としが bc_value を使うため)。
+/// - 不在隣接に接する Dirichlet 面 (グローバル外縁は対象外) へ値を渡す
+/// - transparent の面があれば指数和係数を全項渡す (係数は init をまたいで保持される)
+fn apply_face_config(
+    actor: &mut Actor,
+    node: usize,
+    n_nodes: usize,
+    bcl: u32,
+    bcr: u32,
+    ubc: &UBc,
+    coef: &Option<TransparentCoef>,
+) {
+    for (face, code, global_edge) in
+        [(FACE_LEFT, bcl, node == 0), (FACE_RIGHT, bcr, node + 1 == n_nodes)]
+    {
+        if code == BC_DIRICHLET && !global_edge {
+            if let UBc::Dirichlet(v) = ubc {
+                if let Some(f) = actor.set_bc_value {
+                    f.call(&mut actor.store, (face, *v)).unwrap();
+                }
+            }
+        }
+    }
+    if bcl == BC_TRANSPARENT || bcr == BC_TRANSPARENT {
+        let c = coef.as_ref().expect("transparent係数が未計算");
+        let f = actor
+            .transparent_coef
+            .expect("このアクターは dyne_transparent_coef を持たない (transparent 非対応)");
+        for j in 0..c.decay.len() {
+            f.call(&mut actor.store, (j as u32, c.decay[j], c.half[j], c.weight[j]))
+                .unwrap();
+        }
+    }
+}
+
+/// F2: 参加ノードの初期場 (両隣の値+勾配からの外挿)。
+/// 両隣あり = 3次エルミート補間 (両端の値と勾配の4条件を厳密に満たす)、
+/// 片側のみ = その側からの線形延長。1回きりの初期化なので線形外挿の端点凍結
+/// (理論ノートT8) の問題は生じない (2026-09-14 検収仕様の明確化)。
+/// シミュレータ本体と複合参照解の両方がこの関数を使う (ビット一致の前提)。
+fn warm_field(
+    left: Option<(f64, f64, f64)>,  // (x, 値, 勾配) 左隣の境界
+    right: Option<(f64, f64, f64)>, // 同 右隣
+    x: f64,
+) -> f64 {
+    match (left, right) {
+        (Some((xa, va, ga)), Some((xb, vb, gb))) => {
+            let d = xb - xa;
+            let t = (x - xa) / d;
+            let omt = 1.0 - t;
+            let h00 = (1.0 + 2.0 * t) * omt * omt;
+            let h10 = t * omt * omt;
+            let h01 = t * t * (3.0 - 2.0 * t);
+            let h11 = t * t * (t - 1.0);
+            h00 * va + h10 * d * ga + h01 * vb + h11 * d * gb
+        }
+        (Some((xa, va, ga)), None) => va + ga * (x - xa),
+        (None, Some((xb, vb, gb))) => vb + gb * (x - xb),
+        (None, None) => 0.0, // 参加ノードは必ず現存する隣接を持つため起こらない
+    }
 }
 
 impl Sim {
@@ -661,6 +835,10 @@ impl Sim {
                 f.call(&mut actor.store, (3, self.width[node] as f64)).unwrap();
             }
             let (n, x0, x1, bcl, bcr) = self.nodes[node].init_args;
+            apply_face_config(
+                &mut actor, node, self.nodes.len(), bcl, bcr,
+                &self.cfg.unobserved_bc, &self.t_coef,
+            );
             let rc = actor
                 .init
                 .call(
@@ -669,6 +847,15 @@ impl Sim {
                 )
                 .unwrap();
             assert_eq!(rc, 0, "handover re-init failed");
+            // 透過境界の補助変数は新インスタンスでリセット = 担当替えの再発動
+            // (理論ノートT10)。複合参照解にも同じ位置でのリセットを伝える。
+            // 有効ステップ: 計算中なら現ステップの結果は旧インスタンスで確定済み
+            // なので次ステップから、待機中なら現ステップから
+            if bcl == BC_TRANSPARENT || bcr == BC_TRANSPARENT {
+                let s = self.nodes[node].cur_step
+                    + if matches!(self.nodes[node].phase, Phase::Computing) { 1 } else { 0 };
+                self.reset_log.push((node, s));
+            }
             for (i, v) in saved.iter().enumerate() {
                 actor
                     .set
@@ -764,11 +951,21 @@ impl Sim {
                     .push((node, FACE_LEFT, s_join));
             }
             let mut actor = Actor::load_with(&self.engine, &self.module, &self.cfg.pinn_cfg);
-            // 学習型アクター: ADDで参加するインスタンスの温め回数を上書き (--add-warm)
-            if let (Some(w), Some(f)) = (self.cfg.add_warm, actor.cfg) {
+            // 学習型アクター: ADDで参加するインスタンスの温め回数。
+            // F2ウォームスタートの既定は 200 (2026-09-14 検収仕様)。--add-warm で上書き可
+            let warm_iters = if self.cfg.join_warm {
+                Some(self.cfg.add_warm.unwrap_or(200.0))
+            } else {
+                self.cfg.add_warm
+            };
+            if let (Some(w), Some(f)) = (warm_iters, actor.cfg) {
                 f.call(&mut actor.store, (2, w)).unwrap();
             }
             let (n, x0, x1, _, _) = self.nodes[node].init_args;
+            apply_face_config(
+                &mut actor, node, self.nodes.len(), bc[0], bc[1],
+                &self.cfg.unobserved_bc, &self.t_coef,
+            );
             let rc = actor
                 .init
                 .call(
@@ -783,12 +980,14 @@ impl Sim {
                 nd.init_args = (n, x0, x1, bc[0], bc[1]);
                 nd.ifaces = ifaces;
                 nd.present = true;
+                nd.warm_join_pending = self.cfg.join_warm;
             }
             self.join_log.push(JoinRec {
                 node,
                 step: s_join,
                 bc: (bc[0], bc[1]),
                 t_us: t_add,
+                warm: self.cfg.join_warm,
             });
             self.event_log.push(EventRec {
                 kind: "join", step: s_join, t_us: self.now_us, node, iface: None,
@@ -856,6 +1055,13 @@ impl Sim {
             return;
         }
         let mut actor = Actor::load_with(&self.engine, &self.module, &self.cfg.pinn_cfg);
+        // 再initで透過境界の補助変数はリセットされる (残っている未観測面も含む)。
+        // これは担当替えのリセット規定 (理論ノートT10) の再init側の帰結で、
+        // 複合参照解も参加イベント時に隣接ノードの補助変数をリセットして鏡写しする
+        apply_face_config(
+            &mut actor, node, self.nodes.len(), bcl, bcr,
+            &self.cfg.unobserved_bc, &self.t_coef,
+        );
         let rc = actor
             .init
             .call(
@@ -923,18 +1129,24 @@ impl Sim {
         self.schedule(t, Ev::Deliver { node: to, msg });
     }
 
-    /// stepを開始: 全界面へ送信し、待ち状態に入る
+    /// stepを開始: 全界面へ送信し、待ち状態に入る。
+    /// F2ウォームスタート参加の最初のステップだけは送信を遅らせる: 受領した両隣の
+    /// 値+勾配で初期場を構成してから (begin_compute 冒頭で) 送る。白紙のsin場の
+    /// 境界値を隣に使わせないため (複合参照解とのビット一致の前提でもある)
     fn start_step(&mut self, node: usize, step: u64) {
         self.apply_iface_adds(node, step);
-        let ifaces: Vec<usize> = self.nodes[node].ifaces.iter().map(|&(j, _)| j).collect();
-        for j in &ifaces {
-            self.send_iface(node, *j, step, false);
+        if !self.nodes[node].warm_join_pending {
+            let ifaces: Vec<usize> = self.nodes[node].ifaces.iter().map(|&(j, _)| j).collect();
+            for j in &ifaces {
+                self.send_iface(node, *j, step, false);
+            }
         }
         let n = &mut self.nodes[node];
         n.cur_step = step;
         n.phase = Phase::Waiting { step };
         n.got = vec![false; n.ifaces.len()];
         n.recv_grad = vec![0.0; n.ifaces.len()];
+        n.recv_val = vec![0.0; n.ifaces.len()];
         n.wait_since = self.now_us;
         n.last_resend_us = self.now_us;
         if n.ifaces.is_empty() {
@@ -969,6 +1181,7 @@ impl Sim {
                     .unwrap();
                 n.got[k] = true;
                 n.recv_grad[k] = m.grad;
+                n.recv_val[k] = m.value;
             }
         }
         if self.nodes[node].got.iter().all(|&g| g) {
@@ -976,7 +1189,63 @@ impl Sim {
         }
     }
 
+    /// F2: 参加ノードの初期場を、受領済みの両隣の値+勾配から構成して書き込む。
+    /// 隣の値・勾配はステップ S の交換メッセージそのもの (= 隣のステップ S−1 完了時の
+    /// 境界)。複合参照解の編入時の初期場構成と厳密に同じ入力・同じ式になる。
+    fn build_warm_field(&mut self, node: usize) {
+        let (n, x0, x1, bcl, bcr) = self.nodes[node].init_args;
+        let (s, cnt) = self.starts[node];
+        let h = self.h_global;
+        let h_node = (x1 - x0) / ((n - 1) as f64);
+        let mut left = None;
+        let mut right = None;
+        for (k, &(_, f)) in self.nodes[node].ifaces.iter().enumerate() {
+            let v = self.nodes[node].recv_val[k];
+            let g = self.nodes[node].recv_grad[k];
+            if f == FACE_LEFT {
+                left = Some((((s - 1) as f64) * h, v, g));
+            } else {
+                right = Some((((s + cnt) as f64) * h, v, g));
+            }
+        }
+        let mut vals = Vec::with_capacity(n as usize);
+        for i in 0..n {
+            let x = x0 + (i as f64) * h_node;
+            vals.push(warm_field(left, right, x));
+        }
+        // 外縁 (グローバル境界) の Dirichlet 端は厳密に 0 に落とす (initと同じ規則)
+        if bcl == BC_DIRICHLET {
+            vals[0] = 0.0;
+        }
+        if bcr == BC_DIRICHLET {
+            vals[(n - 1) as usize] = 0.0;
+        }
+        {
+            let nd = &mut self.nodes[node];
+            for (i, v) in vals.iter().enumerate() {
+                nd.actor.set.call(&mut nd.actor.store, (i as u32, *v)).unwrap();
+            }
+        }
+        eprintln!(
+            "[sim] warm join: node {} の初期場を両隣の値+勾配から構成 (left={:?} right={:?})",
+            node,
+            left.map(|(_, v, g)| (v, g)),
+            right.map(|(_, v, g)| (v, g)),
+        );
+    }
+
     fn begin_compute(&mut self, node: usize) {
+        // F2ウォームスタート参加の最初のステップ: 全界面の受領が揃ったこの時点で
+        // 初期場を構成し、遅らせていた自分の送信をここで行う
+        if self.nodes[node].warm_join_pending {
+            self.nodes[node].warm_join_pending = false;
+            self.build_warm_field(node);
+            let step = self.nodes[node].cur_step;
+            let ifaces: Vec<usize> = self.nodes[node].ifaces.iter().map(|&(j, _)| j).collect();
+            for j in ifaces {
+                self.send_iface(node, j, step, false);
+            }
+        }
         // 界面残差 |grad_A - grad_B| を記録 (状態は step 実行前 = 交換値と同時点)。
         // 二重記録を避けるため、界面の左側 (自分の面が右) のノードだけが記録する。
         // これは M-S1c の自動トリガー T2 のセンサーの前倒し実装。
@@ -1029,6 +1298,7 @@ impl Sim {
                         .unwrap();
                     n.got[k] = true;
                     n.recv_grad[k] = msg.grad;
+                    n.recv_val[k] = msg.value;
                     if n.got.iter().all(|&g| g) {
                         self.begin_compute(node);
                     }
@@ -1129,7 +1399,11 @@ impl Sim {
                 Ev::Wake { node } => self.on_wake(node),
                 Ev::StepDone { node } => self.on_step_done(node),
             }
-            if self.nodes.iter().all(|n| n.phase == Phase::Done) {
+            if self
+                .nodes
+                .iter()
+                .all(|n| n.phase == Phase::Done || (n.permanent_absent && !n.present))
+            {
                 break;
             }
         }
@@ -1180,10 +1454,35 @@ fn main() {
     }
     drop(probe);
 
-    // ノード生成。--add 指定ノードは開始時不在 (β意味論):
-    // 隣接ノードは当該面を BC_DIRICHLET_ZERO (外部境界u=0)・界面登録なしで初期化する。
+    // F1: 未観測領域境界の設定 (透過境界なら指数和係数をここで一度だけ構成する。
+    // パラメータ・総和順は固定 = 決定論。libm による計算で OS 間もビット一致)
+    let t_coef: Option<TransparentCoef> = if cfg.unobserved_bc == UBc::Transparent {
+        let c = dyne_core::transparent::coefficients_with(cfg.alpha, cfg.dt, cfg.soe_h);
+        eprintln!(
+            "[sim] transparent境界: 指数和 M={} (h={}, c1={:.0e}, c2={:.0e}, T_ref={})",
+            c.decay.len(),
+            cfg.soe_h,
+            dyne_core::transparent::SOE_C1,
+            dyne_core::transparent::SOE_C2,
+            dyne_core::transparent::SOE_T_REF,
+        );
+        Some(c)
+    } else {
+        None
+    };
+    if cfg.unobserved_bc == UBc::LinearExtrap {
+        eprintln!(
+            "[sim] 警告: linear_extrap は拡散系では未観測領域境界の端点が時間凍結する \
+             (理論ノートT8)。拡散タスクでは zero_grad か transparent を推奨"
+        );
+    }
+
+    // ノード生成。--add 指定ノードは開始時不在、--absent 指定ノードは恒久不在 (β意味論):
+    // 隣接ノードは当該面を「未観測領域境界」(--unobserved-bc の設定キー、既定 zero_grad)・
+    // 界面登録なしで初期化する。グローバル外縁 (x=0, x=1) は常に Dirichlet u=0。
+    let ub_code = cfg.unobserved_bc.code();
     let absent_at_start: Vec<bool> = (0..n_nodes)
-        .map(|i| cfg.adds.iter().any(|&(a, _)| a == i))
+        .map(|i| cfg.adds.iter().any(|&(a, _)| a == i) || cfg.absent.contains(&i))
         .collect();
     let mut nodes = Vec::new();
     for i in 0..n_nodes {
@@ -1197,18 +1496,23 @@ fn main() {
             eprintln!("[sim] WARN: node {i} local h != global h (ビット一致は保証されない)");
         }
         let present = !absent_at_start[i];
-        let bc_l = if i == 0 || absent_at_start[i - 1] {
+        let bc_l = if i == 0 {
             BC_DIRICHLET
+        } else if absent_at_start[i - 1] {
+            ub_code
         } else {
             BC_INTERFACE
         };
-        let bc_r = if i == n_nodes - 1 || absent_at_start[i + 1] {
+        let bc_r = if i == n_nodes - 1 {
             BC_DIRICHLET
+        } else if absent_at_start[i + 1] {
+            ub_code
         } else {
             BC_INTERFACE
         };
         let mut actor = Actor::load_with(&engine, &module, &cfg.pinn_cfg);
         if present {
+            apply_face_config(&mut actor, i, n_nodes, bc_l, bc_r, &cfg.unobserved_bc, &t_coef);
             let rc = actor
                 .init
                 .call(
@@ -1237,6 +1541,9 @@ fn main() {
             cur_step: 0,
             got: Vec::new(),
             recv_grad: Vec::new(),
+            recv_val: Vec::new(),
+            permanent_absent: cfg.absent.contains(&i),
+            warm_join_pending: false,
             pending: HashMap::new(),
             sent: HashMap::new(),
             last_resend_us: 0,
@@ -1274,6 +1581,10 @@ fn main() {
         auto_log: Vec::new(),
         event_log: Vec::new(),
         field_log: Vec::new(),
+        starts: starts.clone(),
+        h_global: h,
+        t_coef,
+        reset_log: Vec::new(),
     };
     sim.run();
     assert_eq!(
@@ -1287,6 +1598,8 @@ fn main() {
     //   ADDあり → 複合参照解 (同じイベント時系列を単一配列で再現、ホスト側純Rust)
     let mut ref_history: Vec<Vec<f64>> = Vec::new();
     let reference: Vec<f64> = if cfg.adds.is_empty() {
+        // 部分観測 (--absent) でも基準解は**全域**の単一ノード解 (N10 の実験設計:
+        // 観測領域の誤差を全域基準解に対して測る)
         let mut single = Actor::load_with(&sim.engine, &sim.module, &cfg.pinn_cfg);
         let rc = single
             .init
@@ -1296,8 +1609,16 @@ fn main() {
             )
             .unwrap();
         assert_eq!(rc, 0);
+        let want_hist = cfg.error_csv.is_some() && !cfg.absent.is_empty();
         for _ in 0..cfg.steps {
             single.step.call(&mut single.store, ()).unwrap();
+            if want_hist {
+                ref_history.push(
+                    (0..n_pts)
+                        .map(|i| single.get.call(&mut single.store, i as u32).unwrap())
+                        .collect(),
+                );
+            }
         }
         (0..n_pts)
             .map(|i| single.get.call(&mut single.store, i as u32).unwrap())
@@ -1309,6 +1630,8 @@ fn main() {
             h,
             &absent_at_start,
             &sim.join_log,
+            &sim.reset_log,
+            &sim.t_coef,
             cfg.error_csv.is_some(),
         );
         ref_history = hist;
@@ -1317,13 +1640,18 @@ fn main() {
     let learning = sim.nodes[0].actor.is_learning();
 
     let mut exact = 0usize;
+    let mut obs_pts = 0usize;
     let mut max_diff = 0.0f64;
+    let mut l2r = 0.0f64;
     let mut l2 = 0.0f64;
     let mut linf = 0.0f64;
     let t_final = cfg.dt * (cfg.steps as f64);
     let decay = (-cfg.alpha * std::f64::consts::PI.powi(2) * t_final).exp();
     let mut node_linf_ref = vec![0.0f64; n_nodes];
     for i in 0..n_nodes {
+        if !sim.nodes[i].present {
+            continue; // 恒久不在ノード (部分観測): 計測対象外
+        }
         let (s, cnt) = starts[i];
         for k in 0..cnt {
             let gi = s + k;
@@ -1335,14 +1663,17 @@ fn main() {
             if u == us {
                 exact += 1;
             }
+            obs_pts += 1;
             max_diff = max_diff.max(d);
+            l2r += d * d;
             node_linf_ref[i] = node_linf_ref[i].max(d);
             let e = (u - (std::f64::consts::PI * x).sin() * decay).abs();
             l2 += e * e;
             linf = linf.max(e);
         }
     }
-    l2 = (l2 / (n_pts as f64)).sqrt();
+    l2 = (l2 / (obs_pts as f64)).sqrt();
+    l2r = (l2r / (obs_pts as f64)).sqrt();
 
     // 集計
     let makespan_ms = sim.now_us as f64 / 1000.0;
@@ -1378,6 +1709,18 @@ fn main() {
     if !cfg.adds.is_empty() {
         println!("adds={:?} (node@us, β=領域拡張)", cfg.adds);
     }
+    if !cfg.absent.is_empty() {
+        println!("absent={:?} (恒久不在=未観測領域、部分観測シナリオ)", cfg.absent);
+    }
+    // F1/F2 の設定表示。未観測領域境界が存在しない構成 (adds も absent もなし) では
+    // 設定は挙動に影響しないため表示しない (切り出し前基準出力との行単位比較を保つ)
+    if !cfg.adds.is_empty() || !cfg.absent.is_empty() {
+        println!(
+            "unobserved-bc = {} | join-init = {}",
+            cfg.unobserved_bc.label(),
+            if cfg.join_warm { "warm" } else { "blank" }
+        );
+    }
     let ref_name = if cfg.adds.is_empty() { "single" } else { "composite" };
     if learning {
         // 学習型アクター: モデルが違うのでビット一致は定義されない。誤差で報告する。
@@ -1397,13 +1740,34 @@ fn main() {
                 .collect::<Vec<_>>()
                 .join(", ")
         );
+    } else if !cfg.absent.is_empty() {
+        // 部分観測 (N10): 全域基準解に対する観測領域の誤差で報告 (ビット一致は
+        // 期待しない — 未観測領域の代理境界そのもののモデル化誤差を測っている)
+        println!(
+            "partial observation: observed {}/{} pts | Linf vs full single = {:.3e}, L2 = {:.3e}",
+            obs_pts, n_pts, max_diff, l2r
+        );
+        println!(
+            "per-node Linf vs single = [{}] (absent は -)",
+            (0..n_nodes)
+                .map(|i| if sim.nodes[i].present {
+                    format!("{:.1e}", node_linf_ref[i])
+                } else {
+                    "-".to_string()
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
     } else {
         println!(
             "bit-exact vs {}: {}/{} points, max_diff={:.3e}",
             ref_name, exact, n_pts, max_diff
         );
     }
-    if cfg.adds.is_empty() {
+    if !cfg.absent.is_empty() {
+        // 観測領域は端が解析解の境界と一致しないため解析解比較は意味を持たない
+        println!("L2 vs analytic: n/a (部分観測シナリオ)");
+    } else if cfg.adds.is_empty() {
         println!("L2 vs analytic = {:.3e}, Linf = {:.3e}", l2, linf);
     } else {
         // 領域が途中から拡張されるため sin減衰の解析解は適用外
@@ -1586,9 +1950,10 @@ fn main() {
             let mut l2 = 0.0f64;
             for k in 0..cnt {
                 let gi = s + k;
-                let r = if cfg.adds.is_empty() {
+                let r = if cfg.adds.is_empty() && cfg.absent.is_empty() {
                     (std::f64::consts::PI * (gi as f64) * h).sin() * dec
                 } else {
+                    // ADDあり = 複合参照解の履歴、部分観測 = 全域単一ノード解の履歴
                     ref_history[*step as usize][gi]
                 };
                 let e = (u[k] - r).abs();
@@ -1623,7 +1988,11 @@ fn main() {
         "msgs: sent={} lost={} resend={} replay={} | max node wait = {:.1} ms",
         sent, lost, resend, replay, max_wait_ms
     );
-    let pass = if learning { max_diff.is_finite() } else { exact == n_pts };
+    let pass = if learning || !cfg.absent.is_empty() {
+        max_diff.is_finite()
+    } else {
+        exact == n_pts
+    };
     if learning {
         println!(
             "RESULT: {}",
@@ -1631,6 +2000,15 @@ fn main() {
                 format!("DONE (learning actor, Linf vs {ref_name} = {max_diff:.3e})")
             } else {
                 "FAIL (NaN/inf in learning actor)".to_string()
+            }
+        );
+    } else if !cfg.absent.is_empty() {
+        println!(
+            "RESULT: {}",
+            if pass {
+                format!("DONE (partial observation, Linf vs full single = {max_diff:.3e})")
+            } else {
+                "FAIL (NaN/inf in partial observation)".to_string()
             }
         );
     } else {
@@ -1644,27 +2022,58 @@ fn main() {
 /// 複合参照解 (シナリオC): 「同じイベント時系列を単一の配列で再現する逐次計算」。
 /// 演算式・適用順序はアクター (heat1d-actor) と厳密に同一に保つこと。
 /// - 各ノードの初期化はアクターの dyne_init と同じ式 (x = x0 + i*h_node, sin_pi)。
-/// - 1ステップの更新は u[i] + r*(u[i-1] - 2.0*u[i] + u[i+1])。区間端は
-///   BC_DIRICHLET_ZERO 相当の 0.0 (不在領域に接する面もβ意味論で外部境界 u=0)。
+/// - 1ステップの更新は u[i] + r*(u[i-1] - 2.0*u[i] + u[i+1])。
+/// - 区間端 (グローバル外縁 = Dirichlet 0、不在領域に接する面 = --unobserved-bc の
+///   設定キー) はアクター dyne_step の各境界条件の式をそのまま鏡写しする (F1)。
+///   透過境界の補助変数 (面ごと) もアクターと同じ漸化式・同じ総和順で更新する。
 /// - 界面交換で結ばれた隣接ノード群は単一配列の連続区間と数値的に等価
 ///   (M-S0でビット一致を実証済み) なので、アクティブな連続区間ごとに更新する。
-/// - 参加ステップ S のノードは、ステップ S の計算前に sin 初期値で編入される。
+/// - 参加ステップ S のノードは、ステップ S の計算前に編入される。初期場は
+///   白紙 = sin、ウォームスタート (F2) = 両隣の値+勾配からの外挿 (warm_field)。
+/// - 参加イベントでは隣接ノードの再init (bc切替) が起きるため、その隣接ノードの
+///   透過境界の補助変数をリセットする (担当替え = 再発動、理論ノートT10)。
+///   handover の再init によるリセットは aux_resets (node, step) で受け取る。
+#[allow(clippy::too_many_arguments)]
 fn composite_reference(
     cfg: &Config,
     starts: &[(usize, usize)],
     h: f64,
     absent_at_start: &[bool],
     joins: &[JoinRec],
+    aux_resets: &[(usize, u64)],
+    coef: &Option<TransparentCoef>,
     want_history: bool,
 ) -> (Vec<f64>, Vec<Vec<f64>>) {
     let mut history = Vec::new();
     let n_nodes = starts.len();
     let n_pts = starts[n_nodes - 1].0 + starts[n_nodes - 1].1;
     let r = cfg.alpha * cfg.dt / (h * h);
+    let ub_code = cfg.unobserved_bc.code();
+    let ub_value = if let UBc::Dirichlet(v) = cfg.unobserved_bc { v } else { 0.0 };
+    let m = coef.as_ref().map(|c| c.decay.len()).unwrap_or(0);
     let mut u = vec![0.0f64; n_pts];
     let mut un = vec![0.0f64; n_pts];
     let mut active: Vec<bool> = absent_at_start.iter().map(|&a| !a).collect();
-    // dyne_init と同一の初期化 (bcがDirichletの端は0に丸め落とす)
+    // 透過境界の補助変数 (アクターの t_y の鏡写し。[node][face])
+    let mut ty = vec![[vec![0.0f64; m], vec![0.0f64; m]]; n_nodes];
+    // 透過境界の端点更新 (アクターの transparent_delta と厳密に同一の式・総和順)
+    let transparent_delta =
+        |ty_face: &mut Vec<f64>, coef: &TransparentCoef, stencil: f64, r: f64, h: f64| -> f64 {
+            let mut k_hist = 0.0;
+            let mut s0 = 0.0;
+            for j in 0..ty_face.len() {
+                k_hist += coef.weight[j] * (coef.decay[j] * ty_face[j]);
+                s0 += coef.weight[j] * coef.half[j];
+            }
+            let c2 = 2.0 * r * h;
+            let delta = (r * stencil - c2 * k_hist) / (1.0 + c2 * s0);
+            for j in 0..ty_face.len() {
+                ty_face[j] = coef.decay[j] * ty_face[j] + coef.half[j] * delta;
+            }
+            delta
+        };
+    // dyne_init と同一の初期化 (bcがDirichletの端は境界値に丸め落とす。
+    // グローバル外縁は 0、不在隣接への dirichlet(v) 面は v)
     let fill = |u: &mut Vec<f64>, i: usize, bcl: u32, bcr: u32| {
         let (s, cnt) = starts[i];
         let x0 = (s as f64) * h;
@@ -1674,22 +2083,27 @@ fn composite_reference(
             u[s + k] = sin_pi(x0 + (k as f64) * hn);
         }
         if bcl == BC_DIRICHLET {
-            u[s] = 0.0;
+            u[s] = if i == 0 { 0.0 } else { ub_value };
         }
         if bcr == BC_DIRICHLET {
-            u[s + cnt - 1] = 0.0;
+            u[s + cnt - 1] = if i == n_nodes - 1 { 0.0 } else { ub_value };
         }
     };
     for i in 0..n_nodes {
         if active[i] {
-            // 起動時のbc: 外縁と不在隣接の面が Dirichlet (シミュレータ本体と同一の規則)
-            let bcl = if i == 0 || absent_at_start[i - 1] {
+            // 起動時のbc: 外縁は Dirichlet 0、不在隣接の面は設定キー
+            // (シミュレータ本体と同一の規則)
+            let bcl = if i == 0 {
                 BC_DIRICHLET
+            } else if absent_at_start[i - 1] {
+                ub_code
             } else {
                 BC_INTERFACE
             };
-            let bcr = if i == n_nodes - 1 || absent_at_start[i + 1] {
+            let bcr = if i == n_nodes - 1 {
                 BC_DIRICHLET
+            } else if absent_at_start[i + 1] {
+                ub_code
             } else {
                 BC_INTERFACE
             };
@@ -1697,13 +2111,59 @@ fn composite_reference(
         }
     }
     for step in 0..cfg.steps {
-        // このステップから参加するノードを sin 初期値で編入 (実行時に記録したbcを使う)
+        // handover の再init: 透過境界の補助変数をリセット (担当替え = 再発動)
+        for &(nd, _) in aux_resets.iter().filter(|&&(_, s)| s == step) {
+            for face in 0..2 {
+                for yj in ty[nd][face].iter_mut() {
+                    *yj = 0.0;
+                }
+            }
+        }
+        // このステップから参加するノードを編入 (実行時に記録したbcを使う)
         for jr in joins.iter().filter(|j| j.step == step) {
             active[jr.node] = true;
-            fill(&mut u, jr.node, jr.bc.0, jr.bc.1);
+            if jr.warm {
+                // F2: 両隣 (界面がある側) の値+勾配から初期場を構成。値・勾配は
+                // 隣のステップ S−1 完了時の境界 = 今の u[] から、アクターの
+                // dyne_boundary_value / dyne_boundary_grad と同じ式で取り出す
+                let (s, cnt) = starts[jr.node];
+                let x0 = (s as f64) * h;
+                let x1 = ((s + cnt - 1) as f64) * h;
+                let hn = (x1 - x0) / ((cnt - 1) as f64);
+                let left = (jr.bc.0 == BC_INTERFACE).then(|| {
+                    let e = s - 1; // 左隣の右端 (FACE_RIGHT: 勾配 = (u[n-1]-u[n-2])/h)
+                    ((e as f64) * h, u[e], (u[e] - u[e - 1]) / h)
+                });
+                let right = (jr.bc.1 == BC_INTERFACE).then(|| {
+                    let e = s + cnt; // 右隣の左端 (FACE_LEFT: 勾配 = (u[1]-u[0])/h)
+                    ((e as f64) * h, u[e], (u[e + 1] - u[e]) / h)
+                });
+                for k in 0..cnt {
+                    u[s + k] = warm_field(left, right, x0 + (k as f64) * hn);
+                }
+                if jr.bc.0 == BC_DIRICHLET {
+                    u[s] = 0.0; // 参加ノードの Dirichlet 面はグローバル外縁のみ
+                }
+                if jr.bc.1 == BC_DIRICHLET {
+                    u[s + cnt - 1] = 0.0;
+                }
+            } else {
+                fill(&mut u, jr.node, jr.bc.0, jr.bc.1);
+            }
+            // 隣接ノードの再init (bc切替) の鏡写し: 透過境界の補助変数をリセット
+            for nb in [jr.node.checked_sub(1), Some(jr.node + 1)].into_iter().flatten() {
+                if nb < n_nodes && active[nb] && nb != jr.node {
+                    for face in 0..2 {
+                        for yj in ty[nb][face].iter_mut() {
+                            *yj = 0.0;
+                        }
+                    }
+                }
+            }
         }
-        // アクティブな連続区間ごとに1ステップ。区間端は 0.0 (グローバル境界または
-        // 不在領域への面 = どちらも Dirichlet 0)
+        // アクティブな連続区間ごとに1ステップ。区間端はアクター dyne_step の
+        // 境界条件の式を鏡写しする (グローバル外縁 = Dirichlet 0、
+        // 不在領域への面 = --unobserved-bc)
         let mut i = 0;
         while i < n_nodes {
             if !active[i] {
@@ -1716,11 +2176,49 @@ fn composite_reference(
             }
             let a = starts[p].0;
             let b = starts[i].0 + starts[i].1 - 1;
+            let code_a = if p == 0 { BC_DIRICHLET } else { ub_code };
+            let code_b = if i == n_nodes - 1 { BC_DIRICHLET } else { ub_code };
+            let ua = match code_a {
+                BC_ZERO_GRAD => u[a] + r * (u[a + 1] - 2.0 * u[a] + u[a + 1]),
+                BC_LINEAR_EXTRAP => {
+                    let gh = 2.0 * u[a] - u[a + 1];
+                    u[a] + r * (gh - 2.0 * u[a] + u[a + 1])
+                }
+                BC_TRANSPARENT => {
+                    let stencil = u[a + 1] - 2.0 * u[a] + u[a + 1];
+                    u[a] + transparent_delta(&mut ty[p][0], coef.as_ref().unwrap(), stencil, r, h)
+                }
+                _ => {
+                    if p == 0 {
+                        0.0
+                    } else {
+                        ub_value
+                    }
+                }
+            };
+            let ub = match code_b {
+                BC_ZERO_GRAD => u[b] + r * (u[b - 1] - 2.0 * u[b] + u[b - 1]),
+                BC_LINEAR_EXTRAP => {
+                    let gh = 2.0 * u[b] - u[b - 1];
+                    u[b] + r * (u[b - 1] - 2.0 * u[b] + gh)
+                }
+                BC_TRANSPARENT => {
+                    let stencil = u[b - 1] - 2.0 * u[b] + u[b - 1];
+                    u[b] + transparent_delta(&mut ty[i][1], coef.as_ref().unwrap(), stencil, r, h)
+                }
+                _ => {
+                    if i == n_nodes - 1 {
+                        0.0
+                    } else {
+                        ub_value
+                    }
+                }
+            };
             for k in a + 1..b {
                 un[k] = u[k] + r * (u[k - 1] - 2.0 * u[k] + u[k + 1]);
             }
-            un[a] = 0.0;
-            un[b] = 0.0;
+            un[a] = ua;
+            un[b] = ub;
             i += 1;
         }
         std::mem::swap(&mut u, &mut un);

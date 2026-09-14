@@ -1,7 +1,10 @@
-﻿# 基準①(既存全回帰の維持)の手元確認スクリプト (2026-09-06)。任意実行。
+﻿# 基準①(既存全回帰の維持)の手元確認スクリプト (2026-09-06、2026-09-14 F1対応)。任意実行。
 # 切り出し前のコミット a435bf6 を一時worktreeに取り出して dyne-sim をビルドし、
 # 現行の dyne-sim と同一コマンド・同一アクターWASMで全12シナリオを実行、
 # 標準出力・標準エラー・全CSV(計30ファイル)をバイト比較する。
+# F1対応 (2026-09-14): 現行側は --unobserved-bc dirichlet:0 を指定して従来挙動に固定し、
+# 現行側の out.log にだけ出る設定表示行 "unobserved-bc = ..."(--add のあるシナリオのみ)
+# を除いて比較する。数値出力 (CSV・RESULT行) は従来どおり全てバイト一致が条件。
 # リポジトリのルートで実行する: powershell -ExecutionPolicy Bypass -File scripts\check-baseline12.ps1
 # 期待結果: 12行すべて "MATCH"。初回はベースラインのビルドで数分かかる。
 # 後片付け: git worktree remove --force ..\dyne-base-a435bf6
@@ -46,16 +49,29 @@ foreach ($name in $scenarios.Keys) {
         $d = Join-Path $work "$side\$name"
         New-Item -ItemType Directory -Force $d | Out-Null
         Push-Location $d
-        if ($side -eq "base") { $exe = $baseExe } else { $exe = $curExe }
+        if ($side -eq "base") { $exe = $baseExe; $extra = @() }
+        else { $exe = $curExe; $extra = @("--unobserved-bc", "dirichlet:0") }  # F1: 従来挙動に固定
         # PS5.1 で stderr をリダイレクトすると ErrorRecord 化するため cmd.exe 経由で捕捉する
-        $q = ($sArgs | ForEach-Object { '"' + $_ + '"' }) -join " "
+        $q = (($extra + $sArgs) | ForEach-Object { '"' + $_ + '"' }) -join " "
         cmd /c "`"$exe`" $q > out.log 2> err.log"
         Pop-Location
     }
     $ok = $true
     $files = Get-ChildItem (Join-Path $work "base\$name") | Select-Object -ExpandProperty Name
     foreach ($f in $files) {
-        fc.exe /b (Join-Path $work "base\$name\$f") (Join-Path $work "cur\$name\$f") | Out-Null
+        $curPath = Join-Path $work "cur\$name\$f"
+        if ($f -eq "out.log") {
+            # F1の設定表示行 (現行側にのみ出る) を除いたコピーで比較する
+            $filtered = "$curPath.filtered"
+            Get-Content $curPath | Where-Object { $_ -notmatch "^unobserved-bc = " } |
+                Set-Content -Encoding utf8 $filtered
+            # ベースライン側も同じ読み書きを通して行末・BOM差を消す
+            $baseNorm = (Join-Path $work "base\$name\$f") + ".norm"
+            Get-Content (Join-Path $work "base\$name\$f") | Set-Content -Encoding utf8 $baseNorm
+            fc.exe (Resolve-Path $baseNorm) (Resolve-Path $filtered) | Out-Null
+        } else {
+            fc.exe /b (Join-Path $work "base\$name\$f") $curPath | Out-Null
+        }
         if ($LASTEXITCODE -ne 0) { $ok = $false; Write-Host "  DIFF: $name/$f" }
     }
     if ($ok) { Write-Host "MATCH  $name ($($files.Count) files)" }

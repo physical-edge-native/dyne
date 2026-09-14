@@ -6,3 +6,6 @@ edition = "2021"
 [dependencies]
 wasmi = "0.47"
 dyne-wire = { path = "../dyne-wire" }
+# 純Rustの数学関数 (exp/log/sqrt)。透過境界の係数計算をプラットフォーム非依存
+# (OS間ビット一致) に保つため、std の libm 依存関数は使わない
+libm = "0.2"
