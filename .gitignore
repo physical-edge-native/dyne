@@ -42,6 +42,19 @@ m2-esp32/sdkconfig
 m2-esp32/sdkconfig.old
 m2-esp32/dependencies.lock
 
+# ESP-IDF (node-esp32/ = 発注7の汎用ノードファーム)
+node-esp32/build/
+node-esp32/managed_components/
+node-esp32/sdkconfig
+node-esp32/sdkconfig.old
+node-esp32/dependencies.lock
+
+# MQTT観測ログ (scripts/mqtt_observe.py)
+mqtt_log/
+
+# Python のバイトコードキャッシュ
+__pycache__/
+
 # AOT実験の生成物 (wamrcで再生成できるためコミットしない)
 *.aot
 

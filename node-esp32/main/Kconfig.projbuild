@@ -1,0 +1,56 @@
+menu "Dyne Node"
+
+config DYNE_NODE_ID
+    int "Node ID (-1 = derive from MAC last byte)"
+    default -1
+    help
+        MQTTトピック dyne/cfg/<id> 等に使うノードID。シミュレータのノード番号と
+        同一の整数。-1 のときはMAC末尾バイトを仮IDにする (本運用では明示推奨)。
+
+config DYNE_WIFI_SSID
+    string "Wi-Fi SSID"
+    default "dyne-exp1"
+    help
+        接続先アクセスポイント。コントロールプレーンPCのモバイルホットスポット
+        またはルーター (全ノードとPCが同一セグメントにいること)。
+
+config DYNE_WIFI_PASS
+    string "Wi-Fi password"
+    default "dyne-exp1-pass"
+
+config DYNE_BROKER_URI
+    string "MQTT broker URI"
+    default "mqtt://192.168.137.1:1883"
+    help
+        PC上のブローカー (mosquitto等)。既定値はWindowsモバイルホットスポットの
+        ホスト側アドレスの例。
+
+config DYNE_UDP_PORT
+    int "Data-plane UDP port"
+    default 7777
+    help
+        データ面 (境界同期、40バイト意味論) の待受ポート。全ノード共通。
+
+config DYNE_I2C_SDA
+    int "I2C SDA GPIO"
+    default 21
+
+config DYNE_I2C_SCL
+    int "I2C SCL GPIO"
+    default 22
+
+config DYNE_BME280_ADDR
+    hex "BME280 I2C address"
+    default 0x76
+    help
+        モジュールにより 0x76 / 0x77。DHT20 は 0x38 固定。
+
+config DYNE_RSSI_SNIFF
+    bool "Neighbor RSSI via promiscuous sniffing"
+    default y
+    help
+        プロミスキャス受信でデータフレーム送信元MACごとのRSSIを集計する
+        (近傍ノードの相互RSSI)。受信コールバックのCPUコストが問題になる場合は
+        無効化する (AP RSSIのみ発行される)。
+
+endmenu
