@@ -48,6 +48,8 @@ pub struct Actor {
     /// 透過境界の指数和係数 (j, decay, half, weight) を1項ずつ渡す。
     /// dyne_init をまたいで保持される (補助変数のみ init でリセット)
     pub transparent_coef: Option<wasmi::TypedFunc<(u32, f64, f64, f64), ()>>,
+    /// 観測点ナッジング (発注8): (i, y, γ) → イノベーション d = y − u_i (適用前)
+    pub observe: Option<wasmi::TypedFunc<(u32, f64, f64), f64>>,
     /// wasm宣言の線形メモリ(ページ) — RAM上限チェック用
     pub memory_pages: u64,
 }
@@ -89,6 +91,9 @@ impl Actor {
                 .ok(),
             transparent_coef: instance
                 .get_typed_func::<(u32, f64, f64, f64), ()>(&store, "dyne_transparent_coef")
+                .ok(),
+            observe: instance
+                .get_typed_func::<(u32, f64, f64), f64>(&store, "dyne_observe")
                 .ok(),
             store,
             memory_pages,

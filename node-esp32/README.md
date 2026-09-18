@@ -30,10 +30,20 @@ m2-esp32 はマイルストーン成果物として凍結し、以後の実機�
    `python scripts/mqtt_config.py --broker localhost --nodes 2 --points 65
     --steps 2000 --peers <IP0>,<IP1> --sensor dht20 --start`
 5. `ack` → `configured` → `running` → 完走で `done`(温度配列CRC32つき)。
-   2台のCRCの組をシミュレータの同一構成の値と照合すれば協調の検証になる。
+   2台のCRCの組をシミュレータの同一構成の値(`dyne-sim.exe ... --crc`)と
+   照合すれば協調の検証になる。
+6. 復旧(ストール・離脱時): `python scripts/mqtt_config.py --broker localhost --stop`
+   → 再設定(手順4)→ start(規約§3.5の stop→再設定→再start)。
 
 ## 備考
 
+- **WASMは縮小版 heat1d_actor_small.wasm(線形メモリ1ページ=64KB)を使う**
+  (2026-09-18 実機不具合対応(b)): ESPr32(PSRAMなし)はDRAM区画の都合で連続
+  ヒープが最大約108KBのため、フル版の128KBは構造的に確保できない。縮小版は
+  N_MAX=2048・スタック8KBで、数値経路はフル版と同一(シミュレータで全出力
+  バイト一致を確認済み)。再生成は `scripts\build-actor-wasm.ps1`。
+  WASM初期化はWi-Fiより先(起動直後の未断片ヒープで確保)。起動ログの
+  `[dyne] heap(...)` 4点が余裕の定点観測。経緯はレポート§6.6。
 - Wi-FiはSTA専用(APはPC側)。M2のノードA=AP方式は第1段では使わない
   (制御面の中心=接続時のみのPC、の原則に合わせた)。
 - `ctl: start` は再実行可(dyne_init のやり直しで場と透過境界の補助変数が

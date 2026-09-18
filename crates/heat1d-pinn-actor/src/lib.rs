@@ -1163,6 +1163,25 @@ pub extern "C" fn dyne_get(i: u32) -> f64 {
     }
 }
 
+/// 観測点ナッジング (発注8、2026-09-18): 学習型は「値を作って合わせる」流儀
+/// (iface=1 と同型)——ナッジング後の値を標本 u_prev[i] に書き、次ステップの
+/// 最適化がその標本を目標として場を合わせる。戻り値は適用前のイノベーション
+/// d = y − u_prev[i]。γと観測周期はホストの設定情報 (アクターは状態を持たない)。
+#[no_mangle]
+pub extern "C" fn dyne_observe(i: u32, y: f64, gamma: f64) -> f64 {
+    let s = st();
+    let i = i as usize;
+    if i >= s.n {
+        return f64::NAN;
+    }
+    let d = y - s.u_prev[i];
+    let nudged = s.u_prev[i] + gamma * d;
+    s.u_prev[i] = nudged;
+    s.u[i] = nudged;
+    s.mid_valid = false; /* dyne_set と同じ扱い: 細分点標本は次ステップ冒頭に再構成 */
+    d
+}
+
 /// 状態の書き込み (移送)。格子点の標本を上書きし、次ステップの u_prev にもする。
 /// 重みはそのまま (dyne_init 直後なら乱数初期値 → 予約済みの温めで標本に合わせる)。
 #[no_mangle]

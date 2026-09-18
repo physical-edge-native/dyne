@@ -111,6 +111,13 @@ static void on_mqtt(void *arg, esp_event_base_t base, int32_t id, void *data)
         if (ev->topic_len == 0 || strncmp(ev->topic, "dyne/cfg/", 9) == 0) {
             dyne_on_cfg(s_rxbuf, len);
         } else if (strncmp(ev->topic, "dyne/ctl/", 9) == 0) {
+            /* 規約 §3.6: ctl (号令) は retain 禁止。retained フラグの立った号令は
+             * 貼り置き=定義上古いので無視する (start直後に古いstopが再配達されて
+             * 即停止する事故のクラスを受信側でも遮断。2026-09-18) */
+            if (ev->retain) {
+                ESP_LOGW(TAG, "retained ctl ignored (stale command): %.*s", len, s_rxbuf);
+                break;
+            }
             dyne_on_ctl(s_rxbuf, len);
         }
         break;
@@ -132,8 +139,11 @@ void dyne_mqtt_start(void)
             .qos = 1,
             .retain = true,
         },
-        .buffer.size = 8192,      /* transparent 係数込みの cfg を1イベントで受ける */
-        .buffer.out_size = 4096,  /* field 等の観測発行用 */
+        /* 2026-09-18 実機不具合対応: ESPr32 (PSRAMなし) のヒープ節約のため縮小。
+         * transparent 係数込みの cfg (~2.4KB) は1イベントで収まり、より大きい
+         * ペイロードも分割到着の組み立て (s_rxbuf) が受ける */
+        .buffer.size = 4096,
+        .buffer.out_size = 2048,  /* field 等の観測発行用 */
     };
     s_client = esp_mqtt_client_init(&cfg);
     esp_mqtt_client_register_event(s_client, ESP_EVENT_ANY_ID, on_mqtt, NULL);

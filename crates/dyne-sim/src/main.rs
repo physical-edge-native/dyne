@@ -121,6 +121,17 @@ struct Config {
     /// transparent の指数和構成の刻み (実験用。既定 SOE_H=0.6 → M=32。
     /// 0.3 → M=64。誤差床の切り分け用で、既定運用では変えない)
     soe_h: f64,
+    /// 発注8: 観測点ナッジングの強度 γ (0.0 = 無効が既定。u ← u + γ(y−u))
+    nudge_gamma: f64,
+    /// 発注8: 観測周期 (ステップ)。各現存ノードは担当区間の中央格子点を観測する
+    obs_period: u64,
+    /// 発注8: 合成観測の正規ノイズ σ (観測 y = 基準解 + σ·N(0,1)。シード固定)
+    obs_sigma: f64,
+    /// 発注8: イノベーション d = y − u (適用前) の時系列CSV出力先
+    innovation_csv: Option<String>,
+    /// ノード別の温度配列バイト列のCRC32を表示する (実機 status:done の crc32 と
+    /// 同一の定義 = f64リトルエンディアン連結のIEEE CRC32。実機照合用)
+    crc: bool,
 }
 
 /// F1: 未観測領域境界の設定キー (docs/2026-09-14-f1-boundary-design.md)
@@ -266,6 +277,11 @@ fn parse_args() -> Config {
         absent: Vec::new(),
         join_warm: false, // 既定は白紙 (dirichlet(0)指定だけで既存回帰とビット一致を保つ)
         soe_h: dyne_core::transparent::SOE_H,
+        nudge_gamma: 0.0,
+        obs_period: 10,
+        obs_sigma: 0.0,
+        innovation_csv: None,
+        crc: false,
     };
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -351,6 +367,10 @@ fn parse_args() -> Config {
             }
             "--unobserved-bc" => c.unobserved_bc = UBc::parse(&val()),
             "--soe-h" => c.soe_h = val().parse().expect("--soe-h <正の実数>"),
+            "--nudge-gamma" => c.nudge_gamma = val().parse().expect("--nudge-gamma <γ>"),
+            "--obs-period" => c.obs_period = val().parse().expect("--obs-period <ステップ>"),
+            "--obs-sigma" => c.obs_sigma = val().parse().expect("--obs-sigma <σ>"),
+            "--innovation-csv" => c.innovation_csv = Some(val()),
             "--absent" => {
                 // 恒久不在ノードのカンマ区切りリスト (部分観測シナリオ)
                 c.absent = val().split(',').map(|s| s.parse().expect("--absent n,n,...")).collect();
@@ -361,6 +381,10 @@ fn parse_args() -> Config {
                     "warm" => true,
                     _ => panic!("--join-init blank | warm"),
                 };
+            }
+            "--crc" => {
+                c.crc = true;
+                i -= 1;
             }
             "--quiet" => {
                 c.quiet = true;
@@ -393,6 +417,12 @@ fn parse_args() -> Config {
         for &(n, _, _) in &c.resizes {
             assert!(!c.absent.contains(&n), "--absent のノード {n} は resize 対象にできない");
         }
+    }
+    if c.nudge_gamma != 0.0 {
+        assert!(c.nudge_gamma > 0.0, "--nudge-gamma は正の値");
+        assert!(c.obs_period >= 1, "--obs-period は1以上");
+        // 最小形: 観測=単一ノード基準解ベース。領域拡張 (--add) との併用は未対応
+        assert!(c.adds.is_empty(), "--nudge-gamma は --add と併用不可 (最小形)");
     }
     c
 }
@@ -566,6 +596,13 @@ struct Sim {
     /// handover による透過境界の補助変数リセットの記録: (node, 有効ステップ)。
     /// 複合参照解が同じ位置でリセットする (担当替え = 透過境界の再発動、理論ノートT10)
     reset_log: Vec<(usize, u64)>,
+    // ---- 発注8: 観測点ナッジング ----
+    /// 合成観測の真値 = 単一ノード基準解の全履歴 [step][gi] (γ>0 のときのみ)
+    obs_truth: Vec<Vec<f64>>,
+    /// 観測ノイズ用の決定論的乱数 (通信の乱数とは独立の系列)
+    obs_rng: dyne_core::rng::Rng,
+    /// イノベーションの記録: (node, step, 大域格子点, 観測値y, d=y−u適用前)
+    innovation_log: Vec<(usize, u64, usize, f64, f64)>,
 }
 
 /// F1: 未観測領域境界の面ごとの設定をアクターへ注入する。dyne_init の**前**に呼ぶ
@@ -1344,6 +1381,33 @@ impl Sim {
         }
     }
 
+    /// 発注8: 観測点ナッジング。ステップ完了直後、観測周期ごとに、担当区間の
+    /// 中央格子点の計算値を合成観測 y = 基準解 + σ·N(0,1) へ引き寄せる。
+    /// 式そのものはアクター内 (dyne_observe) にあり、戻り値のイノベーション
+    /// d = y − u (適用前) を記録する (閾値判定はしない。計測のみ)。
+    fn apply_observation(&mut self, node: usize) {
+        let step = self.nodes[node].cur_step;
+        let (s, cnt) = self.starts[node];
+        let li = cnt / 2; // 各ノード1観測点 = 担当区間の中央格子点 (実装側の設計)
+        let gi = s + li;
+        let truth = self.obs_truth[step as usize][gi];
+        let y = if self.cfg.obs_sigma > 0.0 {
+            // Box-Muller (libm = 決定論)。消費順はイベント処理順で固定
+            let u1 = self.obs_rng.uniform().max(1e-300);
+            let u2 = self.obs_rng.uniform();
+            let n01 = libm::sqrt(-2.0 * libm::log(u1))
+                * libm::cos(2.0 * std::f64::consts::PI * u2);
+            truth + self.cfg.obs_sigma * n01
+        } else {
+            truth
+        };
+        let gamma = self.cfg.nudge_gamma;
+        let nd = &mut self.nodes[node];
+        let f = nd.actor.observe.expect("このアクターは dyne_observe を持たない");
+        let d = f.call(&mut nd.actor.store, (li as u32, y, gamma)).unwrap();
+        self.innovation_log.push((node, step, gi, y, d));
+    }
+
     fn on_step_done(&mut self, node: usize) {
         if self.cfg.field_csv.is_some() && self.nodes[node].cur_step % self.cfg.field_every == 0 {
             let nd = &mut self.nodes[node];
@@ -1359,6 +1423,13 @@ impl Sim {
                 .map(|i| nd.actor.get.call(&mut nd.actor.store, i).unwrap())
                 .collect();
             self.snap_log.push((node, nd.cur_step, u));
+        }
+        // 発注8: 観測周期ごとのナッジング (計算完了直後 = 次ステップの交換前。
+        // 実機ファームの適用点と同一)
+        if self.cfg.nudge_gamma > 0.0
+            && (self.nodes[node].cur_step + 1) % self.cfg.obs_period == 0
+        {
+            self.apply_observation(node);
         }
         let next = self.nodes[node].cur_step + 1;
         if next >= self.cfg.steps {
@@ -1477,6 +1548,32 @@ fn main() {
         );
     }
 
+    // 発注8: 合成観測の真値 = 単一ノード基準解 (同一wasm・全域) の全履歴。
+    // ナッジング有効時のみ、シミュレーション本体より先に計算しておく
+    let obs_truth: Vec<Vec<f64>> = if cfg.nudge_gamma > 0.0 {
+        let mut single = Actor::load_with(&engine, &module, &cfg.pinn_cfg);
+        let rc = single
+            .init
+            .call(
+                &mut single.store,
+                (n_pts as u32, 0.0, 1.0, cfg.alpha, cfg.dt, BC_DIRICHLET, BC_DIRICHLET),
+            )
+            .unwrap();
+        assert_eq!(rc, 0);
+        let mut hist = Vec::with_capacity(cfg.steps as usize);
+        for _ in 0..cfg.steps {
+            single.step.call(&mut single.store, ()).unwrap();
+            hist.push(
+                (0..n_pts)
+                    .map(|i| single.get.call(&mut single.store, i as u32).unwrap())
+                    .collect(),
+            );
+        }
+        hist
+    } else {
+        Vec::new()
+    };
+
     // ノード生成。--add 指定ノードは開始時不在、--absent 指定ノードは恒久不在 (β意味論):
     // 隣接ノードは当該面を「未観測領域境界」(--unobserved-bc の設定キー、既定 zero_grad)・
     // 界面登録なしで初期化する。グローバル外縁 (x=0, x=1) は常に Dirichlet u=0。
@@ -1585,6 +1682,10 @@ fn main() {
         h_global: h,
         t_coef,
         reset_log: Vec::new(),
+        obs_truth,
+        // 観測ノイズの系列は通信 (VirtNet) の乱数と独立。タグ 0xD1E で導出
+        obs_rng: dyne_core::rng::Rng::new(dyne_core::rng::derive_seed(cfg.seed, 0xD1E)),
+        innovation_log: Vec::new(),
     };
     sim.run();
     assert_eq!(
@@ -1597,7 +1698,14 @@ fn main() {
     //   ADDなし → 単一ノード参照解 (同一wasm・全域) — 従来どおり
     //   ADDあり → 複合参照解 (同じイベント時系列を単一配列で再現、ホスト側純Rust)
     let mut ref_history: Vec<Vec<f64>> = Vec::new();
-    let reference: Vec<f64> = if cfg.adds.is_empty() {
+    let reference: Vec<f64> = if cfg.nudge_gamma > 0.0 {
+        // ナッジング有効時: 基準解 = 観測の真値 (単一ノード解、同化なし) を再利用
+        let r = sim.obs_truth.last().unwrap().clone();
+        if cfg.error_csv.is_some() {
+            ref_history = std::mem::take(&mut sim.obs_truth);
+        }
+        r
+    } else if cfg.adds.is_empty() {
         // 部分観測 (--absent) でも基準解は**全域**の単一ノード解 (N10 の実験設計:
         // 観測領域の誤差を全域基準解に対して測る)
         let mut single = Actor::load_with(&sim.engine, &sim.module, &cfg.pinn_cfg);
@@ -1645,6 +1753,9 @@ fn main() {
     let mut l2r = 0.0f64;
     let mut l2 = 0.0f64;
     let mut linf = 0.0f64;
+    // NaN は f64::max に無視されるため明示的に検出する (発注8で顕在化したバグの修正:
+    // 発散した場が「Linf=0」と報告され安定と誤判定されていた)
+    let mut nonfinite = false;
     let t_final = cfg.dt * (cfg.steps as f64);
     let decay = (-cfg.alpha * std::f64::consts::PI.powi(2) * t_final).exp();
     let mut node_linf_ref = vec![0.0f64; n_nodes];
@@ -1660,6 +1771,9 @@ fn main() {
             let x = n.actor.x.call(&mut n.actor.store, k as u32).unwrap();
             let us = reference[gi];
             let d = (u - us).abs();
+            if !u.is_finite() {
+                nonfinite = true;
+            }
             if u == us {
                 exact += 1;
             }
@@ -1721,6 +1835,16 @@ fn main() {
             if cfg.join_warm { "warm" } else { "blank" }
         );
     }
+    // 発注8: ナッジング設定の表示 (無効時は非表示 = 既存基準出力との行単位一致を保つ)
+    if cfg.nudge_gamma > 0.0 {
+        println!(
+            "nudging: gamma={} period={} sigma={} obs={}本 (各現存ノードの中央格子点、y=単一基準解+σN(0,1))",
+            cfg.nudge_gamma,
+            cfg.obs_period,
+            cfg.obs_sigma,
+            sim.innovation_log.len()
+        );
+    }
     let ref_name = if cfg.adds.is_empty() { "single" } else { "composite" };
     if learning {
         // 学習型アクター: モデルが違うのでビット一致は定義されない。誤差で報告する。
@@ -1758,6 +1882,13 @@ fn main() {
                 .collect::<Vec<_>>()
                 .join(", ")
         );
+    } else if cfg.nudge_gamma > 0.0 {
+        // ナッジング有効: 基準解 = 同化なしの真値なのでビット一致は主張しない。
+        // 誤差 (同化の効果) で報告する
+        println!(
+            "nudging: Linf vs single(no assim) = {:.3e}, L2 = {:.3e}",
+            max_diff, l2r
+        );
     } else {
         println!(
             "bit-exact vs {}: {}/{} points, max_diff={:.3e}",
@@ -1772,6 +1903,28 @@ fn main() {
     } else {
         // 領域が途中から拡張されるため sin減衰の解析解は適用外
         println!("L2 vs analytic: n/a (領域拡張シナリオ)");
+    }
+
+    // ---- 実機照合用: ノード別の温度配列CRC32 (--crc。2026-09-18追加) ----
+    // 定義は実機ファーム (status: done の crc32) と同一: 各ノードの u[] を
+    // f64 リトルエンディアンで連結したバイト列の IEEE CRC32。
+    if cfg.crc {
+        let mut parts = Vec::new();
+        for i in 0..n_nodes {
+            if !sim.nodes[i].present {
+                parts.push(format!("node {i}: -"));
+                continue;
+            }
+            let (_, cnt) = starts[i];
+            let mut bytes = Vec::with_capacity(cnt * 8);
+            for k in 0..cnt {
+                let n = &mut sim.nodes[i];
+                let u = n.actor.get.call(&mut n.actor.store, k as u32).unwrap();
+                bytes.extend_from_slice(&u.to_le_bytes());
+            }
+            parts.push(format!("node {i}: 0x{:08X}", crc32_ieee(&bytes)));
+        }
+        println!("CRC32(u bytes) = [{}]", parts.join(", "));
     }
 
     // ---- シナリオC計測: 界面残差の乱れ (ピーク) と回復時間 ----
@@ -1950,10 +2103,10 @@ fn main() {
             let mut l2 = 0.0f64;
             for k in 0..cnt {
                 let gi = s + k;
-                let r = if cfg.adds.is_empty() && cfg.absent.is_empty() {
+                let r = if cfg.adds.is_empty() && cfg.absent.is_empty() && cfg.nudge_gamma == 0.0 {
                     (std::f64::consts::PI * (gi as f64) * h).sin() * dec
                 } else {
-                    // ADDあり = 複合参照解の履歴、部分観測 = 全域単一ノード解の履歴
+                    // ADDあり = 複合参照解、部分観測/ナッジング = 全域単一ノード解の履歴
                     ref_history[*step as usize][gi]
                 };
                 let e = (u[k] - r).abs();
@@ -1965,6 +2118,15 @@ fn main() {
         }
         std::fs::write(path, out).expect("write error csv");
         eprintln!("[sim] error csv written: {path}");
+    }
+    if let Some(path) = &cfg.innovation_csv {
+        // 発注8: イノベーション d = y − u (ナッジング適用前) の時系列
+        let mut out = String::from("node,step,gi,y,innovation\n");
+        for &(node, step, gi, y, d) in &sim.innovation_log {
+            out.push_str(&format!("{},{},{},{:e},{:e}\n", node, step, gi, y, d));
+        }
+        std::fs::write(path, out).expect("write innovation csv");
+        eprintln!("[sim] innovation csv written: {path}");
     }
     if let Some(path) = &cfg.residual_csv {
         let mut out = String::from("iface,step,residual\n");
@@ -1988,10 +2150,14 @@ fn main() {
         "msgs: sent={} lost={} resend={} replay={} | max node wait = {:.1} ms",
         sent, lost, resend, replay, max_wait_ms
     );
-    let pass = if learning || !cfg.absent.is_empty() {
-        max_diff.is_finite()
+    let nudged = cfg.nudge_gamma > 0.0;
+    if nonfinite {
+        max_diff = f64::INFINITY; // 発散の明示 (NaN混入でも FAIL に落とす)
+    }
+    let pass = if learning || !cfg.absent.is_empty() || nudged {
+        max_diff.is_finite() && !nonfinite
     } else {
-        exact == n_pts
+        exact == n_pts && !nonfinite
     };
     if learning {
         println!(
@@ -2009,6 +2175,15 @@ fn main() {
                 format!("DONE (partial observation, Linf vs full single = {max_diff:.3e})")
             } else {
                 "FAIL (NaN/inf in partial observation)".to_string()
+            }
+        );
+    } else if nudged {
+        println!(
+            "RESULT: {}",
+            if pass {
+                format!("DONE (nudging, Linf vs single(no assim) = {max_diff:.3e})")
+            } else {
+                "FAIL (NaN/inf with nudging)".to_string()
             }
         );
     } else {
@@ -2245,6 +2420,19 @@ fn sin_pi(x: f64) -> f64 {
         + t2 * (-1.0 / 6.0
             + t2 * (1.0 / 120.0
                 + t2 * (-1.0 / 5040.0 + t2 * (1.0 / 362880.0 + t2 * (-1.0 / 39916800.0))))))
+}
+
+/// IEEE CRC32 (dyne-proto::crc32・実機ファームの crc32_ieee と同一の式)
+fn crc32_ieee(d: &[u8]) -> u32 {
+    let mut c: u32 = 0xFFFF_FFFF;
+    for &b in d {
+        c ^= b as u32;
+        for _ in 0..8 {
+            let m = (c & 1).wrapping_neg();
+            c = (c >> 1) ^ (0xEDB8_8320 & m);
+        }
+    }
+    !c
 }
 
 fn median(v: &mut Vec<f64>) -> f64 {

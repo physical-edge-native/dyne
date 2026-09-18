@@ -6,3 +6,5 @@ edition = "2021"
 [dependencies]
 wasmi = "0.47"
 dyne-core = { path = "../dyne-core" }
+# 観測ノイズの Box-Muller (発注8)。純Rustでプラットフォーム非依存の決定論
+libm = "0.2"

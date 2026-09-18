@@ -28,6 +28,8 @@
 /* ==== 設定 (dyne/cfg/<id> の受理結果) ==== */
 typedef struct {
     bool valid;
+    /* 世代番号 (規約 §3.6 鮮度管理。注入ツールが単調増加で付与、ackにエコー) */
+    uint32_t gen;
     /* cluster */
     int n_nodes, points;
     double alpha, dt;
@@ -53,6 +55,10 @@ typedef struct {
     int sensor;                    /* 0=none, 1=dht20, 2=bme280 */
     int sensor_period_ms, rssi_period_ms;
     int field_every, residual_every, rt_every;
+    /* assim (発注8: 観測点ナッジング。規約 §2.1) */
+    double nudge_gamma;            /* 0.0 = 無効 */
+    int obs_period;                /* 観測周期 (ステップ。シミュレータと同一の意味論) */
+    int obs_point;                 /* 観測点 = 担当区間内の局所格子点 (-1 = 中央 n/2) */
 } dyne_cfg_t;
 
 /* ==== ノード状態 (status トピックの state) ==== */
@@ -87,6 +93,8 @@ void dyne_mqtt_pub_status(dyne_state_t st, const char *extra_json_fields);
 
 /* sensors.c: DHT20 / BME280 (I2C)。読取はタスクが周期実行し sensor トピックへ発行 */
 void dyne_sensors_start(void);
+/* 最新の温度読取値 (発注8: ナッジングの観測値)。読取成功が一度もなければ false */
+bool dyne_sensor_latest(double *temp_c, int64_t *t_ms);
 
 /* rssi.c: AP RSSI + 近傍RSSI (プロミスキャス受信)。rssi トピックへ周期発行 */
 void dyne_rssi_start(void);

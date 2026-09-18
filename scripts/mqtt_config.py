@@ -63,7 +63,10 @@ def split(points, nodes):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--broker", default="localhost")
-    ap.add_argument("--nodes", type=int, required=True)
+    ap.add_argument("--stop", action="store_true",
+                    help="ctl: stop だけを発行して終了 (設定注入なし)。ストール時の"
+                         "復旧手順 stop→再設定→再start の第1手 (規約 §3.5)")
+    ap.add_argument("--nodes", type=int)
     ap.add_argument("--points", type=int, default=65)
     ap.add_argument("--steps", type=int, default=2000)
     ap.add_argument("--alpha", type=float, default=1.0)
@@ -74,7 +77,7 @@ def main():
                     help="不在隣接への面の境界条件キー (外縁は常に dirichlet 0)")
     ap.add_argument("--dirichlet-value", type=float, default=0.0)
     ap.add_argument("--absent", default="", help="恒久不在ノードのカンマ区切り (部分観測)")
-    ap.add_argument("--peers", required=True,
+    ap.add_argument("--peers",
                     help="ノード順のIPカンマ区切り (不在ノードは '-')")
     ap.add_argument("--sensor", default="none", choices=["none", "dht20", "bme280"])
     ap.add_argument("--sensor-period-ms", type=int, default=5000)
@@ -82,10 +85,30 @@ def main():
     ap.add_argument("--field-every", type=int, default=50)
     ap.add_argument("--residual-every", type=int, default=10)
     ap.add_argument("--rt-every", type=int, default=100)
+    ap.add_argument("--gamma", type=float, default=0.0,
+                    help="観測点ナッジングの強度 γ (0=無効。発注8)")
+    ap.add_argument("--obs-period", type=int, default=10, help="観測周期 (ステップ)")
+    ap.add_argument("--obs-point", type=int, default=-1,
+                    help="観測点 = 局所格子点 (-1 = 中央 n/2)")
     ap.add_argument("--start", action="store_true", help="設定注入後に start を発行")
     ap.add_argument("--dry-run", action="store_true", help="接続せずJSONを表示")
     a = ap.parse_args()
 
+    if a.stop:
+        # 単独発行モード: 設定注入なしに全ノードへ stop (走行中でも受理され、
+        # 設定保持のまま idle へ戻る。復旧は 再設定 → --start)
+        cl = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+        cl.connect(a.broker, 1883, 60)
+        cl.loop_start()
+        # ctl は retain 禁止 (規約 §3.6: 号令は鮮度が命。貼り置くと start 直後に
+        # 再配達されて即停止する事故になる)。明示的に retain=False で発行する
+        r = cl.publish("dyne/ctl/all", json.dumps({"cmd": "stop"}), qos=1, retain=False)
+        r.wait_for_publish()
+        cl.loop_stop()
+        print("published dyne/ctl/all stop (retain=False)")
+        return
+
+    assert a.nodes is not None and a.peers is not None, "--nodes と --peers は必須 (--stop 単独時を除く)"
     absent = set(int(s) for s in a.absent.split(",") if s != "")
     ips = a.peers.split(",")
     assert len(ips) == a.nodes, "--peers はノード数と同数"
@@ -118,6 +141,9 @@ def main():
                                "peer": f"{ips[nb]}:{UDP_PORT}"})
         cfgs[i] = {
             "ver": 1,
+            # 世代番号 (規約 §3.6 鮮度管理): 注入のたびに単調増加。ノードは ack と
+            # status (configured) にエコーし、PC側で全ノードの世代一致を照合できる
+            "gen": int(time.time()),
             "cluster": {"n_nodes": a.nodes, "points": a.points, "alpha": a.alpha,
                         "dt": a.dt, "steps": a.steps, "seed": a.seed},
             "node": {"idx": i, "n": cnt, "x0": s * h, "x1": (s + cnt - 1) * h},
@@ -129,6 +155,8 @@ def main():
                      "field_every": a.field_every,
                      "residual_every": a.residual_every,
                      "rt_every": a.rt_every},
+            "assim": {"gamma": a.gamma, "obs_period": a.obs_period,
+                      "obs_point": a.obs_point},
         }
 
     if a.dry_run:
@@ -146,9 +174,9 @@ def main():
         print(f"published dyne/cfg/{i} (retained, {len(json.dumps(c))} bytes)")
     if a.start:
         time.sleep(1.0)  # ack を待つ猶予 (厳密には mqtt_observe で ack を確認してから)
-        r = cl.publish("dyne/ctl/all", json.dumps({"cmd": "start"}), qos=1)
+        r = cl.publish("dyne/ctl/all", json.dumps({"cmd": "start"}), qos=1, retain=False)
         r.wait_for_publish()
-        print("published dyne/ctl/all start")
+        print("published dyne/ctl/all start (retain=False)")
     cl.loop_stop()
 
 

@@ -27,6 +27,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
+#include "esp_heap_caps.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_log.h"
@@ -43,9 +44,14 @@
 
 static const char *TAG = "dyne-node";
 
-/* ==== 埋め込みWASM (F1の4キー対応版 heat1d_actor) ==== */
-extern const uint8_t wasm_start[] asm("_binary_heat1d_actor_wasm_start");
-extern const uint8_t wasm_end[]   asm("_binary_heat1d_actor_wasm_end");
+/* ==== 埋め込みWASM (F1の4キー対応・縮小版 heat1d_actor_small) ====
+ * ESPr32 (PSRAMなし) はDRAM区画の都合で連続ヒープが最大約108KBのため、
+ * フル版の線形メモリ2ページ=128KBは構造的に確保できない (2026-09-18 実機実測)。
+ * 縮小版 (N_MAX=2048, スタック8KB) は1ページ=64KB。数値経路はフル版と同一で、
+ * シミュレータでの全出力バイト一致を確認済み (発注7レポート §6.6)。
+ * ビルド: scripts/build-actor-wasm.ps1 */
+extern const uint8_t wasm_start[] asm("_binary_heat1d_actor_small_wasm_start");
+extern const uint8_t wasm_end[]   asm("_binary_heat1d_actor_small_wasm_end");
 
 /* ==== グローバル ==== */
 dyne_cfg_t g_cfg;
@@ -55,6 +61,16 @@ volatile bool g_start_req, g_stop_req, g_report_req;
 #define RESEND_MIN_US  20000  /* 再送バックオフ (M1知見4) */
 #define RECV_SLICE_MS  20
 #define DRAIN_MS       3000
+
+/* ヒープ診断 (発注7実機不具合の切り分け、2026-09-18): 空き総量と最大連続ブロック。
+ * WASMの線形メモリ (128KB) は**連続**した内部RAMを要するため、largest が
+ * 128KB+α を下回ると instantiate が失敗する */
+static void log_heap(const char *when)
+{
+    printf("[dyne] heap(%s): free=%u largest=%u (internal 8bit)\n", when,
+           (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+           (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+}
 
 int dyne_node_id(void)
 {
@@ -211,6 +227,8 @@ static bool parse_cfg(const char *payload, int len, dyne_cfg_t *c, char *err, si
     if (!root) { snprintf(err, errlen, "json parse"); return false; }
     bool ok = false;
     do {
+        const cJSON *g = cJSON_GetObjectItem(root, "gen");
+        c->gen = (g && cJSON_IsNumber(g)) ? (uint32_t)g->valuedouble : 0;
         const cJSON *cl = cJSON_GetObjectItem(root, "cluster");
         const cJSON *nd = cJSON_GetObjectItem(root, "node");
         const cJSON *bc = cJSON_GetObjectItem(root, "bc");
@@ -279,6 +297,24 @@ static bool parse_cfg(const char *payload, int len, dyne_cfg_t *c, char *err, si
         c->field_every = 50;
         c->residual_every = 10;
         c->rt_every = 100;
+        c->nudge_gamma = 0.0;
+        c->obs_period = 10;
+        c->obs_point = -1; /* -1 = 担当区間の中央 n/2 (シミュレータと同一) */
+        const cJSON *as = cJSON_GetObjectItem(root, "assim");
+        if (as) {
+            const cJSON *v;
+            if ((v = cJSON_GetObjectItem(as, "gamma")) && cJSON_IsNumber(v))
+                c->nudge_gamma = v->valuedouble;
+            if ((v = cJSON_GetObjectItem(as, "obs_period")) && cJSON_IsNumber(v))
+                c->obs_period = v->valueint;
+            if ((v = cJSON_GetObjectItem(as, "obs_point")) && cJSON_IsNumber(v))
+                c->obs_point = v->valueint;
+            if (c->nudge_gamma < 0.0 || c->obs_period < 1
+                || c->obs_point >= c->n) {
+                snprintf(err, errlen, "bad assim");
+                goto fail;
+            }
+        }
         if (mo) {
             const cJSON *v;
             if ((v = cJSON_GetObjectItem(mo, "role")) && cJSON_IsString(v))
@@ -309,10 +345,14 @@ void dyne_on_cfg(const char *payload, int len)
     snprintf(sub, sizeof(sub), "cfg/%d/ack", dyne_node_id());
     if (parse_cfg(payload, len, &tmp, err, sizeof(err))) {
         g_cfg = tmp; /* 受理 (startまで何度でも上書き可) */
-        snprintf(json, sizeof(json), "{\"ok\":true,\"idx\":%d,\"crc32\":\"0x%08X\"}",
-                 g_cfg.idx, (unsigned)dyne_crc32((const uint8_t *)payload, len));
+        snprintf(json, sizeof(json),
+                 "{\"ok\":true,\"idx\":%d,\"gen\":%u,\"crc32\":\"0x%08X\"}",
+                 g_cfg.idx, (unsigned)g_cfg.gen,
+                 (unsigned)dyne_crc32((const uint8_t *)payload, len));
         dyne_mqtt_pub(sub, json, 1, false, false);
-        dyne_mqtt_pub_status(DYNE_ST_CONFIGURED, NULL);
+        char st[48];
+        snprintf(st, sizeof(st), "\"gen\":%u", (unsigned)g_cfg.gen);
+        dyne_mqtt_pub_status(DYNE_ST_CONFIGURED, st);
         ESP_LOGI(TAG, "cfg accepted: idx=%d n=%d [%f,%f] bc=[%d,%d] ifaces=%d",
                  g_cfg.idx, g_cfg.n, g_cfg.x0, g_cfg.x1, g_cfg.bc_left,
                  g_cfg.bc_right, g_cfg.n_ifaces);
@@ -332,9 +372,19 @@ void dyne_on_ctl(const char *payload, int len)
     if (cJSON_IsString(c)) {
         const char *s = c->valuestring;
         if (strcmp(s, "start") == 0) {
-            if (g_cfg.valid) g_start_req = true;
-            else dyne_mqtt_pub_status(DYNE_ST_ERR, "\"err\":\"start without cfg\"");
+            if (g_cfg.valid) {
+                /* idle中に受けた古いstopのラッチを打ち消す (2026-09-18 事故究明:
+                 * 消費されずに残ったstopフラグが次のstartを最初の受信スライス
+                 * (≤20ms) で即中断させていた。startは常に新しい意思の表明なので、
+                 * それ以前のstopをここで無効化する。start後に届く新しいstopは
+                 * 従来どおり有効) */
+                g_stop_req = false;
+                g_start_req = true;
+            } else {
+                dyne_mqtt_pub_status(DYNE_ST_ERR, "\"err\":\"start without cfg\"");
+            }
         } else if (strcmp(s, "stop") == 0) {
+            ESP_LOGW(TAG, "ctl stop received"); /* 受信の可視化 (事故究明の教訓) */
             g_stop_req = true;
         } else if (strcmp(s, "report") == 0) {
             g_report_req = true;
@@ -355,6 +405,7 @@ static wasm_module_inst_t s_inst;
 static wasm_exec_env_t s_env;
 static wasm_function_inst_t f_init, f_step, f_bval, f_bgrad, f_setn, f_get, f_x;
 static wasm_function_inst_t f_setbcv, f_tcoef; /* F1追加の任意エクスポート */
+static wasm_function_inst_t f_observe;         /* 発注8: 観測点ナッジング */
 
 static bool wasm_up(void)
 {
@@ -369,9 +420,12 @@ static bool wasm_up(void)
     char err[128];
     wasm_module_t mod = wasm_runtime_load(wbuf, wsize, err, sizeof(err));
     if (!mod) { ESP_LOGE(TAG, "wasm load: %s", err); return false; }
-    s_inst = wasm_runtime_instantiate(mod, 16 * 1024, 0, err, sizeof(err));
+    /* 実機不具合対応(c) 併用 (2026-09-18): インスタンスヒープ16→4KB・実行スタック
+     * 16→8KB。アクターは no_std 静的確保で wasm 内 malloc を使わず、呼び出しも
+     * 浅い (dyne_step は葉関数)。Wi-Fi/MQTT 用の残りヒープを最大化する */
+    s_inst = wasm_runtime_instantiate(mod, 4 * 1024, 0, err, sizeof(err));
     if (!s_inst) { ESP_LOGE(TAG, "wasm inst: %s", err); return false; }
-    s_env = wasm_runtime_create_exec_env(s_inst, 16 * 1024);
+    s_env = wasm_runtime_create_exec_env(s_inst, 8 * 1024);
     f_init = wasm_runtime_lookup_function(s_inst, "dyne_init");
     f_step = wasm_runtime_lookup_function(s_inst, "dyne_step");
     f_bval = wasm_runtime_lookup_function(s_inst, "dyne_boundary_value");
@@ -381,6 +435,7 @@ static bool wasm_up(void)
     f_x = wasm_runtime_lookup_function(s_inst, "dyne_x");
     f_setbcv = wasm_runtime_lookup_function(s_inst, "dyne_set_bc_value");
     f_tcoef = wasm_runtime_lookup_function(s_inst, "dyne_transparent_coef");
+    f_observe = wasm_runtime_lookup_function(s_inst, "dyne_observe");
     return f_init && f_step && f_bval && f_bgrad && f_setn && f_get && f_x;
 }
 
@@ -644,6 +699,29 @@ static void run_bsp(void)
         wasm_runtime_call_wasm_a(s_env, f_step, 0, NULL, 0, NULL);
         int64_t t2 = esp_timer_get_time();
 
+        /* 発注8: 観測点ナッジング (計算完了直後 = シミュレータの適用点と同一)。
+           式はアクター内 dyne_observe (シミュレータと同一wasm = 式の共有)。
+           観測値 = センサの最新読取。イノベーション d は innov トピックへ発行 */
+        if (c->nudge_gamma > 0.0 && f_observe
+            && (step + 1) % (uint64_t)c->obs_period == 0) {
+            double y;
+            int64_t y_ms;
+            if (dyne_sensor_latest(&y, &y_ms)) {
+                int li = c->obs_point >= 0 ? c->obs_point : c->n / 2;
+                wasm_val_t a[3], r[1];
+                a[0].kind = WASM_I32; a[0].of.i32 = li;
+                a[1].kind = WASM_F64; a[1].of.f64 = y;
+                a[2].kind = WASM_F64; a[2].of.f64 = c->nudge_gamma;
+                wasm_runtime_call_wasm_a(s_env, f_observe, 1, r, 3, a);
+                snprintf(sub, sizeof(sub), "node/%d/innov", c->idx);
+                snprintf(json, sizeof(json),
+                         "{\"step\":%llu,\"i\":%d,\"y\":%.17g,\"d\":%.17g,\"y_t_ms\":%lld}",
+                         (unsigned long long)step, li, y, r[0].of.f64,
+                         (long long)y_ms);
+                dyne_mqtt_pub(sub, json, 0, false, true);
+            }
+        }
+
         /* 統計と観測 */
         double step_ms = (t2 - t0) / 1000.0;
         double comp_ms = (t2 - t1) / 1000.0;
@@ -730,15 +808,23 @@ static void run_bsp(void)
 static void *node_task(void *arg)
 {
     printf("\n==== Dyne node-esp32 (node id %d) ====\n", dyne_node_id());
-    wifi_up();
+    /* WASMの初期化 (線形メモリ128KBの連続確保) を**Wi-Fiより先**に行う
+     * (2026-09-18 実機不具合対応: Wi-Fi・MQTT起動後の断片化したヒープでは
+     * 128KBの連続ブロックが取れずESPr32 (PSRAMなし) で instantiate が失敗した。
+     * 起動直後の未断片ヒープで最初に確保すれば以後の割当はその周りで行われる) */
+    log_heap("boot");
     if (!wasm_up()) {
         ESP_LOGE(TAG, "wasm runtime init failed");
+        log_heap("wasm-fail");
         return NULL;
     }
-    ESP_LOGI(TAG, "free heap after wasm: %u", (unsigned)esp_get_free_heap_size());
+    log_heap("after-wasm");
+    wifi_up();
+    log_heap("after-wifi");
     dyne_mqtt_start();
     dyne_sensors_start();
     dyne_rssi_start();
+    log_heap("after-services");
 
     for (;;) {
         if (g_start_req) {

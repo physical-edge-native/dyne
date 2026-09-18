@@ -46,6 +46,7 @@ name = "dyne-sim"
 version = "0.1.0"
 dependencies = [
  "dyne-core",
+ "libm",
  "wasmi",
 ]
 

@@ -6,6 +6,12 @@ edition = "2021"
 [lib]
 crate-type = ["cdylib"]
 
+[features]
+# 実機ESPr32 (PSRAMなし) 向けの縮小版: N_MAX=2048 で線形メモリを1ページ=64KBに
+# 収める (発注7 実機不具合対応(b)、2026-09-18)。ビルドは scripts/build-actor-wasm.ps1
+# (スタック8KBのRUSTFLAGSと成果物名 heat1d_actor_small.wasm への複製を含む)
+small = []
+
 [profile.release]
 panic = "abort"
 opt-level = "z"

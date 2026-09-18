@@ -162,6 +162,32 @@ static bool bme280_read(double *temp_c, double *rh, double *pres_hpa)
     return true;
 }
 
+/* ---- 最新読取値 (発注8: ナッジングの観測値としてBSPループが読む) ---- */
+
+static portMUX_TYPE s_lat_mux = portMUX_INITIALIZER_UNLOCKED;
+static struct { double temp_c; int64_t t_ms; bool valid; } s_latest;
+
+static void latest_store(double temp_c, int64_t t_ms)
+{
+    portENTER_CRITICAL(&s_lat_mux);
+    s_latest.temp_c = temp_c;
+    s_latest.t_ms = t_ms;
+    s_latest.valid = true;
+    portEXIT_CRITICAL(&s_lat_mux);
+}
+
+bool dyne_sensor_latest(double *temp_c, int64_t *t_ms)
+{
+    portENTER_CRITICAL(&s_lat_mux);
+    bool v = s_latest.valid;
+    if (v) {
+        *temp_c = s_latest.temp_c;
+        *t_ms = s_latest.t_ms;
+    }
+    portEXIT_CRITICAL(&s_lat_mux);
+    return v;
+}
+
 /* ---- 周期タスク ---- */
 
 static void sensors_task(void *arg)
@@ -179,6 +205,7 @@ static void sensors_task(void *arg)
         if (kind == 1) {
             double t, h;
             if (dht20_read(&t, &h)) {
+                latest_store(t, t_ms);
                 snprintf(json, sizeof(json),
                          "{\"t_ms\":%lld,\"kind\":\"dht20\",\"temp_c\":%.2f,\"rh\":%.2f}",
                          (long long)t_ms, t, h);
@@ -190,6 +217,7 @@ static void sensors_task(void *arg)
         } else {
             double t, h, p;
             if (s_bme_ok && bme280_read(&t, &h, &p)) {
+                latest_store(t, t_ms);
                 snprintf(json, sizeof(json),
                          "{\"t_ms\":%lld,\"kind\":\"bme280\",\"temp_c\":%.2f,"
                          "\"rh\":%.2f,\"pres_hpa\":%.2f}",

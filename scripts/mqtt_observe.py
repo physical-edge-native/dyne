@@ -17,6 +17,19 @@ import time
 
 import paho.mqtt.client as mqtt
 
+# 状態変化の強調表示 (2026-09-18、実機確認⑥のフィードバック):
+# 5ノード構成では sensor/rssi/field の流量に status が埋もれるため、
+# 状態行を色+行頭マーカーで目立たせる。Windows のVT有効化は os.system("")。
+RESET = "\033[0m"
+STATE_STYLE = {
+    "offline": "\033[1;31m",     # 赤 (離脱・LWT)
+    "err": "\033[1;31m",
+    "online": "\033[1;32m",      # 緑 (参加)
+    "configured": "\033[32m",
+    "done": "\033[1;36m",        # シアン (完走)
+    "running": "\033[2m",        # 淡色 (高頻度)
+}
+
 
 class Logger:
     def __init__(self, outdir):
@@ -41,9 +54,14 @@ def main():
     ap.add_argument("--broker", default="localhost")
     ap.add_argument("--topic", default="dyne/#")
     ap.add_argument("--out", default="mqtt_log", help="CSV出力ディレクトリ")
+    ap.add_argument("--quiet-obs", action="store_true",
+                    help="観測系 (field/sensor/rssi/rt/residual/innov) は CSV のみに"
+                         "記録し、画面には status/ack 等の制御系だけを表示する"
+                         " (多ノード時の状態監視用)")
     a = ap.parse_args()
     log = Logger(a.out)
     t0 = time.time()
+    os.system("")  # Windows端末のANSIカラー有効化
 
     def on_connect(cl, u, flags, rc, props=None):
         print(f"connected rc={rc}; subscribing {a.topic}")
@@ -57,7 +75,20 @@ def main():
         except Exception:
             print(f"[{ts:9.3f}] {msg.topic} (non-json {len(msg.payload)}B)")
             return
-        print(f"[{ts:9.3f}] {msg.topic} {msg.payload[:160].decode(errors='replace')}")
+        # 表示の振り分け: 制御系 (status/ack/cfg/ctl) は常に表示し、状態行は
+        # 色+マーカーで強調。観測系は --quiet-obs のとき画面に出さない (CSVのみ)
+        is_status = len(parts) == 4 and parts[1] == "node" and parts[3] == "status"
+        is_ctl = parts[1] in ("cfg", "ctl")
+        line = f"[{ts:9.3f}] {msg.topic} {msg.payload[:160].decode(errors='replace')}"
+        if is_status:
+            style = STATE_STYLE.get(d.get("state"), "")
+            print(f"{style}>>> {line}{RESET if style else ''}")
+        elif is_ctl:
+            ok = d.get("ok")
+            style = "\033[1;31m" if ok is False else ("\033[32m" if ok is True else "")
+            print(f"{style}>>> {line}{RESET if style else ''}")
+        elif not a.quiet_obs:
+            print(line)
         # 観測系をCSVへ (規約 §2.4〜2.9)
         if len(parts) == 4 and parts[1] == "node":
             nid, kind = parts[2], parts[3]
@@ -86,6 +117,10 @@ def main():
                         [ts, nid, d.get("step"), d.get("window"), sm.get("mean"),
                          sm.get("min"), sm.get("max"), cm.get("mean"),
                          d.get("dt_ms"), d.get("rt_rate")])
+            elif kind == "innov":
+                log.row("innov", ["ts", "node", "step", "i", "y", "d", "y_t_ms"],
+                        [ts, nid, d.get("step"), d.get("i"), d.get("y"),
+                         d.get("d"), d.get("y_t_ms")])
             elif kind == "status":
                 log.row("status", ["ts", "node", "state", "detail"],
                         [ts, nid, d.get("state"), json.dumps(d, ensure_ascii=False)])
