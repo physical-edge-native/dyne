@@ -282,8 +282,10 @@ mosquitto_sub -t "dyne/iface/+/residual" -v  # 全界面の残差
 mosquitto_sub -t "dyne/node/+/sensor" -v     # 全センサ
 python scripts\mqtt_observe.py --broker localhost   # 購読+CSV記録 (発注7同梱)
 python scripts\mqtt_config.py --broker localhost --nodes 2 --points 65 \
-    --bc zero_grad --peers 192.168.4.11,192.168.4.12 --start
-                                             # チェーン設定の生成・注入・開始
+    --bc zero_grad --peers auto --start      # チェーン設定の生成・注入・開始。
+                                             # --peers auto: status の retained
+                                             # (online の MAC⇔IP 対応) からノード
+                                             # ID順にIP自動解決 (2026-09-20追加)
 ```
 
 ## 5. 第2段(zenoh移行)への備え

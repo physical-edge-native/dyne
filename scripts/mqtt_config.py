@@ -49,6 +49,56 @@ def transparent_coef(alpha, dt):
     return decay, half, weight
 
 
+def resolve_peers(broker, nodes, absent, timeout=3.0):
+    """--peers auto (2026-09-20): status の retained (online の MAC⇔IP 対応) から
+    ノードID順に IP を自動解決する。ノードは MQTT (再)接続のたびに online
+    (IPつき・retained) を貼り直すため、ホットスポット再起動後もそのまま使える。
+    IP が取れないノード (retained が configured/done 等で IP を含まない) があれば
+    エラーで列挙する (対処: ノードを再起動 or Wi-Fi 再接続で online を貼り直す)。"""
+    got = {}  # node_id -> (state, ip or None)
+
+    def on_msg(cl, u, m):
+        parts = m.topic.split("/")
+        if len(parts) != 4 or parts[1] != "node" or parts[3] != "status":
+            return
+        try:
+            d = json.loads(m.payload)
+        except Exception:
+            return
+        nid = int(parts[2])
+        ip = d.get("ip")
+        if ip:
+            got[nid] = (d.get("state"), ip)
+        elif nid not in got:
+            got[nid] = (d.get("state"), None)
+
+    cl = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+    cl.on_message = on_msg
+    cl.connect(broker, 1883, 60)
+    cl.subscribe("dyne/node/+/status", qos=1)
+    cl.loop_start()
+    time.sleep(timeout)
+    cl.loop_stop()
+    cl.disconnect()
+
+    ips, missing = [], []
+    for i in range(nodes):
+        if i in absent:
+            ips.append("-")
+            continue
+        st = got.get(i)
+        if st and st[1]:
+            ips.append(st[1])
+            print(f"  peers auto: node {i} -> {st[1]} (state={st[0]})")
+        else:
+            missing.append(f"node {i} ({st[0] if st else 'statusなし'})")
+    if missing:
+        raise SystemExit(
+            "peers auto: IPを解決できないノードがある: " + ", ".join(missing)
+            + "\n対処: 当該ノードを再起動 (またはWi-Fi再接続) して online を貼り直すこと")
+    return ips
+
+
 def split(points, nodes):
     """dyne-sim と同一の分割: base + 先頭 extra ノードに1点ずつ"""
     base, extra = divmod(points, nodes)
@@ -78,7 +128,8 @@ def main():
     ap.add_argument("--dirichlet-value", type=float, default=0.0)
     ap.add_argument("--absent", default="", help="恒久不在ノードのカンマ区切り (部分観測)")
     ap.add_argument("--peers",
-                    help="ノード順のIPカンマ区切り (不在ノードは '-')")
+                    help="ノード順のIPカンマ区切り (不在ノードは '-')。"
+                         "'auto' で status の online (retained) からノードID順に自動解決")
     ap.add_argument("--sensor", default="none", choices=["none", "dht20", "bme280"])
     ap.add_argument("--sensor-period-ms", type=int, default=5000)
     ap.add_argument("--rssi-period-ms", type=int, default=10000)
@@ -110,7 +161,10 @@ def main():
 
     assert a.nodes is not None and a.peers is not None, "--nodes と --peers は必須 (--stop 単独時を除く)"
     absent = set(int(s) for s in a.absent.split(",") if s != "")
-    ips = a.peers.split(",")
+    if a.peers == "auto":
+        ips = resolve_peers(a.broker, a.nodes, absent)
+    else:
+        ips = a.peers.split(",")
     assert len(ips) == a.nodes, "--peers はノード数と同数"
     starts = split(a.points, a.nodes)
     h = 1.0 / (a.points - 1)

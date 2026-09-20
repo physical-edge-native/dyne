@@ -26,9 +26,9 @@ m2-esp32 はマイルストーン成果物として凍結し、以後の実機�
    ノードID(0, 1, …)を設定 → `idf.py build flash monitor`。
 3. 観測を開始: `python scripts/mqtt_observe.py --broker localhost`
    → 各ノードの `status: online`(MACとIP)が見える。
-4. 表示されたIPで設定を注入し開始:
+4. 設定を注入し開始 (`--peers auto` が status の online から IP を自動解決):
    `python scripts/mqtt_config.py --broker localhost --nodes 2 --points 65
-    --steps 2000 --peers <IP0>,<IP1> --sensor dht20 --start`
+    --steps 2000 --peers auto --sensor dht20 --start`
 5. `ack` → `configured` → `running` → 完走で `done`(温度配列CRC32つき)。
    2台のCRCの組をシミュレータの同一構成の値(`dyne-sim.exe ... --crc`)と
    照合すれば協調の検証になる。
