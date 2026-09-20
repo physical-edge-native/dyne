@@ -1494,12 +1494,10 @@ fn main() {
     let n_nodes = cfg.nodes;
     assert!(n_pts >= n_nodes * 3, "各ノードに最低3点必要 (points >= nodes*3)");
     let h = 1.0 / ((n_pts - 1) as f64);
-    // 陽解法の安定条件 (M0ホストと同じ検証)
+    // 陽解法の安定条件 (M0ホストと同じ検証)。r ≤ 1/2 は**差分法**の条件であり、
+    // 学習型アクターの安定領域は別物 (理論ノートN7) なので、学習型では警告に
+    // 落として掃引を許す (発注5、2026-09-20。判定は後段の Linf/非有限検出)
     let r = cfg.alpha * cfg.dt / (h * h);
-    assert!(
-        r <= 0.5,
-        "stability violated: alpha*dt/h^2 = {r:.3} > 0.5 (dtを下げるかpointsを減らすこと)"
-    );
     let base = n_pts / n_nodes;
     let extra = n_pts % n_nodes;
     let mut starts = Vec::new();
@@ -1512,6 +1510,16 @@ fn main() {
 
     // RAM上限チェック(実機校正: 線形メモリ+ランタイム概算がノード上限を超えないか)
     let probe = Actor::load_with(&engine, &module, &cfg.pinn_cfg);
+    if r > 0.5 {
+        if probe.is_learning() {
+            eprintln!(
+                "[sim] r = alpha*dt/h^2 = {r:.3} > 0.5: 差分法の安定条件外だが学習型のため続行 \
+                 (N7掃引。判定は Linf と非有限検出で行う)"
+            );
+        } else {
+            panic!("stability violated: alpha*dt/h^2 = {r:.3} > 0.5 (dtを下げるかpointsを減らすこと)");
+        }
+    }
     let linear_bytes = probe.memory_pages * 64 * 1024;
     let runtime_overhead = 10 * 1024; // M1実測: 使用129KBのうち線形メモリ128KB → 管理構造は約1KB+余裕
     let need = linear_bytes + runtime_overhead;
