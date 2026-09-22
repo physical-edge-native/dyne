@@ -52,8 +52,9 @@ QoS: `cfg` / `ack` / `ctl` / `status` は QoS1(取りこぼし不可)、観測�
 {
   "ver": 1,
   "cluster": { "n_nodes": 5, "points": 65, "alpha": 1.0, "dt": 1e-4,
-               "steps": 2000, "seed": 42 },
-  "node":    { "idx": 2, "n": 13, "x0": 0.25, "x1": 0.4375 },
+               "steps": 2000, "seed": 42, "step_period_ms": 0 },
+  "node":    { "idx": 2, "n": 13, "x0": 0.25, "x1": 0.4375,
+               "calib_offset": 0.0, "init": 24.0 },
   "bc": {
     "left":  { "key": "interface" },
     "right": { "key": "zero_grad" }
@@ -65,7 +66,7 @@ QoS: `cfg` / `ack` / `ctl` / `status` は QoS1(取りこぼし不可)、観測�
   "mode": { "role": "compute", "sensor": "dht20",
             "sensor_period_ms": 5000, "rssi_period_ms": 10000,
             "field_every": 50, "residual_every": 10, "rt_every": 100 },
-  "assim": { "gamma": 0.3, "obs_period": 10, "obs_point": -1 }
+  "assim": { "gamma": 0.3, "obs_period": 10, "obs_point": -1, "holdout": false }
 }
 ```
 
@@ -91,6 +92,17 @@ QoS: `cfg` / `ack` / `ctl` / `status` は QoS1(取りこぼし不可)、観測�
   局所格子点。-1 = 中央 n/2、シミュレータの既定と同一)。観測値 y はセンサの
   最新読取(temp_c)。式はアクター内の dyne_observe にあり、シミュレータと実機は
   同一 wasm を使うため**式の共有が自動で成立**する(二重実装なし)。
+- 実験1準備の追加フィールド(発注11、2026-09-21追記。いずれも省略時は従来動作):
+  - `cluster.step_period_ms` … 1ステップの実時間周期[ms]。0(既定)=従来の最速
+    実行。実験1は 1000(1ステップ=1秒)。実装は起動時刻からの絶対目標時刻
+    追従(累積誤差なし)。
+  - `node.calib_offset` … センサ校正オフセット[℃]。読取値に加算した補正後値を
+    同化・発行の正とする(sensor トピックは生値も併載、§2.6)。
+  - `node.init` … 初期場の一様値[℃](実測平均で初期化)。省略時は従来の
+    sin初期値。シミュレータの `--init-uniform` と同一の意味論。
+  - `assim.holdout` … true のノードは観測を同化に使わず(γ=0適用)、
+    イノベーション d=y−u のみ記録・発行する(抜き取り検証。シミュレータの
+    `--holdout n` と同一の意味論。innov トピックに `"holdout":true` が載る)。
 
 ### 2.2 設定応答 `dyne/cfg/<node_id>/ack`(ノード→PC、QoS1)
 
@@ -157,12 +169,15 @@ stop は従来どおり有効。ノードは stop 受信をログに可視化す
 ### 2.6 センサ `dyne/node/<node_id>/sensor`(QoS0、sensor_period_ms毎)
 
 ```json
-{ "t_ms": 123456, "kind": "dht20",  "temp_c": 25.3, "rh": 48.2 }
-{ "t_ms": 123456, "kind": "bme280", "temp_c": 25.1, "rh": 47.9, "pres_hpa": 1013.2 }
+{ "t_ms": 123456, "kind": "dht20",  "temp_c": 25.4, "temp_c_raw": 25.3, "rh": 48.2 }
+{ "t_ms": 123456, "kind": "bme280", "temp_c": 25.1, "temp_c_raw": 25.1,
+  "rh": 47.9, "pres_hpa": 1013.2 }
 ```
 
 読取失敗時は `{ "t_ms": ..., "kind": "dht20", "err": "i2c timeout" }`。
-当面はログ発行のみ(データ同化への接続=発注8)。
+データ同化への接続は発注8(§2.1 assim)。2026-09-21(発注11)から
+`temp_c` = **補正後値**(生値 + `node.calib_offset`。同化・発行の正)、
+`temp_c_raw` = 生値。校正オフセット0なら両者は一致する。
 
 ### 2.7 近傍RSSI `dyne/node/<node_id>/rssi`(QoS0、rssi_period_ms毎)
 
@@ -204,12 +219,13 @@ PC側が `status` の `mac` で解決する(実験2の位置推定の入力)。
 ### 2.10 イノベーション `dyne/node/<node_id>/innov`(QoS0、obs_period毎。2026-09-18追記)
 
 ```json
-{ "step": 500, "i": 8, "y": 25.31, "d": 0.042, "y_t_ms": 123456 }
+{ "step": 500, "i": 8, "y": 25.31, "d": 0.042, "y_t_ms": 123456, "holdout": false }
 ```
 
 観測点ナッジング(§2.1の assim)の適用ごとに発行。`i` = 観測点(局所格子点)、
-`y` = 観測値(センサ最新読取)、`d` = イノベーション(**適用前**の y − u_i)、
-`y_t_ms` = その読取のノード時刻。閾値判定はしない(計測のみ。イベント検知の
+`y` = 観測値(センサ最新読取。calib_offset 補正後)、`d` = イノベーション
+(**適用前**の y − u_i)、`y_t_ms` = その読取のノード時刻、`holdout` = 保留
+ノードか(発注11。true なら γ=0 適用=同化には使っていない)。閾値判定はしない(計測のみ。イベント検知の
 2信号のうちイノベーション側の計測開始 = ロードマップ9章)。センサ読取が一度も
 成功していない間は発行しない(ナッジングも適用されない)。
 

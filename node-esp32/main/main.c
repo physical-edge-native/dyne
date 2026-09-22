@@ -300,6 +300,19 @@ static bool parse_cfg(const char *payload, int len, dyne_cfg_t *c, char *err, si
         c->nudge_gamma = 0.0;
         c->obs_period = 10;
         c->obs_point = -1; /* -1 = 担当区間の中央 n/2 (シミュレータと同一) */
+        c->holdout = false;
+        c->calib_offset = 0.0;
+        c->init_value = NAN;
+        c->step_period_ms = 0;
+        {
+            const cJSON *v;
+            if ((v = cJSON_GetObjectItem(cl, "step_period_ms")) && cJSON_IsNumber(v))
+                c->step_period_ms = v->valueint;
+            if ((v = cJSON_GetObjectItem(nd, "calib_offset")) && cJSON_IsNumber(v))
+                c->calib_offset = v->valuedouble;
+            if ((v = cJSON_GetObjectItem(nd, "init")) && cJSON_IsNumber(v))
+                c->init_value = v->valuedouble;
+        }
         const cJSON *as = cJSON_GetObjectItem(root, "assim");
         if (as) {
             const cJSON *v;
@@ -309,6 +322,8 @@ static bool parse_cfg(const char *payload, int len, dyne_cfg_t *c, char *err, si
                 c->obs_period = v->valueint;
             if ((v = cJSON_GetObjectItem(as, "obs_point")) && cJSON_IsNumber(v))
                 c->obs_point = v->valueint;
+            if ((v = cJSON_GetObjectItem(as, "holdout")))
+                c->holdout = cJSON_IsTrue(v);
             if (c->nudge_gamma < 0.0 || c->obs_period < 1
                 || c->obs_point >= c->n) {
                 snprintf(err, errlen, "bad assim");
@@ -403,7 +418,7 @@ void dyne_on_ctl(const char *payload, int len)
 /* ==== WASMアクター ==== */
 static wasm_module_inst_t s_inst;
 static wasm_exec_env_t s_env;
-static wasm_function_inst_t f_init, f_step, f_bval, f_bgrad, f_setn, f_get, f_x;
+static wasm_function_inst_t f_init, f_step, f_bval, f_bgrad, f_setn, f_get, f_x, f_set;
 static wasm_function_inst_t f_setbcv, f_tcoef; /* F1追加の任意エクスポート */
 static wasm_function_inst_t f_observe;         /* 発注8: 観測点ナッジング */
 
@@ -431,12 +446,13 @@ static bool wasm_up(void)
     f_bval = wasm_runtime_lookup_function(s_inst, "dyne_boundary_value");
     f_bgrad = wasm_runtime_lookup_function(s_inst, "dyne_boundary_grad");
     f_setn = wasm_runtime_lookup_function(s_inst, "dyne_set_neighbor");
+    f_set = wasm_runtime_lookup_function(s_inst, "dyne_set");
     f_get = wasm_runtime_lookup_function(s_inst, "dyne_get");
     f_x = wasm_runtime_lookup_function(s_inst, "dyne_x");
     f_setbcv = wasm_runtime_lookup_function(s_inst, "dyne_set_bc_value");
     f_tcoef = wasm_runtime_lookup_function(s_inst, "dyne_transparent_coef");
     f_observe = wasm_runtime_lookup_function(s_inst, "dyne_observe");
-    return f_init && f_step && f_bval && f_bgrad && f_setn && f_get && f_x;
+    return f_init && f_step && f_bval && f_bgrad && f_setn && f_set && f_get && f_x;
 }
 
 static double call_d(wasm_function_inst_t f, int i)
@@ -596,6 +612,15 @@ static void run_bsp(void)
             return;
         }
     }
+    /* 発注11: 初期場の一様上書き (実験1: 実測平均。号令ツールが cfg.node.init に注入) */
+    if (!isnan(c->init_value)) {
+        for (int i = 0; i < c->n; i++) {
+            wasm_val_t a2[2];
+            a2[0].kind = WASM_I32; a2[0].of.i32 = i;
+            a2[1].kind = WASM_F64; a2[1].of.f64 = c->init_value;
+            wasm_runtime_call_wasm_a(s_env, f_set, 0, NULL, 2, a2);
+        }
+    }
 
     int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
     struct sockaddr_in me = { 0 };
@@ -613,7 +638,16 @@ static void run_bsp(void)
     char sub[32], json[256];
 
     ESP_LOGI(TAG, "BSP start: %u steps, %d iface(s)", (unsigned)c->steps, nl);
+    int64_t pace0 = esp_timer_get_time();
     for (uint64_t step = 0; step < c->steps && !aborted; step++) {
+        /* 発注11: 実時間運転 (1ステップ = step_period_ms)。0 = 従来 (最速) */
+        if (c->step_period_ms > 0) {
+            int64_t target = pace0 + (int64_t)step * c->step_period_ms * 1000;
+            int64_t now = esp_timer_get_time();
+            if (now < target) {
+                vTaskDelay(pdMS_TO_TICKS((uint32_t)((target - now) / 1000) + 1));
+            }
+        }
         int64_t t0 = esp_timer_get_time();
         seq++;
         /* 1) 全界面へ送信 (控えを残す) */
@@ -708,16 +742,20 @@ static void run_bsp(void)
             int64_t y_ms;
             if (dyne_sensor_latest(&y, &y_ms)) {
                 int li = c->obs_point >= 0 ? c->obs_point : c->n / 2;
+                /* 発注11: 保留ノードは γ=0 で適用 = 同化せずイノベーションのみ記録
+                 * (シミュレータの --holdout と同一意味論) */
+                double g_eff = c->holdout ? 0.0 : c->nudge_gamma;
                 wasm_val_t a[3], r[1];
                 a[0].kind = WASM_I32; a[0].of.i32 = li;
                 a[1].kind = WASM_F64; a[1].of.f64 = y;
-                a[2].kind = WASM_F64; a[2].of.f64 = c->nudge_gamma;
+                a[2].kind = WASM_F64; a[2].of.f64 = g_eff;
                 wasm_runtime_call_wasm_a(s_env, f_observe, 1, r, 3, a);
                 snprintf(sub, sizeof(sub), "node/%d/innov", c->idx);
                 snprintf(json, sizeof(json),
-                         "{\"step\":%llu,\"i\":%d,\"y\":%.17g,\"d\":%.17g,\"y_t_ms\":%lld}",
+                         "{\"step\":%llu,\"i\":%d,\"y\":%.17g,\"d\":%.17g,"
+                         "\"holdout\":%s,\"y_t_ms\":%lld}",
                          (unsigned long long)step, li, y, r[0].of.f64,
-                         (long long)y_ms);
+                         c->holdout ? "true" : "false", (long long)y_ms);
                 dyne_mqtt_pub(sub, json, 0, false, true);
             }
         }

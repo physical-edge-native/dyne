@@ -59,6 +59,13 @@ typedef struct {
     double nudge_gamma;            /* 0.0 = 無効 */
     int obs_period;                /* 観測周期 (ステップ。シミュレータと同一の意味論) */
     int obs_point;                 /* 観測点 = 担当区間内の局所格子点 (-1 = 中央 n/2) */
+    /* 発注11 (実験1準備) */
+    bool holdout;                  /* 保留ノード: 観測を同化に使わず (γ=0適用)
+                                      イノベーションのみ記録・発行 (抜き取り検証) */
+    double calib_offset;           /* センサ校正オフセット [℃]。読取値に加算してから
+                                      同化・発行に使う (規約 §2.6: 生値も併載) */
+    double init_value;             /* 初期場の一様値 (実測平均)。NAN = 従来のsin初期値 */
+    int step_period_ms;            /* 1ステップの実時間周期 [ms]。0 = 従来 (最速) */
 } dyne_cfg_t;
 
 /* ==== ノード状態 (status トピックの state) ==== */

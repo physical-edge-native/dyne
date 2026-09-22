@@ -136,6 +136,19 @@ def main():
     ap.add_argument("--field-every", type=int, default=50)
     ap.add_argument("--residual-every", type=int, default=10)
     ap.add_argument("--rt-every", type=int, default=100)
+    ap.add_argument("--outer-bc", default="dirichlet",
+                    choices=["dirichlet", "zero_grad"],
+                    help="全域外縁 (両端) の境界条件 (発注11。実験1は zero_grad)")
+    ap.add_argument("--length", type=float, default=1.0,
+                    help="空間の全長 L[m] (発注11。格子幅 h=L/(points-1))")
+    ap.add_argument("--calib", default="",
+                    help="ノード順の校正オフセット[℃]カンマ区切り (省略=全0)")
+    ap.add_argument("--holdout", type=int, default=-1,
+                    help="保留ノード番号 (抜き取り検証。-1=なし)")
+    ap.add_argument("--step-period-ms", type=int, default=0,
+                    help="1ステップの実時間周期[ms] (0=従来の最速。実験1は1000)")
+    ap.add_argument("--init", type=float, default=None,
+                    help="初期場の一様値[℃] (実測平均。省略=従来のsin初期値)")
     ap.add_argument("--gamma", type=float, default=0.0,
                     help="観測点ナッジングの強度 γ (0=無効。発注8)")
     ap.add_argument("--obs-period", type=int, default=10, help="観測周期 (ステップ)")
@@ -167,7 +180,9 @@ def main():
         ips = a.peers.split(",")
     assert len(ips) == a.nodes, "--peers はノード数と同数"
     starts = split(a.points, a.nodes)
-    h = 1.0 / (a.points - 1)
+    h = a.length / (a.points - 1)
+    calib = [float(x) for x in a.calib.split(",")] if a.calib else [0.0] * a.nodes
+    assert len(calib) == a.nodes, "--calib must have one value per node"
 
     def ubc_obj():
         if a.bc == "dirichlet":
@@ -186,7 +201,9 @@ def main():
         for side, nb, iface_id in (("left", i - 1, i - 1), ("right", i + 1, i)):
             edge = nb < 0 or nb >= a.nodes
             if edge:
-                bc[side] = {"key": "dirichlet", "value": 0.0}  # グローバル外縁
+                # グローバル外縁 (--outer-bc。実験1=zero_grad、既定=従来dirichlet:0)
+                bc[side] = ({"key": "zero_grad"} if a.outer_bc == "zero_grad"
+                            else {"key": "dirichlet", "value": 0.0})  # グローバル外縁
             elif nb in absent:
                 bc[side] = ubc_obj()                            # 未観測領域境界 (F1)
             else:
@@ -199,8 +216,11 @@ def main():
             # status (configured) にエコーし、PC側で全ノードの世代一致を照合できる
             "gen": int(time.time()),
             "cluster": {"n_nodes": a.nodes, "points": a.points, "alpha": a.alpha,
-                        "dt": a.dt, "steps": a.steps, "seed": a.seed},
-            "node": {"idx": i, "n": cnt, "x0": s * h, "x1": (s + cnt - 1) * h},
+                        "dt": a.dt, "steps": a.steps, "seed": a.seed,
+                        "step_period_ms": a.step_period_ms},
+            "node": {"idx": i, "n": cnt, "x0": s * h, "x1": (s + cnt - 1) * h,
+                     "calib_offset": calib[i],
+                     **({"init": a.init} if a.init is not None else {})},
             "bc": bc,
             "ifaces": ifaces,
             "mode": {"role": "compute", "sensor": a.sensor,
@@ -210,7 +230,7 @@ def main():
                      "residual_every": a.residual_every,
                      "rt_every": a.rt_every},
             "assim": {"gamma": a.gamma, "obs_period": a.obs_period,
-                      "obs_point": a.obs_point},
+                      "obs_point": a.obs_point, "holdout": i == a.holdout},
         }
 
     if a.dry_run:

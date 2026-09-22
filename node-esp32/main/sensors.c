@@ -202,13 +202,17 @@ static void sensors_task(void *arg)
         char sub[32], json[192];
         snprintf(sub, sizeof(sub), "node/%d/sensor", dyne_node_id());
         int64_t t_ms = esp_timer_get_time() / 1000;
+        /* 発注11: 校正オフセット。補正後値 temp_c を同化・発行の正とし、
+         * 生値 temp_c_raw も併載する (規約 §2.6) */
+        double off = g_cfg.valid ? g_cfg.calib_offset : 0.0;
         if (kind == 1) {
             double t, h;
             if (dht20_read(&t, &h)) {
-                latest_store(t, t_ms);
+                latest_store(t + off, t_ms);
                 snprintf(json, sizeof(json),
-                         "{\"t_ms\":%lld,\"kind\":\"dht20\",\"temp_c\":%.2f,\"rh\":%.2f}",
-                         (long long)t_ms, t, h);
+                         "{\"t_ms\":%lld,\"kind\":\"dht20\",\"temp_c\":%.2f,"
+                         "\"temp_c_raw\":%.2f,\"rh\":%.2f}",
+                         (long long)t_ms, t + off, t, h);
             } else {
                 snprintf(json, sizeof(json),
                          "{\"t_ms\":%lld,\"kind\":\"dht20\",\"err\":\"i2c read\"}",
@@ -217,11 +221,11 @@ static void sensors_task(void *arg)
         } else {
             double t, h, p;
             if (s_bme_ok && bme280_read(&t, &h, &p)) {
-                latest_store(t, t_ms);
+                latest_store(t + off, t_ms);
                 snprintf(json, sizeof(json),
                          "{\"t_ms\":%lld,\"kind\":\"bme280\",\"temp_c\":%.2f,"
-                         "\"rh\":%.2f,\"pres_hpa\":%.2f}",
-                         (long long)t_ms, t, h, p);
+                         "\"temp_c_raw\":%.2f,\"rh\":%.2f,\"pres_hpa\":%.2f}",
+                         (long long)t_ms, t + off, t, h, p);
             } else {
                 if (!s_bme_ok) s_bme_ok = bme280_init(); /* 後差しに追随 */
                 snprintf(json, sizeof(json),

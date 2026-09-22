@@ -1,6 +1,9 @@
 # Rust ビルド成果物
 # ワークスペース (dyne-host, dyne-proto) のビルド出力
 /target/
+# 発注11の分離ビルド出力 (--target-dir target-exp1。full432掃引中の
+# target/release ロック回避と掃引バイナリの由来保全のため分離)
+/target-exp1/
 # ワークスペース外で別ビルドするアクターは個別に指定
 /crates/heat1d-actor/target/
 /crates/heat1d-pinn-actor/target/

@@ -132,6 +132,23 @@ struct Config {
     /// ノード別の温度配列バイト列のCRC32を表示する (実機 status:done の crc32 と
     /// 同一の定義 = f64リトルエンディアン連結のIEEE CRC32。実機照合用)
     crc: bool,
+    // ---- 発注11 (実験1準備、2026-09-21) ----
+    /// 全域外縁 (x=0, x=L) の境界条件 (設定情報化)。既定 dirichlet:0 = 従来と
+    /// ビット同一。実験1 (摂氏運転) では zero_grad を指定する。
+    /// dirichlet / zero_grad のみ許可 (transparent等は不在隣接境界の専用)
+    outer_bc: UBc,
+    /// 空間の全長 L [m] (既定 1.0 = 従来の無次元運転とビット同一)。h = L/(points-1)
+    length: f64,
+    /// 初期場を一様値で上書き (実験1: 実測平均で初期化)。--add と併用不可
+    init_uniform: Option<f64>,
+    /// 合成真値を式で生成する物理運転 (リハーサル用):
+    /// T(x,t) = tc + (tw−tc)·x/L + amp·sin(2πt/period)·x/L
+    /// (一端が暖かい定常勾配+緩い時間変動)。観測 y = T + σN(0,1)。
+    /// 指定時は基準解も本式 (モデル誤差込みの検証になる)
+    truth_grad: Option<(f64, f64, f64, f64)>, // (tc, tw, period_s, amp)
+    /// 保留ノード (抜き取り検証): 観測を同化に使わず (γ=0適用)、
+    /// イノベーションのみ記録する。実機の holdout と同一意味論
+    holdout: Option<usize>,
 }
 
 /// F1: 未観測領域境界の設定キー (docs/2026-09-14-f1-boundary-design.md)
@@ -277,6 +294,11 @@ fn parse_args() -> Config {
         absent: Vec::new(),
         join_warm: false, // 既定は白紙 (dirichlet(0)指定だけで既存回帰とビット一致を保つ)
         soe_h: dyne_core::transparent::SOE_H,
+        outer_bc: UBc::Dirichlet(0.0),
+        length: 1.0,
+        init_uniform: None,
+        truth_grad: None,
+        holdout: None,
         nudge_gamma: 0.0,
         obs_period: 10,
         obs_sigma: 0.0,
@@ -367,6 +389,17 @@ fn parse_args() -> Config {
             }
             "--unobserved-bc" => c.unobserved_bc = UBc::parse(&val()),
             "--soe-h" => c.soe_h = val().parse().expect("--soe-h <正の実数>"),
+            "--outer-bc" => c.outer_bc = UBc::parse(&val()),
+            "--length" => c.length = val().parse().expect("--length <L[m]>"),
+            "--init-uniform" => c.init_uniform = Some(val().parse().expect("--init-uniform <T>")),
+            "--truth-grad" => {
+                // tc,tw,period_s,amp
+                let v = val();
+                let ps: Vec<f64> = v.split(',').map(|x| x.parse().expect("--truth-grad tc,tw,period,amp")).collect();
+                assert!(ps.len() == 4, "--truth-grad tc,tw,period_s,amp");
+                c.truth_grad = Some((ps[0], ps[1], ps[2], ps[3]));
+            }
+            "--holdout" => c.holdout = Some(val().parse().expect("--holdout <node>")),
             "--nudge-gamma" => c.nudge_gamma = val().parse().expect("--nudge-gamma <γ>"),
             "--obs-period" => c.obs_period = val().parse().expect("--obs-period <ステップ>"),
             "--obs-sigma" => c.obs_sigma = val().parse().expect("--obs-sigma <σ>"),
@@ -417,6 +450,23 @@ fn parse_args() -> Config {
         for &(n, _, _) in &c.resizes {
             assert!(!c.absent.contains(&n), "--absent のノード {n} は resize 対象にできない");
         }
+    }
+    assert!(
+        matches!(c.outer_bc, UBc::Dirichlet(_) | UBc::ZeroGrad),
+        "--outer-bc は dirichlet[:値] か zero_grad のみ (それ以外は不在隣接境界専用)"
+    );
+    assert!(c.length > 0.0, "--length は正の値");
+    if c.init_uniform.is_some() {
+        assert!(c.adds.is_empty(), "--init-uniform は --add と併用不可 (複合参照解が sin 初期化前提)");
+    }
+    if c.truth_grad.is_some() {
+        assert!(c.nudge_gamma > 0.0, "--truth-grad は --nudge-gamma > 0 と併用 (観測の機構を使うため)");
+        let (_, _, period, _) = c.truth_grad.unwrap();
+        assert!(period > 0.0, "--truth-grad の period は正の値");
+    }
+    if let Some(hn) = c.holdout {
+        assert!(hn < c.nodes, "--holdout: node {hn} out of range");
+        assert!(c.nudge_gamma > 0.0, "--holdout は --nudge-gamma > 0 と併用");
     }
     if c.nudge_gamma != 0.0 {
         assert!(c.nudge_gamma > 0.0, "--nudge-gamma は正の値");
@@ -616,15 +666,24 @@ fn apply_face_config(
     bcl: u32,
     bcr: u32,
     ubc: &UBc,
+    outer: &UBc,
     coef: &Option<TransparentCoef>,
 ) {
     for (face, code, global_edge) in
         [(FACE_LEFT, bcl, node == 0), (FACE_RIGHT, bcr, node + 1 == n_nodes)]
     {
-        if code == BC_DIRICHLET && !global_edge {
-            if let UBc::Dirichlet(v) = ubc {
+        if code == BC_DIRICHLET {
+            // 面の由来で値の出所を選ぶ: 外縁 = --outer-bc、不在隣接 = --unobserved-bc
+            let v = if global_edge {
+                if let UBc::Dirichlet(v) = outer { *v } else { 0.0 }
+            } else if let UBc::Dirichlet(v) = ubc {
+                *v
+            } else {
+                0.0
+            };
+            if v != 0.0 {
                 if let Some(f) = actor.set_bc_value {
-                    f.call(&mut actor.store, (face, *v)).unwrap();
+                    f.call(&mut actor.store, (face, v)).unwrap();
                 }
             }
         }
@@ -874,7 +933,7 @@ impl Sim {
             let (n, x0, x1, bcl, bcr) = self.nodes[node].init_args;
             apply_face_config(
                 &mut actor, node, self.nodes.len(), bcl, bcr,
-                &self.cfg.unobserved_bc, &self.t_coef,
+                &self.cfg.unobserved_bc, &self.cfg.outer_bc, &self.t_coef,
             );
             let rc = actor
                 .init
@@ -971,7 +1030,9 @@ impl Sim {
                 "--add: 参加ステップ {s_join} が総ステップ数以上"
             );
             // 参加ノードのbcと界面を決め、隣接ノードへ界面の動的登録を予約する
-            let mut bc = [BC_DIRICHLET, BC_DIRICHLET];
+            // (界面にならない面はグローバル外縁のみ → --outer-bc に従う。既定は従来同一)
+            let oc = self.cfg.outer_bc.code();
+            let mut bc = [oc, oc];
             let mut ifaces = Vec::new();
             if node > 0 && self.nodes[node - 1].present {
                 bc[0] = BC_INTERFACE;
@@ -1001,7 +1062,7 @@ impl Sim {
             let (n, x0, x1, _, _) = self.nodes[node].init_args;
             apply_face_config(
                 &mut actor, node, self.nodes.len(), bc[0], bc[1],
-                &self.cfg.unobserved_bc, &self.t_coef,
+                &self.cfg.unobserved_bc, &self.cfg.outer_bc, &self.t_coef,
             );
             let rc = actor
                 .init
@@ -1097,7 +1158,7 @@ impl Sim {
         // 複合参照解も参加イベント時に隣接ノードの補助変数をリセットして鏡写しする
         apply_face_config(
             &mut actor, node, self.nodes.len(), bcl, bcr,
-            &self.cfg.unobserved_bc, &self.t_coef,
+            &self.cfg.unobserved_bc, &self.cfg.outer_bc, &self.t_coef,
         );
         let rc = actor
             .init
@@ -1250,12 +1311,14 @@ impl Sim {
             let x = x0 + (i as f64) * h_node;
             vals.push(warm_field(left, right, x));
         }
-        // 外縁 (グローバル境界) の Dirichlet 端は厳密に 0 に落とす (initと同じ規則)
+        // 外縁 (グローバル境界) の Dirichlet 端は外縁設定値に落とす (initと同じ規則。
+        // 既定 0.0 = 従来とビット同一)
+        let ov = if let UBc::Dirichlet(v) = self.cfg.outer_bc { v } else { 0.0 };
         if bcl == BC_DIRICHLET {
-            vals[0] = 0.0;
+            vals[0] = ov;
         }
         if bcr == BC_DIRICHLET {
-            vals[(n - 1) as usize] = 0.0;
+            vals[(n - 1) as usize] = ov;
         }
         {
             let nd = &mut self.nodes[node];
@@ -1401,7 +1464,9 @@ impl Sim {
         } else {
             truth
         };
-        let gamma = self.cfg.nudge_gamma;
+        // 発注11: 保留ノード (抜き取り検証) は γ=0 で適用 = 同化に使わず
+        // イノベーションのみ記録 (実機の holdout と同一意味論)
+        let gamma = if self.cfg.holdout == Some(node) { 0.0 } else { self.cfg.nudge_gamma };
         let nd = &mut self.nodes[node];
         let f = nd.actor.observe.expect("このアクターは dyne_observe を持たない");
         let d = f.call(&mut nd.actor.store, (li as u32, y, gamma)).unwrap();
@@ -1493,7 +1558,8 @@ fn main() {
     let n_pts = cfg.points;
     let n_nodes = cfg.nodes;
     assert!(n_pts >= n_nodes * 3, "各ノードに最低3点必要 (points >= nodes*3)");
-    let h = 1.0 / ((n_pts - 1) as f64);
+    // 発注11: h = L/(points-1)。既定 L=1.0 は従来の 1.0/(points-1) とビット同一
+    let h = cfg.length / ((n_pts - 1) as f64);
     // 陽解法の安定条件 (M0ホストと同じ検証)。r ≤ 1/2 は**差分法**の条件であり、
     // 学習型アクターの安定領域は別物 (理論ノートN7) なので、学習型では警告に
     // 落として掃引を許す (発注5、2026-09-20。判定は後段の Linf/非有限検出)
@@ -1556,18 +1622,45 @@ fn main() {
         );
     }
 
-    // 発注8: 合成観測の真値 = 単一ノード基準解 (同一wasm・全域) の全履歴。
-    // ナッジング有効時のみ、シミュレーション本体より先に計算しておく
-    let obs_truth: Vec<Vec<f64>> = if cfg.nudge_gamma > 0.0 {
+    // 発注11: 全域外縁の設定情報化 (既定 dirichlet:0 = 従来とビット同一)
+    let outer_code = cfg.outer_bc.code();
+    let outer_val = if let UBc::Dirichlet(v) = cfg.outer_bc { v } else { 0.0 };
+    let _ = outer_val; // 値は apply_face_config が cfg から読む (将来の直接利用に備え保持)
+
+    // 発注8: 合成観測の真値。既定 = 単一ノード基準解 (同一wasm・全域) の全履歴。
+    // 発注11: --truth-grad 指定時は式で生成する (一端が暖かい定常勾配+緩い時間変動。
+    // モデルの外にある真値なので、モデル誤差込みの検証になる = 実験1のリハーサル)
+    let obs_truth: Vec<Vec<f64>> = if let Some((tc, tw, period, amp)) = cfg.truth_grad {
+        let mut hist = Vec::with_capacity(cfg.steps as usize);
+        for step in 0..cfg.steps {
+            let t = cfg.dt * ((step + 1) as f64);
+            let osc = amp * libm::sin(2.0 * std::f64::consts::PI * t / period);
+            hist.push(
+                (0..n_pts)
+                    .map(|gi| {
+                        let xf = (gi as f64) * h / cfg.length; // x/L ∈ [0,1]
+                        tc + (tw - tc) * xf + osc * xf
+                    })
+                    .collect(),
+            );
+        }
+        hist
+    } else if cfg.nudge_gamma > 0.0 {
         let mut single = Actor::load_with(&engine, &module, &cfg.pinn_cfg);
+        apply_face_config(&mut single, 0, 1, outer_code, outer_code, &cfg.unobserved_bc, &cfg.outer_bc, &t_coef);
         let rc = single
             .init
             .call(
                 &mut single.store,
-                (n_pts as u32, 0.0, 1.0, cfg.alpha, cfg.dt, BC_DIRICHLET, BC_DIRICHLET),
+                (n_pts as u32, 0.0, cfg.length, cfg.alpha, cfg.dt, outer_code, outer_code),
             )
             .unwrap();
         assert_eq!(rc, 0);
+        if let Some(t0) = cfg.init_uniform {
+            for i in 0..n_pts {
+                single.set.call(&mut single.store, (i as u32, t0)).unwrap();
+            }
+        }
         let mut hist = Vec::with_capacity(cfg.steps as usize);
         for _ in 0..cfg.steps {
             single.step.call(&mut single.store, ()).unwrap();
@@ -1602,14 +1695,14 @@ fn main() {
         }
         let present = !absent_at_start[i];
         let bc_l = if i == 0 {
-            BC_DIRICHLET
+            outer_code
         } else if absent_at_start[i - 1] {
             ub_code
         } else {
             BC_INTERFACE
         };
         let bc_r = if i == n_nodes - 1 {
-            BC_DIRICHLET
+            outer_code
         } else if absent_at_start[i + 1] {
             ub_code
         } else {
@@ -1617,7 +1710,7 @@ fn main() {
         };
         let mut actor = Actor::load_with(&engine, &module, &cfg.pinn_cfg);
         if present {
-            apply_face_config(&mut actor, i, n_nodes, bc_l, bc_r, &cfg.unobserved_bc, &t_coef);
+            apply_face_config(&mut actor, i, n_nodes, bc_l, bc_r, &cfg.unobserved_bc, &cfg.outer_bc, &t_coef);
             let rc = actor
                 .init
                 .call(
@@ -1626,6 +1719,12 @@ fn main() {
                 )
                 .unwrap();
             assert_eq!(rc, 0, "dyne_init failed on node {i}");
+            // 発注11: 初期場の一様上書き (実験1: 実測平均で初期化。基準解側も同様)
+            if let Some(t0) = cfg.init_uniform {
+                for k in 0..cnt {
+                    actor.set.call(&mut actor.store, (k as u32, t0)).unwrap();
+                }
+            }
         }
         let mut ifaces = Vec::new();
         if present {
@@ -1705,6 +1804,14 @@ fn main() {
     // 参照解:
     //   ADDなし → 単一ノード参照解 (同一wasm・全域) — 従来どおり
     //   ADDあり → 複合参照解 (同じイベント時系列を単一配列で再現、ホスト側純Rust)
+    // 発注11: 解析解 (sin減衰) 比較が意味を持つのは従来の無次元・外縁0固定・
+    // sin初期値の構成のみ
+    let analytic_ok = cfg.adds.is_empty()
+        && cfg.absent.is_empty()
+        && cfg.nudge_gamma == 0.0
+        && cfg.length == 1.0
+        && cfg.init_uniform.is_none()
+        && matches!(cfg.outer_bc, UBc::Dirichlet(v) if v == 0.0);
     let mut ref_history: Vec<Vec<f64>> = Vec::new();
     let reference: Vec<f64> = if cfg.nudge_gamma > 0.0 {
         // ナッジング有効時: 基準解 = 観測の真値 (単一ノード解、同化なし) を再利用
@@ -1717,15 +1824,21 @@ fn main() {
         // 部分観測 (--absent) でも基準解は**全域**の単一ノード解 (N10 の実験設計:
         // 観測領域の誤差を全域基準解に対して測る)
         let mut single = Actor::load_with(&sim.engine, &sim.module, &cfg.pinn_cfg);
+        apply_face_config(&mut single, 0, 1, outer_code, outer_code, &cfg.unobserved_bc, &cfg.outer_bc, &sim.t_coef);
         let rc = single
             .init
             .call(
                 &mut single.store,
-                (n_pts as u32, 0.0, 1.0, cfg.alpha, cfg.dt, BC_DIRICHLET, BC_DIRICHLET),
+                (n_pts as u32, 0.0, cfg.length, cfg.alpha, cfg.dt, outer_code, outer_code),
             )
             .unwrap();
         assert_eq!(rc, 0);
-        let want_hist = cfg.error_csv.is_some() && !cfg.absent.is_empty();
+        if let Some(t0) = cfg.init_uniform {
+            for i in 0..n_pts {
+                single.set.call(&mut single.store, (i as u32, t0)).unwrap();
+            }
+        }
+        let want_hist = cfg.error_csv.is_some() && (!cfg.absent.is_empty() || !analytic_ok);
         for _ in 0..cfg.steps {
             single.step.call(&mut single.store, ()).unwrap();
             if want_hist {
@@ -1845,12 +1958,19 @@ fn main() {
     }
     // 発注8: ナッジング設定の表示 (無効時は非表示 = 既存基準出力との行単位一致を保つ)
     if cfg.nudge_gamma > 0.0 {
+        let truth_name = if let Some((tc, tw, pd, amp)) = cfg.truth_grad {
+            format!("式生成 grad({tc}→{tw}℃, 周期{pd}s, 振幅{amp})")
+        } else {
+            "単一基準解".to_string()
+        };
         println!(
-            "nudging: gamma={} period={} sigma={} obs={}本 (各現存ノードの中央格子点、y=単一基準解+σN(0,1))",
+            "nudging: gamma={} period={} sigma={} obs={}本 holdout={:?} (各現存ノードの中央格子点、y={}+σN(0,1))",
             cfg.nudge_gamma,
             cfg.obs_period,
             cfg.obs_sigma,
-            sim.innovation_log.len()
+            sim.innovation_log.len(),
+            cfg.holdout,
+            truth_name
         );
     }
     let ref_name = if cfg.adds.is_empty() { "single" } else { "composite" };
@@ -1892,10 +2012,20 @@ fn main() {
         );
     } else if cfg.nudge_gamma > 0.0 {
         // ナッジング有効: 基準解 = 同化なしの真値なのでビット一致は主張しない。
-        // 誤差 (同化の効果) で報告する
+        // 誤差 (同化の効果) で報告する。truth-grad 時は式生成の真値が基準
+        let refname = if cfg.truth_grad.is_some() { "truth" } else { "single(no assim)" };
+        println!("nudging: Linf vs {} = {:.3e}, L2 = {:.3e}", refname, max_diff, l2r);
         println!(
-            "nudging: Linf vs single(no assim) = {:.3e}, L2 = {:.3e}",
-            max_diff, l2r
+            "per-node Linf vs {} = [{}]",
+            refname,
+            (0..n_nodes)
+                .map(|i| if sim.nodes[i].present {
+                    format!("{:.2e}", node_linf_ref[i])
+                } else {
+                    "-".to_string()
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
         );
     } else {
         println!(
@@ -1906,11 +2036,14 @@ fn main() {
     if !cfg.absent.is_empty() {
         // 観測領域は端が解析解の境界と一致しないため解析解比較は意味を持たない
         println!("L2 vs analytic: n/a (部分観測シナリオ)");
-    } else if cfg.adds.is_empty() {
-        println!("L2 vs analytic = {:.3e}, Linf = {:.3e}", l2, linf);
-    } else {
+    } else if !cfg.adds.is_empty() {
         // 領域が途中から拡張されるため sin減衰の解析解は適用外
         println!("L2 vs analytic: n/a (領域拡張シナリオ)");
+    } else if analytic_ok {
+        println!("L2 vs analytic = {:.3e}, Linf = {:.3e}", l2, linf);
+    } else if cfg.nudge_gamma == 0.0 {
+        // 物理単位運転・外縁変更等: sin減衰の解析解は適用外
+        println!("L2 vs analytic: n/a (既定外の構成)");
     }
 
     // ---- 実機照合用: ノード別の温度配列CRC32 (--crc。2026-09-18追加) ----
@@ -2111,7 +2244,7 @@ fn main() {
             let mut l2 = 0.0f64;
             for k in 0..cnt {
                 let gi = s + k;
-                let r = if cfg.adds.is_empty() && cfg.absent.is_empty() && cfg.nudge_gamma == 0.0 {
+                let r = if analytic_ok {
                     (std::f64::consts::PI * (gi as f64) * h).sin() * dec
                 } else {
                     // ADDあり = 複合参照解、部分観測/ナッジング = 全域単一ノード解の履歴
@@ -2186,10 +2319,11 @@ fn main() {
             }
         );
     } else if nudged {
+        let refname = if cfg.truth_grad.is_some() { "truth" } else { "single(no assim)" };
         println!(
             "RESULT: {}",
             if pass {
-                format!("DONE (nudging, Linf vs single(no assim) = {max_diff:.3e})")
+                format!("DONE (nudging, Linf vs {refname} = {max_diff:.3e})")
             } else {
                 "FAIL (NaN/inf with nudging)".to_string()
             }
@@ -2233,6 +2367,9 @@ fn composite_reference(
     let r = cfg.alpha * cfg.dt / (h * h);
     let ub_code = cfg.unobserved_bc.code();
     let ub_value = if let UBc::Dirichlet(v) = cfg.unobserved_bc { v } else { 0.0 };
+    // 発注11: 全域外縁の設定 (既定 dirichlet:0 = 従来とビット同一)
+    let outer_code = cfg.outer_bc.code();
+    let outer_value = if let UBc::Dirichlet(v) = cfg.outer_bc { v } else { 0.0 };
     let m = coef.as_ref().map(|c| c.decay.len()).unwrap_or(0);
     let mut u = vec![0.0f64; n_pts];
     let mut un = vec![0.0f64; n_pts];
@@ -2266,10 +2403,10 @@ fn composite_reference(
             u[s + k] = sin_pi(x0 + (k as f64) * hn);
         }
         if bcl == BC_DIRICHLET {
-            u[s] = if i == 0 { 0.0 } else { ub_value };
+            u[s] = if i == 0 { outer_value } else { ub_value };
         }
         if bcr == BC_DIRICHLET {
-            u[s + cnt - 1] = if i == n_nodes - 1 { 0.0 } else { ub_value };
+            u[s + cnt - 1] = if i == n_nodes - 1 { outer_value } else { ub_value };
         }
     };
     for i in 0..n_nodes {
@@ -2277,14 +2414,14 @@ fn composite_reference(
             // 起動時のbc: 外縁は Dirichlet 0、不在隣接の面は設定キー
             // (シミュレータ本体と同一の規則)
             let bcl = if i == 0 {
-                BC_DIRICHLET
+                outer_code
             } else if absent_at_start[i - 1] {
                 ub_code
             } else {
                 BC_INTERFACE
             };
             let bcr = if i == n_nodes - 1 {
-                BC_DIRICHLET
+                outer_code
             } else if absent_at_start[i + 1] {
                 ub_code
             } else {
@@ -2325,10 +2462,10 @@ fn composite_reference(
                     u[s + k] = warm_field(left, right, x0 + (k as f64) * hn);
                 }
                 if jr.bc.0 == BC_DIRICHLET {
-                    u[s] = 0.0; // 参加ノードの Dirichlet 面はグローバル外縁のみ
+                    u[s] = outer_value; // 参加ノードの Dirichlet 面はグローバル外縁のみ
                 }
                 if jr.bc.1 == BC_DIRICHLET {
-                    u[s + cnt - 1] = 0.0;
+                    u[s + cnt - 1] = outer_value;
                 }
             } else {
                 fill(&mut u, jr.node, jr.bc.0, jr.bc.1);
@@ -2359,8 +2496,8 @@ fn composite_reference(
             }
             let a = starts[p].0;
             let b = starts[i].0 + starts[i].1 - 1;
-            let code_a = if p == 0 { BC_DIRICHLET } else { ub_code };
-            let code_b = if i == n_nodes - 1 { BC_DIRICHLET } else { ub_code };
+            let code_a = if p == 0 { outer_code } else { ub_code };
+            let code_b = if i == n_nodes - 1 { outer_code } else { ub_code };
             let ua = match code_a {
                 BC_ZERO_GRAD => u[a] + r * (u[a + 1] - 2.0 * u[a] + u[a + 1]),
                 BC_LINEAR_EXTRAP => {
@@ -2373,7 +2510,7 @@ fn composite_reference(
                 }
                 _ => {
                     if p == 0 {
-                        0.0
+                        outer_value
                     } else {
                         ub_value
                     }
@@ -2391,7 +2528,7 @@ fn composite_reference(
                 }
                 _ => {
                     if i == n_nodes - 1 {
-                        0.0
+                        outer_value
                     } else {
                         ub_value
                     }
