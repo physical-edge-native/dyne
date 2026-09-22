@@ -2,8 +2,9 @@
 
 設計書 docs\2026-09-21-experiment1-design.md の§6を、当日に上から順に実行できる
 チェックリストへ展開したもの。判定値はリハーサル(exp1-prep-report §2)に基づく。
-段階1a(ESPr32×4: センサ付き3台+センサなし1台)を対象とする。
-所要目安: 準備1時間+校正30分+本計測3run(各33分+入替)≈ 半日。
+段階1a(ESPr32×4: **全台センサ付き**。2026-09-22改訂=DHT20×3到着で計6個のため)
+を対象とする。
+所要目安: 準備1時間+校正30分+本計測4run+部分観測比較2run(各33分+入替)≈ 1日弱。
 
 ## 0. 前提(前日までに)
 
@@ -23,17 +24,18 @@
 
 ## 2. 組み立て(4台。各10分)
 
-各ブレッドボードに: 電池ボックス+端子台+ESPr32、センサ付き3台は DHT20/BME280。
-- [ ] node 0: DHT20(SDA=21, SCL=22, VCC=3V3, GND)
-- [ ] node 1: BME280(同配線。**読めなければI2C番地0x76/0x77をmenuconfigで切替**)
-- [ ] node 2: **センサなし**(常設評価区間)
-- [ ] node 3: DHT20 または BME280(残り)
+各ブレッドボードに: 電池ボックス+端子台+ESPr32、**全台 DHT20**(基本構成。
+BME280×2は予備——個体差・応答特性を同一センサ種で揃える。2026-09-22改訂)。
+- [ ] node 0〜3: DHT20(SDA=21, SCL=22, VCC=3V3, GND)
+- [ ] 予備のBME280に差し替える場合のみ: **読めなければI2C番地0x76/0x77を
+      menuconfigで切替**。号令の --sensor はノードごとにカンマ区切りで指定可
+      (例: dht20,bme280,dht20,dht20)
 - [ ] 全台: 電池→端子台→VIN/GND。スイッチONで online になることを1台ずつ確認
 ※センサ割当を変える場合は号令の --sensor を per-node 指定に(mqtt_config.py --help 参照)
 
 ## 3. 校正(30分+集計5分)
 
-1. [ ] センサ付き3台を**同一地点**(机上に寄せて)に置き、電池駆動で30分静置
+1. [ ] センサ付き4台を**同一地点**(机上に寄せて)に置き、電池駆動で30分静置
       (号令は不要。sensorトピックの定期発行だけで足りる)
 2. [ ] mqtt_log/sensor.csv の後半15分ぶんから各ノードの平均温度を算出
       (exp1_report.py に校正集計があればそれを使用。なければ表計算で平均)
@@ -61,14 +63,30 @@ python scripts\mqtt_config.py --broker localhost --nodes 4 --points 65
 
 - [ ] run1: --holdout 0 → done×4 まで放置(33分)。innov.csv が溜まることを開始5分で確認
 - [ ] run2: --holdout 1(stopしてから再号令)
-- [ ] run3: --holdout 3
+- [ ] run3: --holdout 2
+- [ ] run4: --holdout 3(全台センサ付き化でローテーションは4回。2026-09-22改訂)
 - [ ] 各run間: 電池残(statusのheap相当ではなく動作継続)とセンサ値の妥当性を目視
-- [ ] (任意run4) --bc transparent で run1 相当を1本(境界条件比較の実地データ)
+
+**部分観測の比較run(2026-09-22追加。旧・任意run4の--bc transparent単発は、不在
+ノードのない構成では--bcの適用面が存在せず効果がないため削除——--bcは不在隣接の
+面にのみ適用される、F1設計書§1)**:
+
+- [ ] 比較run A: node 0 は**電源オンのまま「観測のみ」役**で動かし
+      (`--absent 0 --absent-observe --bc zero_grad --holdout 1`)、1run。
+      node 0 は計算に参加せずセンサ値だけを発行=**未観測区間の実温度の記録**
+      (--peers auto は不在ノードを自動で「-」扱い。node 0 のstatusは
+      running(observe role)になる)
+- [ ] 比較run B: 同構成で `--bc transparent` に替えて1run
+      (transparent係数は号令ツールがα・dtから計算して注入。dt=1sで25項)
+- [ ] 比較runの判定材料: node 0 の sensor CSV(実温度)と、計算3台の場の
+      node 0 区間の予測値を突き合わせる(観測ゼロ区間の推定成績の直接照合)
+- [ ] 解析は**前半15分(--max-step 900)と全体**に分ける(リハーサル参考値:
+      モデル/ナイーブ比 zero_grad 0.34/0.47、transparent 0.33/0.43)
 
 ## 6. 判定(exp1_report.py)
 
 ```
-python scripts\exp1_report.py --rotation 0:<run1のinnov> 1:<run2> 3:<run3>
+python scripts\exp1_report.py --rotation 0:<run1のinnov> --rotation 1:<run2>   --rotation 2:<run3> --rotation 3:<run4>
 ```
 
 - [ ] **主基準**: モデル/ナイーブ比(ローテーション平均)< 1.0 =モデル優位
@@ -76,8 +94,9 @@ python scripts\exp1_report.py --rotation 0:<run1のinnov> 1:<run2> 3:<run3>
        内訳にその構図が出ているかを確認)
 - [ ] **副基準**: 保留イノベーション絶対値のローテーション平均 ≤ 1.0℃
       (リハーサル参考値: 0.823℃。端ノードは単独1.3℃台になりうる=原因分析つき記録)
-- [ ] センサなし node 2 区間: 温度計かセンサ一時移設で2〜3点スポット実測し、
-      場の予測値と照合(数値は台帳に記録。合否対象外)
+- [ ] 部分観測の比較run: `--holdout 1 --max-step 900` と全体で各1回集計し、
+      zero_grad と transparent の前半/全体の比を表にする(合否対象外の比較データ)。
+      あわせて node 0 の sensor CSV(観測のみ役の実温度)と場の予測を照合
 - [ ] ヒートマップ生成(exp1_report.py の時系列HTML)を保存
 
 ## 7. 後段(全run合格時のみ・任意)

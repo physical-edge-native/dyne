@@ -3,7 +3,8 @@
 
 規約: docs/2026-09-14-mqtt-control-plane.md §2.1〜2.3。
 格子の分割はシミュレータ (dyne-sim) と同一規則 (points を nodes で割り、余りを
-先頭ノードから1点ずつ)。外縁は dirichlet(0) 固定、不在隣接への面は --bc のキー。
+先頭ノードから1点ずつ)。外縁は --outer-bc (既定 dirichlet:0、実験1は zero_grad)、
+不在隣接への面は --bc のキー。
 
 使い方 (例: 2ノード、PCブローカー、ノードのIPは status で確認したもの):
   python scripts/mqtt_config.py --broker 192.168.137.1 --nodes 2 --points 65 \
@@ -127,10 +128,16 @@ def main():
                     help="不在隣接への面の境界条件キー (外縁は常に dirichlet 0)")
     ap.add_argument("--dirichlet-value", type=float, default=0.0)
     ap.add_argument("--absent", default="", help="恒久不在ノードのカンマ区切り (部分観測)")
+    ap.add_argument("--absent-observe", action="store_true",
+                    help="不在ノードにも「観測のみ」役 (mode.role=observe) の cfg を注入"
+                         "する (計算に参加せずセンサ・RSSIだけ発行。部分観測runで"
+                         "未観測区間の実温度を記録するため。2026-09-22)")
     ap.add_argument("--peers",
                     help="ノード順のIPカンマ区切り (不在ノードは '-')。"
                          "'auto' で status の online (retained) からノードID順に自動解決")
-    ap.add_argument("--sensor", default="none", choices=["none", "dht20", "bme280"])
+    ap.add_argument("--sensor", default="none",
+                    help="センサ種別: none|dht20|bme280。カンマ区切りでノードごとに"
+                         "指定可 (例: dht20,bme280,none,dht20)。単一値は全ノード共通")
     ap.add_argument("--sensor-period-ms", type=int, default=5000)
     ap.add_argument("--rssi-period-ms", type=int, default=10000)
     ap.add_argument("--field-every", type=int, default=50)
@@ -183,6 +190,12 @@ def main():
     h = a.length / (a.points - 1)
     calib = [float(x) for x in a.calib.split(",")] if a.calib else [0.0] * a.nodes
     assert len(calib) == a.nodes, "--calib must have one value per node"
+    sensors = a.sensor.split(",")
+    if len(sensors) == 1:
+        sensors = sensors * a.nodes
+    assert len(sensors) == a.nodes, "--sensor: 単一値かノード数ぶんのカンマ区切り"
+    for kind in sensors:
+        assert kind in ("none", "dht20", "bme280"), f"--sensor: 不正な種別 {kind}"
 
     def ubc_obj():
         if a.bc == "dirichlet":
@@ -194,9 +207,31 @@ def main():
 
     cfgs = {}
     for i in range(a.nodes):
-        if i in absent:
+        if i in absent and not a.absent_observe:
             continue
         s, cnt = starts[i]
+        if i in absent:
+            # 「観測のみ」役: 計算に参加せずセンサ・RSSIだけ発行 (ファームは
+            # role=observe で BSP を起動しない)。bc/ifaces は計算に使われないため
+            # zero_grad・空でよい (cfg 検証は cluster/node/bc の存在と n≥3 のみ)
+            cfgs[i] = {
+                "ver": 1,
+                "gen": int(time.time()),
+                "cluster": {"n_nodes": a.nodes, "points": a.points, "alpha": a.alpha,
+                            "dt": a.dt, "steps": a.steps, "seed": a.seed,
+                            "step_period_ms": a.step_period_ms},
+                "node": {"idx": i, "n": cnt, "x0": s * h, "x1": (s + cnt - 1) * h,
+                         "calib_offset": calib[i]},
+                "bc": {"left": {"key": "zero_grad"}, "right": {"key": "zero_grad"}},
+                "ifaces": [],
+                "mode": {"role": "observe", "sensor": sensors[i],
+                         "sensor_period_ms": a.sensor_period_ms,
+                         "rssi_period_ms": a.rssi_period_ms,
+                         "field_every": 0, "residual_every": 0, "rt_every": 0},
+                "assim": {"gamma": 0.0, "obs_period": a.obs_period,
+                          "obs_point": -1, "holdout": False},
+            }
+            continue
         bc, ifaces = {}, []
         for side, nb, iface_id in (("left", i - 1, i - 1), ("right", i + 1, i)):
             edge = nb < 0 or nb >= a.nodes
@@ -223,7 +258,7 @@ def main():
                      **({"init": a.init} if a.init is not None else {})},
             "bc": bc,
             "ifaces": ifaces,
-            "mode": {"role": "compute", "sensor": a.sensor,
+            "mode": {"role": "compute", "sensor": sensors[i],
                      "sensor_period_ms": a.sensor_period_ms,
                      "rssi_period_ms": a.rssi_period_ms,
                      "field_every": a.field_every,

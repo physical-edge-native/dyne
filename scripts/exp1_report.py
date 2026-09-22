@@ -45,11 +45,11 @@ def read_innov(path):
     return rows
 
 
-def holdout_stats(rows, holdout, warmup):
+def holdout_stats(rows, holdout, warmup, max_step=None):
     """(a) モデル誤差 |d_holdout| とナイーブ誤差 |y_holdout − mean(他ノードのy)|"""
     model, naive = [], []
     for step in sorted(rows):
-        if step < warmup:
+        if step < warmup or (max_step is not None and step >= max_step):
             continue
         per = rows[step]
         if holdout not in per:
@@ -218,6 +218,8 @@ def main():
                     help="ローテーション集計: 保留番号:CSV を run数ぶん繰り返す")
     ap.add_argument("--warmup", type=int, default=200,
                     help="統計から除外する序盤ステップ数 (初期過渡)")
+    ap.add_argument("--max-step", type=int, default=None,
+                    help="このステップ以降を除外 (部分観測比較runの前半窓。例: 900)")
     ap.add_argument("--field", help="温度場CSV (sim/mqtt両形式可。ヒートマップ用)")
     ap.add_argument("--rssi", help="RSSI CSV (mqtt_log/rssi.csv)")
     ap.add_argument("--out", help="HTMLレポートの出力先 (省略時は統計のみ表示)")
@@ -233,10 +235,11 @@ def main():
         a.holdout = "rotation"
     elif a.innov is not None and a.holdout is not None:
         rows = read_innov(a.innov)
-        lines = [fmt_stats(f"holdout={a.holdout} (warmup {a.warmup}除外)",
-                           holdout_stats(rows, a.holdout, a.warmup)),
-                 fmt_stats(f"holdout={a.holdout} (全期間)",
-                           holdout_stats(rows, a.holdout, 0))]
+        w = f"、〜step {a.max_step}" if a.max_step is not None else ""
+        lines = [fmt_stats(f"holdout={a.holdout} (warmup {a.warmup}除外{w})",
+                           holdout_stats(rows, a.holdout, a.warmup, a.max_step)),
+                 fmt_stats(f"holdout={a.holdout} (全期間{w})",
+                           holdout_stats(rows, a.holdout, 0, a.max_step))]
     else:
         ap.error("--innov と --holdout の組、または --rotation を指定する")
     for l in lines:
