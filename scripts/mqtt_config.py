@@ -150,8 +150,11 @@ def main():
                     help="空間の全長 L[m] (発注11。格子幅 h=L/(points-1))")
     ap.add_argument("--calib", default="",
                     help="ノード順の校正オフセット[℃]カンマ区切り (省略=全0)")
-    ap.add_argument("--holdout", type=int, default=-1,
-                    help="保留ノード番号 (抜き取り検証。-1=なし)")
+    ap.add_argument("--holdout", default="-1",
+                    help="保留ノード番号 (抜き取り検証。-1=なし)。'all' で全ノード"
+                         "保留=同化なし対照run (γ>0のままイノベーション記録のみ。"
+                         "ファームはγ=0だとinnovを発行しないため、実機の対照は"
+                         "この形で行う。2026-09-23)")
     ap.add_argument("--step-period-ms", type=int, default=0,
                     help="1ステップの実時間周期[ms] (0=従来の最速。実験1は1000)")
     ap.add_argument("--init", type=float, default=None,
@@ -190,6 +193,8 @@ def main():
     h = a.length / (a.points - 1)
     calib = [float(x) for x in a.calib.split(",")] if a.calib else [0.0] * a.nodes
     assert len(calib) == a.nodes, "--calib must have one value per node"
+    hold_all = a.holdout == "all"
+    hold_n = -1 if hold_all else int(a.holdout)
     sensors = a.sensor.split(",")
     if len(sensors) == 1:
         sensors = sensors * a.nodes
@@ -265,7 +270,8 @@ def main():
                      "residual_every": a.residual_every,
                      "rt_every": a.rt_every},
             "assim": {"gamma": a.gamma, "obs_period": a.obs_period,
-                      "obs_point": a.obs_point, "holdout": i == a.holdout},
+                      "obs_point": a.obs_point,
+                      "holdout": hold_all or i == hold_n},
         }
 
     if a.dry_run:

@@ -460,13 +460,16 @@ fn parse_args() -> Config {
         assert!(c.adds.is_empty(), "--init-uniform は --add と併用不可 (複合参照解が sin 初期化前提)");
     }
     if c.truth_grad.is_some() {
-        assert!(c.nudge_gamma > 0.0, "--truth-grad は --nudge-gamma > 0 と併用 (観測の機構を使うため)");
+        // γ=0 も許す (2026-09-23: 同化なし対照run = イノベーション記録のみ)
         let (_, _, period, _) = c.truth_grad.unwrap();
         assert!(period > 0.0, "--truth-grad の period は正の値");
     }
     if let Some(hn) = c.holdout {
         assert!(hn < c.nodes, "--holdout: node {hn} out of range");
-        assert!(c.nudge_gamma > 0.0, "--holdout は --nudge-gamma > 0 と併用");
+        assert!(
+            c.nudge_gamma > 0.0 || c.truth_grad.is_some(),
+            "--holdout は --nudge-gamma > 0 か --truth-grad と併用"
+        );
     }
     if c.nudge_gamma != 0.0 {
         assert!(c.nudge_gamma > 0.0, "--nudge-gamma は正の値");
@@ -1491,7 +1494,7 @@ impl Sim {
         }
         // 発注8: 観測周期ごとのナッジング (計算完了直後 = 次ステップの交換前。
         // 実機ファームの適用点と同一)
-        if self.cfg.nudge_gamma > 0.0
+        if (self.cfg.nudge_gamma > 0.0 || self.cfg.truth_grad.is_some())
             && (self.nodes[node].cur_step + 1) % self.cfg.obs_period == 0
         {
             self.apply_observation(node);
@@ -1809,6 +1812,7 @@ fn main() {
     let analytic_ok = cfg.adds.is_empty()
         && cfg.absent.is_empty()
         && cfg.nudge_gamma == 0.0
+        && cfg.truth_grad.is_none()
         && cfg.length == 1.0
         && cfg.init_uniform.is_none()
         && matches!(cfg.outer_bc, UBc::Dirichlet(v) if v == 0.0);
