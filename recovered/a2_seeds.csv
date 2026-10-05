@@ -1,0 +1,11 @@
+kind,seed,linf,verdict
+global,1,5.294e0,degraded
+global,100,5.294e0,degraded
+global,1234,5.294e0,degraded
+global,20260921,5.294e0,degraded
+global,7,5.294e0,degraded
+pinn,2,2.023e1,unstable
+pinn,3,5.593e-2,stable
+pinn,4,3.685e-1,degraded
+pinn,5,7.981e-3,stable
+pinn,6,2.524e-3,stable

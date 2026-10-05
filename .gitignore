@@ -72,3 +72,15 @@ swarm_old_out/
 # F1/F2 の手元確認出力 (scripts/check-f1.ps1。再生成可能)
 f1_check_out/
 
+
+# 発表スライド (Googleスライドで管理するため追跡しない。生成スクリプトと構成案のみ追跡)
+reference/previous_deck.pptx
+reference/previous_deck.pdf
+slides/**/*.pptx
+slides/**/formula_imgs/
+slides/**/final.md
+slides/**/old25_degradation.jpg
+
+# 会話記録から復元した実測データ (recovered/) は *.csv の例外として追跡する
+# (元CSVがOSの一時領域の清掃で消失した事故の再発防止。詳細は recovered/README.md)
+!recovered/*.csv
