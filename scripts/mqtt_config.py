@@ -191,6 +191,12 @@ def main():
     assert len(ips) == a.nodes, "--peers はノード数と同数"
     starts = split(a.points, a.nodes)
     h = a.length / (a.points - 1)
+    r = a.alpha * a.dt / (h * h)
+    print(f"r = alpha*dt/h^2 = {r:.4f}  (h={h:.4f} m)")
+    if r > 0.5:
+        print(f"!!! 警告: r={r:.3f} > 1/2 — 差分法の安定条件を破っており発散する。"
+              f" dt を {0.5*h*h/a.alpha:.3f} 秒以下にするか alpha/length を見直すこと"
+              f" (step_period_ms も合わせる)")
     calib = [float(x) for x in a.calib.split(",")] if a.calib else [0.0] * a.nodes
     assert len(calib) == a.nodes, "--calib must have one value per node"
     hold_all = a.holdout == "all"
