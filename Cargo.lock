@@ -51,6 +51,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "dyne-sim2d"
+version = "0.1.0"
+dependencies = [
+ "dyne-core",
+ "dyne-wire",
+ "libm",
+ "wasmi",
+]
+
+[[package]]
 name = "dyne-swarm"
 version = "0.1.0"
 

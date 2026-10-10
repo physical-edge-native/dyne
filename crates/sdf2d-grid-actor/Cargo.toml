@@ -1,0 +1,21 @@
+[package]
+name = "sdf2d-grid-actor"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+# cdylib = WASMアクター本体 / rlib = ネイティブの単体テスト用 (swarm-agent-actor と同方針)
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# 純Rustの数学関数 (sqrt・sin・cos・floor)。プラットフォーム非依存で決定論を保つ
+libm = "0.2"
+# ワイヤ形式v2の単一定義 (受信箱・送信箱のメッセージはこの規約のみ)
+dyne-wire = { path = "../dyne-wire" }
+
+[profile.release]
+panic = "abort"
+opt-level = "z"
+lto = true
+
+[workspace]
