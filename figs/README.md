@@ -27,3 +27,9 @@
 | fig08_long | 劣化セルの300↔1000ステップ比較 |
 | fig09_seeds | NN初期値の乱数6通り |
 | fig10_width | 幅と発散境界の区間 |
+| fig11_exp1_temps | 実験1(2026-10-08): 4台のDHT20の補正後温度の時間変化(配置後〜run4終了) |
+| fig12_exp1_holdout | 実験1: 各runの保留ノード位置での実測・モデル予測・単純平均(4パネル) |
+
+fig11・fig12 は例外として **gnuplot ではなく matplotlib**(Python)で作図した(開発機に
+gnuplot が無いため)。.gp の代わりに生成スクリプト fig11_exp1.py を置く。データの出所は
+measured/2026-10-08-exp1/(実機の実測CSV)。再生成: `python figs/fig11_exp1.py`(リポジトリ直下で)。

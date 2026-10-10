@@ -87,3 +87,10 @@ slides/**/old25_degradation.jpg
 
 # 実機実測の記録 (measured/) も *.csv の例外として追跡する (実測の正本。詳細は measured/README.md)
 !measured/**/*.csv
+
+# ESP-IDF (vl53-eval/ = VL53L5CX評価用ファーム)
+vl53-eval/build/
+vl53-eval/managed_components/
+vl53-eval/sdkconfig
+vl53-eval/sdkconfig.old
+vl53-eval/dependencies.lock

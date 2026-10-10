@@ -1,0 +1,14 @@
+menu "VL53 Eval"
+    config VL53E_I2C_SDA
+        int "I2C SDA GPIO"
+        default 21
+    config VL53E_I2C_SCL
+        int "I2C SCL GPIO"
+        default 22
+    config VL53E_I2C_HZ
+        int "I2C clock [Hz] (VL53L5CX max 1000000)"
+        default 400000
+        help
+            起動時のセンサ用ファーム書き込み(約80KB)の時間に効く。
+            Qwiicケーブル150mm+ブレッドボードでの安全側として既定は400kHz。
+endmenu

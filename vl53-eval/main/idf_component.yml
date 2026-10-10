@@ -1,0 +1,5 @@
+dependencies:
+  idf: ">=5.4"
+  # ST公式の軽量ドライバ(ULD 2.0.x)のESP-IDF移植。BSD-3-Clause。版を固定する
+  # (2026-10-10選定。docs/2026-10-10-vl53l5cx-eval-plan.md §5)
+  rjrp44/vl53l5cx: "==4.0.1"
