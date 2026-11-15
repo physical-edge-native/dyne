@@ -11,6 +11,8 @@
 #       損失・遅延・一時停止・分断、対象なしを刻む設定、距離の定義、2026-11-13 追加: 箱を動かす場面
 #       (room6_move・room6_carry) を推奨の忘れる仕組み + 損失・遅延で)。決定論 (fc 相違なし)
 #   [6] 対照実験 … 統合の遅れを足りなくした (3×3で L=1) 実行が "FAIL" になる (遅着を検出できること)
+#   [7] 2026-11-15 追加 (GitHub issue #26): 2×2 の輪で待ち合って止まらないこと。制限時間 (60秒) 内に
+#       3行とも期待どおり (heat と首振りの場面は "PASS (bit-exact)"、全損失は終了コード2の "STALL")
 # 既存の1次元回帰の無変化は scripts\check-baseline12.ps1 で別に確かめる。
 
 $ErrorActionPreference = "Stop"
@@ -98,3 +100,27 @@ fc.exe (Join-Path $work "c.txt") (Join-Path $work "d.txt")
 
 Write-Host "== [6] 対照実験 (FAIL になること) =="
 & $exe --wasm $ws --quiet --scene $em --px 3 --py 3 --steps 200 --delay 1 | Select-String -Pattern "rays:|PASS|FAIL"
+
+# 2026-11-15 追加 (GitHub issue #26): 2×2 の輪の4台が、それぞれ隣の1つからだけ受け取れていない状態で
+# 同じステップに止まる (修正前は終わらなかった)。制限時間を超えたら打ち切って "TIMEOUT" と出す
+Write-Host "== [7] 輪の待ちで止まらないこと (制限時間内に期待どおりのこと) =="
+$pan = Join-Path $root "crates\dyne-sim2d\scenes\room6_move_pan4h.txt"
+function Invoke-Limited([string]$name, [string[]]$argv, [int]$limitSec, [int]$wantExit, [string]$pattern) {
+    $o = Join-Path $work "$name.out"
+    $e = Join-Path $work "$name.err"
+    $al = $argv | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }
+    $p = Start-Process -FilePath $exe -ArgumentList $al -NoNewWindow -PassThru -RedirectStandardOutput $o -RedirectStandardError $e
+    $null = $p.Handle # 終了コードを読めるよう、終わる前にハンドルを取っておく (Windows PowerShell 5.1)
+    if (-not $p.WaitForExit($limitSec * 1000)) {
+        $p.Kill()
+        Write-Host ("{0,-14} TIMEOUT (>{1} s)" -f $name, $limitSec)
+        return
+    }
+    $p.WaitForExit()
+    $line = Get-Content $o, $e | Select-String -Pattern $pattern | Select-Object -First 1
+    $ok = ($p.ExitCode -eq $wantExit) -and $line
+    Write-Host ("{0,-14} {1} (exit {2}) {3}" -f $name, $(if ($ok) { "OK" } else { "FAIL" }), $p.ExitCode, $line)
+}
+Invoke-Limited "ring_heat" @("--wasm",$w,"--quiet","--px","2","--py","2","--steps","200","--loss","0.3","--lat-jitter-ms","20") 60 0 "PASS \(bit-exact\)"
+Invoke-Limited "ring_pan4h" @("--wasm",$ws,"--quiet","--scene",$pan,"--px","2","--py","2","--steps","200","--loss","0.3","--lat-jitter-ms","20") 60 0 "PASS \(bit-exact\)"
+Invoke-Limited "stall_loss1" @("--wasm",$w,"--quiet","--px","2","--py","2","--steps","50","--loss","1.0") 60 2 "^STALL"

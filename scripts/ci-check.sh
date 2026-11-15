@@ -5,7 +5,8 @@
 #   1. unit tests of the native workspace
 #   2. build the WebAssembly actors (heat1d, heat1d-pinn, heat2d)
 #   3. 1D: a 16-node split solution must match the single-node solution bit for bit
-#   4. 2D: several partitions with packet loss / latency / pauses must match bit for bit
+#   4. 2D: several partitions with packet loss / latency / pauses must match bit for bit;
+#      a ring of waiting nodes (2x2, heavy loss) finishes within a time limit (issue #26)
 #   5. determinism: two runs with the same arguments produce identical output
 #   6. firmware host test: the node id selection of node-esp32, built with the host C compiler
 #   7. hardware-input replay: synthetic records (range frames, IMU samples) replay bit for bit;
@@ -50,6 +51,29 @@ expect_pass "basic2x2"   "$SIM2" --wasm "$W2" --quiet --px 2 --py 2 --steps 500
 expect_pass "loss10_lat" "$SIM2" --wasm "$W2" --quiet --px 2 --py 2 --steps 500 --loss 0.1 --lat-ms 5 --lat-jitter-ms 3
 expect_pass "3x2_uneven" "$SIM2" --wasm "$W2" --quiet --px 3 --py 2 --nx 40 --ny 33 --steps 400 --loss 0.15 --lat-ms 5 --lat-jitter-ms 10
 expect_pass "pause_part" "$SIM2" --wasm "$W2" --quiet --px 2 --py 2 --steps 500 --loss 0.1 --pause 3@2000:6000 --partition 0-1@10000:15000 --partition 1-3@12000:20000
+
+# Issue #26: in a 2x2 partition the four nodes form a ring. Each node could wait at the same step for exactly
+# one neighbour while that neighbour ignored its resends, and the run never finished. Both cases must end
+# within a time limit: the lossy ring passes, and total loss stops with exit code 2 and a STALL message.
+echo "== [4b] 2D ring of waiting nodes finishes within a time limit (issue #26) =="
+RL="target/ci-ring"
+rm -rf "$RL"; mkdir -p "$RL"
+expect_within() { # name, seconds, expected exit code, regex the output must contain, command...
+  local name="$1" limit="$2" want="$3" pat="$4"; shift 4
+  "$@" > "$RL/$name.log" 2>&1 &
+  local pid=$! waited=0 got=0
+  while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt "$limit" ]; do sleep 1; waited=$((waited + 1)); done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    printf '%-16s FAIL (still running after %s s)\n' "$name" "$limit"; fail=1; return
+  fi
+  wait "$pid" || got=$?
+  if [ "$got" -eq "$want" ] && grep -qE "$pat" "$RL/$name.log"; then printf '%-16s OK (exit %s)\n' "$name" "$got"
+  else printf '%-16s FAIL (exit %s, expected %s and /%s/; see %s)\n' "$name" "$got" "$want" "$pat" "$RL/$name.log"; fail=1; fi
+}
+expect_within "ring_loss30" 60 0 "^PASS \(bit-exact\)" "$SIM2" --wasm "$W2" --quiet --px 2 --py 2 --steps 200 --loss 0.3 --lat-jitter-ms 20
+expect_within "stall_loss1" 60 2 "^STALL" "$SIM2" --wasm "$W2" --quiet --px 2 --py 2 --steps 50 --loss 1.0
 
 echo "== [5] determinism =="
 a="$("$SIM2" --wasm "$W2" --px 2 --py 2 --steps 500 --loss 0.1 --pause 3@2000:6000 | cksum)"
