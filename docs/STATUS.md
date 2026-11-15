@@ -174,7 +174,12 @@ MTGで見せることを最優先とし、既存の残課題は「後で取り�
 - slides/ をリポジトリから外した(未踏の発表資料は公開しない。書き換え前の履歴には残る)
 - 旧README(M0当時)は docs/2026-08-05-m0-readme.md へ移し、README.md を第三者向け(英語)に書き直した
 - CI: scripts/ci-check.sh(Linux/macOS/Windowsで、単体テスト、1次元16ノードと2次元4条件のビット一致、決定論)
-- 未決: ライセンス(MIT/Apache-2.0の併用、Apache-2.0のみ、MITのみ から選ぶ)、物理シミュレーション環境の新リポジトリの名前
+- **同日の結果**: 組織 physical-edge-native の新しいリポジトリ(書き換え前のデータを含まない)へプッシュし、公開した。
+  ライセンスは MIT OR Apache-2.0(LICENSE-MIT・LICENSE-APACHE、各 Cargo.toml)。Concept DOI 10.5281/zenodo.24241009
+  (README のバッジ、CITATION.cff)。CI は Linux・macOS・Windows で緑。以後の開発は GitHub の Issue で管理する
+  (#1〜#7 を起票。流れと JOSS に向けた規律は CLAUDE.md「JOSSに向けて継続的に守ること」)
+- 未決: 物理シミュレーション環境の新リポジトリの名前、CITATION.cff の license をリストにするか1値か
+  (docs/draft/2026-09-26-issues.md C-9)
 - 公開しない文書は、非公開のローカルリポジトリ ..\dyne-private(フォルダの構成は dyne と同じ)へ移した:
   計画・MTG の記録(docs/2026-10-19-plan.md、2026-11-07-plan.md、2026-11-08-MTG.md、2026-11-11-two-week-plan.md)、
   買い物・支出の記録、発表資料(reference/ の slide、slides/2026-11-08-progress/)、OSS 準備の指示書。
