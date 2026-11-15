@@ -140,4 +140,13 @@ config DYNE_IMU_AUTO
     bool "IMU: probe LSM6DSOX (I2C 0x6A/0x6B) at boot and start sampling if present"
     default y
 
+config DYNE_REPLAY_LOG
+    bool "Replay log: publish actor setup and fed IMU samples (hardware vs simulator check)"
+    default n
+    help
+        ワイヤ形式v2 の経路で、アクターへの設定 (dyne_cfg の全呼び出し・面・初期化の値) を実行の始めに
+        dyne/node/<id>/actor_setup へ、dyne_imu_push に渡した IMU の標本をステップごとに dyne/node/<id>/imu_fed へ
+        発行する。PC が記録し、dyne-sim2d で同じ入力を再生してノードの CRC とのビット一致を確かめる
+        (scripts/hw_replay.py、docs/2026-11-15-hw-replay.md)。測距の range_fed はこの設定によらず発行する。
+
 endmenu
