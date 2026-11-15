@@ -2,15 +2,26 @@ cff-version: 1.2.0
 message: "If you use this software, please cite it as below."
 title: "Dyne: physical models split across cooperating microcontrollers"
 type: software
+abstract: >-
+  Dyne runs a physical model split across many microcontrollers. Each device
+  computes the physics of its own patch of space and exchanges only the values
+  at the borders with its neighbours, so the patches together form one
+  simulation of the whole space without a central server doing the computation.
+  Numerical models are compiled once to WebAssembly, and a solution split over
+  N devices matches the single-device solution bit for bit. A deterministic
+  network simulator (packet loss, delay, pauses, partitions) makes every run
+  reproducible. Dyne is the first toolchain of the Physical-Edge Native
+  Architecture project.
 authors:
   - family-names: "Koyabu"
     given-names: "Natsuhi"
 repository-code: "https://github.com/physical-edge-native/dyne"
 version: "0.1.0"
 date-released: "2026-11-15"
-license:
-  - MIT
-  - Apache-2.0
+# Dyne is dual licensed: MIT OR Apache-2.0, at your option (see LICENSE-MIT and LICENSE-APACHE).
+# Zenodo's GitHub integration accepts only a single SPDX identifier here (a list makes the
+# metadata import fail), so the Apache-2.0 half is declared. The MIT option still applies.
+license: "Apache-2.0"
 keywords:
   - edge computing
   - microcontrollers
