@@ -8,7 +8,9 @@ authors:
 repository-code: "https://github.com/physical-edge-native/dyne"
 version: "0.1.0"
 date-released: "2026-11-15"
-license: "TODO"
+license:
+  - MIT
+  - Apache-2.0
 keywords:
   - edge computing
   - microcontrollers

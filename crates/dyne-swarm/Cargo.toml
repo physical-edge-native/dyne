@@ -2,5 +2,8 @@
 name = "dyne-swarm"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/physical-edge-native/dyne"
+description = "Original self-contained swarm demo (kept as the porting source; not used)"
 
 [dependencies]

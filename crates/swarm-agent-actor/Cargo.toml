@@ -2,6 +2,9 @@
 name = "swarm-agent-actor"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/physical-edge-native/dyne"
+description = "WebAssembly actor: one agent of the swarm demo (first mailbox-style actor)"
 
 [lib]
 # cdylib = WASMアクター本体 / rlib = ネイティブの単体テスト用 (heat1d-pinn-actor と同方針)

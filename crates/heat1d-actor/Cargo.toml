@@ -2,6 +2,9 @@
 name = "heat1d-actor"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/physical-edge-native/dyne"
+description = "WebAssembly actor: 1D heat conduction (full and small builds)"
 
 [lib]
 crate-type = ["cdylib"]

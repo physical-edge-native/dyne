@@ -2,6 +2,9 @@
 name = "dyne-sim"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/physical-edge-native/dyne"
+description = "Deterministic N-node 1D simulator; checks that split solutions match the single-node solution bit for bit"
 
 [dependencies]
 wasmi = "0.47"

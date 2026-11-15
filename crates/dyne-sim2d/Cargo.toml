@@ -2,6 +2,9 @@
 name = "dyne-sim2d"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/physical-edge-native/dyne"
+description = "Deterministic 2D multi-node simulator with packet loss, latency, pauses and partitions"
 
 [dependencies]
 wasmi = "0.47"

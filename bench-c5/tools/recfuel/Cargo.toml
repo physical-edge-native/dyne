@@ -2,6 +2,9 @@
 name = "recfuel"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/physical-edge-native/dyne"
+description = "Replays bench-c5 recordings in wasmi on a PC and counts per-step fuel (executed-instruction estimate)"
 
 # bench-c5 の記録 (.rec) を PC の wasmi で再生し、1ステップの「燃料」(wasmi が数える実行命令数の目安)
 # を数える計測補助 (2026-11-11、docs/2026-11-11-shape-speedup.md)。ESP32 の時間の代わりにはならない

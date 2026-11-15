@@ -2,6 +2,9 @@
 name = "heat2d-mlp-actor"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/physical-edge-native/dyne"
+description = "WebAssembly actor: 2D field initialized from an imported MLP model"
 
 [lib]
 # cdylib = WASMアクター本体 / rlib = ネイティブの単体テスト用

@@ -2,6 +2,9 @@
 name = "mlp-core"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/physical-edge-native/dyne"
+description = "Small no_std MLP library (graph and weights) shared by the MLP actors"
 
 # 部品のクレート (rlib のみ)。差込口とパニック時の処理は持たない。
 # 使う側: mlp-actor / mlp-train-actor / heat2d-mlp-actor

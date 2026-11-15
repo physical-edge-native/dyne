@@ -31,3 +31,9 @@ applications are welcome as issues; larger directions are discussed across the
 
 This project follows the organization-wide
 [Code of Conduct](https://github.com/physical-edge-native/.github/blob/main/CODE_OF_CONDUCT.md).
+
+## License of contributions
+
+Dyne is licensed under either of MIT or Apache-2.0, at your option (see [README](README.md#license)).
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in this work
+by you, as defined in the Apache-2.0 license, shall be dual licensed as above, without any additional terms or conditions.
