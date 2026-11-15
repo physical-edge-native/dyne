@@ -27,4 +27,9 @@ jobs:
             .
             crates/heat1d-actor
             crates/heat2d-actor
+            crates/sdf2d-grid-actor
+            crates/imu-fusion-actor
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - run: bash scripts/ci-check.sh

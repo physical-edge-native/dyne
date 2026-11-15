@@ -6,6 +6,7 @@
 //! - `--replay 経路`: 再生の入力 (下の書式のテキスト。scripts/hw_replay.py が MQTT の記録から作る) を読み、
 //!   シミュレータの模擬のセンサの代わりに、記録した測距フレームと IMU の標本を各ノードのアクターへ渡す。
 //!   記録にノードの CRC32 (check 行) があれば、そのステップの計算の後の CRC32 と比べる。
+//!   単一ノード解との比較は既定で行わない (`--replay-single` で行う)。
 //! - `--replay-record 経路`: アクターへ渡した入力と各ノードの CRC32 を、実機のファームが MQTT へ発行するのと
 //!   同じトピック・同じ形の JSON Lines で書く (合成の記録。scripts/hw_replay.py check でそのまま再生できる)。
 //!
@@ -14,6 +15,7 @@
 //!   setup N nx ny ix0 iy0 h alpha dt        ノード N の初期化の値 (シミュレータの区画と照合する)。この行があると、
 //!                                          ノード N の dyne_cfg はシミュレータ自身の設定の代わりに下の cfg 行だけになる
 //!   cfg N key val                          ノード N の dyne_cfg の呼び出し (記録の順)
+//!   face N f kind param                    ノード N の面 f (0..4 = W, E, S, N) の設定 (シミュレータの面と照合する)
 //!   range N step sid t_us count cols d×count st×count   ステップ step の送信の後に渡す測距フレーム
 //!   imu N step t_us ax ay az gx gy gz      ステップ step の計算 (dyne_step) の直前に dyne_imu_push へ渡す標本
 //!   check N step crc32(8桁の16進数) 出どころ   ステップ step の計算の後のノードの CRC32 (dyne_get の全点の f64)
@@ -38,6 +40,8 @@ pub struct ReplayNode {
     /// (nx, ny, ix0, iy0, h, alpha, dt)
     pub setup: Option<(u32, u32, u32, u32, f64, f64, f64)>,
     pub cfg: Vec<(u32, f64)>,
+    /// (面, 種類, 値)
+    pub faces: Vec<(u32, u32, u64)>,
     pub range: HashMap<u64, Vec<RangeRec>>,
     pub imu: HashMap<u64, Vec<(i64, [f64; 6])>>,
     /// step → (CRC32, 出どころ)
@@ -70,10 +74,10 @@ pub fn parse(text: &str, n_nodes: usize, steps: u64) -> Vec<ReplayNode> {
         }
         assert!(t.len() >= 2, "再生の入力 {ln}行目: 短すぎる");
         let n: usize = num(t[1], ln);
-        assert!(n < n_nodes, "再生の入力 {ln}行目: ノード {n} が範囲外 (ノードは {n_nodes} 台)");
+        assert!(n < n_nodes, "再生の入力 {ln}行目: ノード {n} が範囲外 (ノードは {n_nodes} 台。--px/--py を実機と同じにする)");
         let step_of = |s: &str| {
             let v: u64 = num(s, ln);
-            assert!(v < steps, "再生の入力 {ln}行目: ステップ {v} が --steps {steps} を超える");
+            assert!(v < steps, "再生の入力 {ln}行目: ステップ {v} が --steps {steps} を超える (--steps を実機と同じにする)");
             v
         };
         let nd = &mut nodes[n];
@@ -86,10 +90,16 @@ pub fn parse(text: &str, n_nodes: usize, steps: u64) -> Vec<ReplayNode> {
                 assert_eq!(t.len(), 4, "再生の入力 {ln}行目: cfg N key val");
                 nd.cfg.push((num(t[2], ln), bits(t[3], ln)));
             }
+            "face" => {
+                assert_eq!(t.len(), 5, "再生の入力 {ln}行目: face N f kind param");
+                let f: u32 = num(t[2], ln);
+                assert!(f < 4, "再生の入力 {ln}行目: 面は 0..4");
+                nd.faces.push((f, num(t[3], ln), num(t[4], ln)));
+            }
             "range" => {
                 assert!(t.len() >= 7, "再生の入力 {ln}行目: range N step sid t_us count cols d... st...");
                 let count: u32 = num(t[5], ln);
-                assert_eq!(t.len(), 8 + 2 * count as usize - 1, "再生の入力 {ln}行目: 区画の数が count と合わない");
+                assert_eq!(t.len(), 7 + 2 * count as usize, "再生の入力 {ln}行目: 区画の数が count と合わない");
                 let d = (0..count as usize).map(|k| bits(t[7 + k], ln)).collect();
                 let st = (0..count as usize).map(|k| num(t[7 + count as usize + k], ln)).collect();
                 let r = RangeRec { sid: num(t[3], ln), t_us: num(t[4], ln), count, cols: num(t[6], ln), d, st };
@@ -126,6 +136,18 @@ pub struct Counts {
     pub imu_early: u64,
 }
 
+impl Counts {
+    /// dyne_imu_push の戻り値を数える (ファームの feed_imu と同じ分け方)
+    pub fn imu_rc(&mut self, rc: i32) {
+        match rc {
+            0 => self.imu_pushed += 1,
+            1 => self.imu_late += 1,
+            2 => self.imu_early += 1,
+            _ => {}
+        }
+    }
+}
+
 /// JSON の数値 (f64 を正確に戻せる最短の表記。有限でない値は Python の json が読む形)
 pub fn jf(v: f64) -> String {
     if v.is_nan() {
@@ -147,6 +169,7 @@ pub struct Recorder {
 
 impl Recorder {
     pub fn new(path: String, hash_every: u64) -> Self {
+        assert!(hash_every >= 1, "--replay-hash-every は1以上");
         Recorder { path, hash_every, out: String::new(), seq: HashMap::new() }
     }
 
@@ -205,15 +228,51 @@ impl Recorder {
         self.line(t_us, node, "field2d", &p);
     }
 
-    pub fn done(&mut self, t_us: u64, node: usize, crc: u32, c: &Counts, imu: bool) {
-        let mut p = format!(
-            "{{\"state\":\"done\",\"idx\":{node},\"up_s\":0,\"wire\":2,\"crc32\":\"0x{crc:08X}\",\"range_fed\":{},\"range_skip\":0,\"range_rej\":{}",
-            c.range_fed, c.range_rej
-        );
+    pub fn done(&mut self, t_us: u64, node: usize, crc: u32, c: &Counts, range: bool, imu: bool) {
+        let mut p = format!("{{\"state\":\"done\",\"idx\":{node},\"up_s\":0,\"wire\":2,\"crc32\":\"0x{crc:08X}\",\"replay_skip\":0");
+        if range {
+            write!(p, ",\"range_fed\":{},\"range_skip\":0,\"range_rej\":{}", c.range_fed, c.range_rej).unwrap();
+        }
         if imu {
             write!(p, ",\"imu_pushed\":{},\"imu_late\":{},\"imu_early\":{},\"imu_lost\":0,\"imu_wait_to\":0", c.imu_pushed, c.imu_late, c.imu_early).unwrap();
         }
         p.push('}');
         self.line(t_us, node, "status", &p);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_all_kinds() {
+        let one = 1.0f64.to_bits();
+        let text = format!(
+            "dyne-replay 1\n# note\nsetup 1 3 4 0 0 {one:016x} {one:016x} {one:016x}\ncfg 1 7 {one:016x}\nface 1 2 1 5\n\
+             range 1 3 9 100 2 2 {one:016x} {one:016x} 5 0\nimu 0 4 -12 {one:016x} {one:016x} {one:016x} {one:016x} {one:016x} {one:016x}\n\
+             check 0 4 deadBEEF field2d\n"
+        );
+        let n = parse(&text, 2, 10);
+        assert_eq!(n[1].setup.unwrap().0, 3);
+        assert_eq!(n[1].cfg, vec![(7, 1.0)]);
+        assert_eq!(n[1].faces, vec![(2, 1, 5)]);
+        let r = &n[1].range[&3][0];
+        assert_eq!((r.sid, r.t_us, r.count, r.cols, r.st.clone()), (9, 100, 2, 2, vec![5, 0]));
+        assert_eq!(n[0].imu[&4][0].0, -12);
+        assert_eq!(n[0].checks[&4][0], (0xdeadbeef, "field2d".to_string()));
+    }
+
+    #[test]
+    #[should_panic]
+    fn step_beyond_steps_is_rejected() {
+        parse("dyne-replay 1\ncheck 0 10 00000000\n", 1, 10);
+    }
+
+    #[test]
+    fn jf_round_trips() {
+        for v in [0.1, -2.5e-300, 1e300, 123456789.0] {
+            assert_eq!(jf(v).parse::<f64>().unwrap().to_bits(), (v as f64).to_bits());
+        }
     }
 }

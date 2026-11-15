@@ -186,6 +186,9 @@ MTGで見せることを最優先とし、既存の残課題は「後で取り�
   以下の節や他の文書がこれらを参照している場合は、dyne-private の同じパスを見る
 - 書き換えでは、MAC のほか、実験1の記録のホットスポットの SSID と、m2-esp32 の Wi-Fi のパスワードを仮の値に置き換え、
   docs/demo/ の GIF 2つのファイル名(作者名入り)を docs/demo/2026-08-29-demo-1.gif・2026-08-30-demo-2.gif に変えた
+- GitHub issue #2(実機の入力の再生によるビット一致): dyne-sim2d --replay / --replay-record、scripts/hw_replay.py、
+  ファームの記録(実行の設定の "replay":{"log":true}、QoS 1)を実装(コミット前)。合成の記録で再生が一致し、
+  1ビットの改変を検出することを確認(scripts/ci-check.sh の [7])。実機での確認は未。docs/2026-11-15-hw-replay.md
 
 ### 前回の「今ここ」(2026-11-13): 実機の到着待ち — ソフトはひと通り実装済み(すべて実機未確認)
 

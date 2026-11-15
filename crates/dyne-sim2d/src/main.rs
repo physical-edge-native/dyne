@@ -43,7 +43,15 @@
 //!     (指定しなければアクターに渡さず、従来と同じ動作・出力)
 //!   --track-csv 経路 [--track-every N] … 単一ノード解の N ステップごとの採点を CSV に書く
 //!     (その時刻の正解の形状に対して。動く箱のある場面ファイルで追従の時間を測る)
+//!
+//! 実機の入力の再生 (2026-11-15、GitHub issue #2、docs/2026-11-15-hw-replay.md。指定しなければ従来と同じ動作):
+//!   --replay 経路 … 実機のノードがアクターへ渡した測距フレーム・IMU の標本 (scripts/hw_replay.py が MQTT の記録から作る
+//!     再生の入力) を同じステップで渡し、ノードが報告した CRC32 と比べる (`replay-check ... OK|DIFF`)。
+//!     単一ノード解との比較は既定で行わない (--replay-single で行う)
+//!   --replay-record 経路 [--replay-hash-every N] … アクターへ渡した入力と N ステップごとの CRC32 を、実機の MQTT と
+//!     同じ形の JSON Lines に書く (合成の記録。既定 N = 50 = ファームの field_every の既定)
 
+mod replay;
 mod scene;
 
 use std::collections::HashMap;
@@ -135,6 +143,14 @@ struct Config {
     /// --single-wasm 経路: 単一ノード解だけを別の wasm で解く (実機用の縮小版の分割解を、
     /// フル版の単一ノード解と比べるため。縮小版は全域を1区画に持てない)
     single_wasm: Option<String>,
+    /// --replay 経路: 実機の入力の再生 (replay.rs)
+    replay: Option<String>,
+    /// --replay-record 経路: アクターへ渡した入力と CRC32 を実機の MQTT と同じ形で書く
+    replay_record: Option<String>,
+    /// --replay-hash-every N: --replay-record の途中の CRC32 の間隔 [ステップ]
+    replay_hash_every: u64,
+    /// --replay-single: 再生のときも単一ノード解を解いて比べる (既定は比べない)
+    replay_single: bool,
 }
 
 fn parse_ms(s: &str) -> u64 {
@@ -191,6 +207,10 @@ fn parse_args() -> Config {
         dump_node: None,
         dump_file: None,
         single_wasm: None,
+        replay: None,
+        replay_record: None,
+        replay_hash_every: 50,
+        replay_single: false,
     };
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -279,6 +299,13 @@ fn parse_args() -> Config {
             "--dump-node" => c.dump_node = Some(val.parse().unwrap()),
             "--dump-file" => c.dump_file = Some(val),
             "--single-wasm" => c.single_wasm = Some(val),
+            "--replay" => c.replay = Some(val),
+            "--replay-record" => c.replay_record = Some(val),
+            "--replay-hash-every" => c.replay_hash_every = val.parse().unwrap(),
+            "--replay-single" => {
+                c.replay_single = true;
+                used = false;
+            }
             "--cfg" => {
                 let (k, v) = val.split_once('=').expect("--cfg キー=値");
                 c.extra_cfg.push((k.parse().unwrap(), v.parse().unwrap()));
@@ -319,6 +346,13 @@ struct Actor2d {
     model_buf: Option<wasmi::TypedFunc<(), u32>>,
     model_load: Option<wasmi::TypedFunc<u32, i32>>,
     model_init: Option<wasmi::TypedFunc<(), i32>>,
+    // ---- 実機の入力の再生 (2026-11-15) ----
+    /// 状態の点の数 (ファームの CRC32 は dyne_get の 0..dyne_len を回す。無ければ区画の点の数)
+    len: Option<wasmi::TypedFunc<(), u32>>,
+    /// IMU の融合のアクター (imu-fusion-actor) のみ
+    imu_push: Option<wasmi::TypedFunc<(i64, f64, f64, f64, f64, f64, f64), i32>>,
+    /// dyne_cfg の呼び出しの控え (--replay-record の actor_setup 用)
+    cfg_trace: Vec<(u32, f64)>,
     buf: u32,
     cap: u32,
     memory_pages: u64,
@@ -384,6 +418,9 @@ impl Actor2d {
             model_buf: opt!("dyne_load_buf", (), u32),
             model_load: opt!("dyne_model_load", u32, i32),
             model_init: opt!("dyne_model_init_field", (), i32),
+            len: opt!("dyne_len", (), u32),
+            imu_push: opt!("dyne_imu_push", (i64, f64, f64, f64, f64, f64, f64), i32),
+            cfg_trace: Vec::new(),
             memory,
             store,
             buf: 0,
@@ -435,7 +472,30 @@ impl Actor2d {
             l.extend_from_slice(&key.to_le_bytes());
             l.extend_from_slice(&val.to_le_bytes());
         }
+        self.cfg_trace.push((key, val));
         f.call(&mut self.store, (key, val)).unwrap();
+    }
+
+    /// ノードの状態の CRC32 と最小・最大 (ファームの state_crc と同じ: dyne_get の 0..dyne_len の f64 のビット列。
+    /// 最小・最大は NaN を飛ばす)
+    fn state_crc(&mut self, b: &Block) -> (u32, f64, f64) {
+        let n = match self.len {
+            Some(f) => f.call(&mut self.store, ()).unwrap(),
+            None => (b.nx * b.ny) as u32,
+        };
+        let mut v = Vec::with_capacity(n as usize);
+        let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+        for k in 0..n {
+            let u = self.get.call(&mut self.store, k).unwrap();
+            if u < lo {
+                lo = u;
+            }
+            if u > hi {
+                hi = u;
+            }
+            v.push(u);
+        }
+        (field_crc(&v), lo, hi)
     }
 
     fn aux(&mut self, q: u32, k: u32) -> f64 {
@@ -528,7 +588,20 @@ struct ShapeCfg {
     delay: u64,
 }
 
-/// アクターに設定・面を入れて初期化する。sensors はこのアクターに付けるセンサ
+/// 区画の面ごと (W, E, S, N) の (種類, 値): 界面なら (BC_INTERFACE, 界面ID)、外周なら --outer-bc の値
+fn face_settings(b: &Block, cfg: &Config) -> [(u32, u64); 4] {
+    let mut out = [(0u32, 0u64); 4];
+    for (face, o) in out.iter_mut().enumerate() {
+        *o = match b.faces[face] {
+            Some((iface, _)) => (BC_INTERFACE, iface as u64),
+            None => (cfg.outer_kind, cfg.outer_value.to_bits()),
+        };
+    }
+    out
+}
+
+/// アクターに設定・面を入れて初期化する。sensors はこのアクターに付けるセンサ。
+/// cfg_override が Some なら、dyne_cfg はシミュレータ自身の設定の代わりにその列だけを渡す (実機の記録の再生)
 fn setup_actor(
     a: &mut Actor2d,
     b: &Block,
@@ -536,7 +609,20 @@ fn setup_actor(
     g: &GridGeom,
     shape: Option<&ShapeCfg>,
     sensors: &[&scene::Sensor],
+    cfg_override: Option<&[(u32, f64)]>,
 ) {
+    if let Some(list) = cfg_override {
+        for &(key, v) in list {
+            a.cfg_set(key, v);
+        }
+    } else {
+        setup_cfg(a, cfg, g, shape, sensors);
+    }
+    setup_faces_init(a, b, cfg, g);
+}
+
+/// シミュレータ自身の dyne_cfg の列 (従来の setup_actor の前半)
+fn setup_cfg(a: &mut Actor2d, cfg: &Config, g: &GridGeom, shape: Option<&ShapeCfg>, sensors: &[&scene::Sensor]) {
     for &(key, v) in &cfg.extra_cfg {
         a.cfg_set(key, v);
     }
@@ -571,11 +657,13 @@ fn setup_actor(
             a.cfg_set(sdf2d::CFG_SENSOR_YAW, s.yaw);
         }
     }
+}
+
+/// 面の設定と dyne_init2d (と、あればモデルによる初期場)。従来の setup_actor の後半
+fn setup_faces_init(a: &mut Actor2d, b: &Block, cfg: &Config, g: &GridGeom) {
+    let faces = face_settings(b, cfg);
     for face in 0..4u32 {
-        let (kind, param) = match b.faces[face as usize] {
-            Some((iface, _)) => (BC_INTERFACE, iface as u64),
-            None => (cfg.outer_kind, cfg.outer_value.to_bits()),
-        };
+        let (kind, param) = faces[face as usize];
         if let Some(l) = a.log.as_mut() {
             l.push(REC_FACE);
             l.extend_from_slice(&face.to_le_bytes());
@@ -617,8 +705,18 @@ fn push_framed(out: &mut Vec<u8>, msg: &[u8]) {
 
 /// 測距フレームのメッセージ (枠つき)
 fn frame_unit(sensor: u32, step: u64, zones: &[(f64, u32)]) -> Vec<u8> {
+    let n = zones.len() as u32;
+    frame_unit_full(sensor, step, 0, zones.iter().copied(), n, n)
+}
+
+/// 記録した測距フレーム (実機の再生) のメッセージ (枠つき)。ファームの dyne_range_frame_build と同じ並び
+fn frame_unit_rec(step: u64, r: &replay::RangeRec) -> Vec<u8> {
+    frame_unit_full(r.sid, step, r.t_us, r.d.iter().copied().zip(r.st.iter().copied()), r.count, r.cols)
+}
+
+fn frame_unit_full(sensor: u32, step: u64, t_us: u64, zones: impl ExactSizeIterator<Item = (f64, u32)>, count: u32, cols: u32) -> Vec<u8> {
     let mut data = vec![0u8; dyne_wire::ZONE_LEN * zones.len()];
-    for (i, &(d, st)) in zones.iter().enumerate() {
+    for (i, (d, st)) in zones.enumerate() {
         dyne_wire::range_zone_put(&mut data, i, d, st);
     }
     let hdr = dyne_wire::Header {
@@ -626,12 +724,12 @@ fn frame_unit(sensor: u32, step: u64, zones: &[(f64, u32)]) -> Vec<u8> {
         quantity: dyne_wire::QTY_NONE,
         src: sensor,
         step,
-        t_us: 0,
+        t_us,
     };
-    let n = zones.len() as u32;
-    let pl = dyne_wire::Payload::RangeFrame { data: &data, count: n, cols: n };
+    let pl = dyne_wire::Payload::RangeFrame { data: &data, count, cols };
     let mut buf = vec![0u8; dyne_wire::HDR_LEN + 8 + data.len()];
-    let len = dyne_wire::encode(&mut buf, &hdr, &pl).unwrap();
+    let len = dyne_wire::encode(&mut buf, &hdr, &pl)
+        .unwrap_or_else(|e| panic!("測距フレームを組み立てられない (センサ {sensor}, ステップ {step}, count {count}, cols {cols}): {e:?}"));
     let mut out = Vec::new();
     push_framed(&mut out, &buf[..len]);
     out
@@ -698,6 +796,16 @@ struct Sim {
     sensor_ids: Vec<u32>,
     /// サーボの首振りの模擬 (場面ファイルの pan N D。無ければ全センサが毎ステップ測る)
     pan: Option<(u32, u64)>,
+    // ---- 実機の入力の再生 (2026-11-15。--replay / --replay-record を指定したときだけ使う) ----
+    /// 記録した入力 (Some なら模擬のセンサの代わりにこれを渡す)
+    replay: Option<Vec<replay::ReplayNode>>,
+    /// --replay-record の書き手
+    rec: Option<replay::Recorder>,
+    /// ノードごとの受け渡しの計数
+    rcount: Vec<replay::Counts>,
+    /// CRC32 の照合の結果 (ノード, ステップ, 出力の行) と、食い違いの数
+    rchecks: Vec<(usize, u64, String)>,
+    rcheck_bad: usize,
 }
 
 impl Sim {
@@ -789,7 +897,21 @@ impl Sim {
             self.transmit(node, m, false);
         }
         // 測距フレーム (ノード内のセンサからの入力。ネットワークを通らない)
-        if !self.frames.is_empty() {
+        if let Some(rp) = &self.replay {
+            // 実機の再生: 記録したフレームを記録の順に渡す。受理されなくても止めない (ファームと同じく数える)
+            let recs = rp[node].range.get(&step).cloned().unwrap_or_default();
+            for r in recs {
+                let rc = self.nodes[node].actor.deliver(&frame_unit_rec(step, &r));
+                if rc == INBOX_OK {
+                    self.rcount[node].range_fed += 1;
+                } else {
+                    self.rcount[node].range_rej += 1;
+                }
+                if let Some(w) = self.rec.as_mut() {
+                    w.range(self.now_us, node, step, r.sid, r.t_us, r.count, r.cols, &r.d, &r.st);
+                }
+            }
+        } else if !self.frames.is_empty() {
             let sensors = self.nodes[node].sensors.clone();
             for si in sensors {
                 if !self.sensor_active(si, step) {
@@ -798,6 +920,13 @@ impl Sim {
                 let unit = frame_unit(self.sensor_ids[si], step, &self.frames[step as usize][si]);
                 let rc = self.nodes[node].actor.deliver(&unit);
                 assert_eq!(rc, INBOX_OK, "測距フレームが受理されない (ノード{node})");
+                if let Some(w) = self.rec.as_mut() {
+                    self.rcount[node].range_fed += 1;
+                    let z = &self.frames[step as usize][si];
+                    let d: Vec<f64> = z.iter().map(|x| x.0).collect();
+                    let st: Vec<u32> = z.iter().map(|x| x.1).collect();
+                    w.range(self.now_us, node, step, self.sensor_ids[si], 0, z.len() as u32, z.len() as u32, &d, &st);
+                }
             }
         }
         let now = self.now_us;
@@ -845,14 +974,63 @@ impl Sim {
         let now = self.now_us;
         let n = &mut self.nodes[node];
         n.wait_us += now - n.wait_since;
+        // 実機の再生: IMU の標本を計算の直前に渡す (ファームの feed_imu と同じ位置)
+        if let Some(rp) = &self.replay {
+            if let Some(samples) = rp[node].imu.get(&n.cur_step) {
+                let f = n.actor.imu_push.expect("再生の入力に imu 行があるが、アクターに dyne_imu_push が無い");
+                for &(t, v) in samples {
+                    let rc = f.call(&mut n.actor.store, (t, v[0], v[1], v[2], v[3], v[4], v[5])).unwrap();
+                    self.rcount[node].imu_rc(rc);
+                }
+                if let Some(w) = self.rec.as_mut() {
+                    w.imu(now, node, n.cur_step, samples);
+                }
+            }
+        }
         if let Some(l) = n.actor.log.as_mut() {
             l.push(REC_STEP);
         }
         let rc = n.actor.step.call(&mut n.actor.store, ()).unwrap();
         assert_eq!(rc, STEP_OK, "未受領の界面を抱えて計算した (ノード{node})");
         n.phase = Phase::Computing;
+        if self.replay.is_some() || self.rec.is_some() {
+            self.after_step_replay(node);
+        }
         let t = now + self.cfg.step_us;
         self.schedule(t, Ev::StepDone { node });
+    }
+
+    /// 実機の再生・記録: 計算の後のノードの CRC32 を記録と比べる / 記録に書く
+    fn after_step_replay(&mut self, node: usize) {
+        let step = self.nodes[node].cur_step;
+        let last = step + 1 == self.cfg.steps;
+        let want = self.replay.as_ref().and_then(|rp| rp[node].checks.get(&step)).cloned().unwrap_or_default();
+        let hash_every = self.rec.as_ref().map(|w| w.hash_every);
+        let record = hash_every.is_some_and(|e| (step + 1) % e == 0 || last);
+        if want.is_empty() && !record {
+            return;
+        }
+        let n = &mut self.nodes[node];
+        let b = n.block.clone();
+        let (crc, lo, hi) = n.actor.state_crc(&b);
+        for (c, src) in want {
+            let ok = c == crc;
+            if !ok {
+                self.rcheck_bad += 1;
+            }
+            let line = format!("replay-check node {node} step {step} {src} sim {crc:08x} node {c:08x} {}", if ok { "OK" } else { "DIFF" });
+            self.rchecks.push((node, step, line));
+        }
+        if record {
+            let now = self.now_us;
+            let w = self.rec.as_mut().unwrap();
+            w.field2d(now, node, step, b.nx, b.ny, b.ix0, b.iy0, crc, lo, hi);
+            if last {
+                let has_range = !self.frames.is_empty() || self.replay.as_ref().is_some_and(|rp| !rp[node].range.is_empty());
+                let has_imu = n.actor.imu_push.is_some();
+                w.done(now, node, crc, &self.rcount[node], has_range, has_imu);
+            }
+        }
     }
 
     fn on_deliver(&mut self, node: usize, msg: Msg) {
@@ -1178,6 +1356,35 @@ fn track_row(full: &Scene, step: u64, f: &Fields, nx: usize, ny: usize, g: &Grid
     )
 }
 
+/// 記録した初期化の値・面と、シミュレータの区画・面の食い違いを `replay-setup` の行にする。
+/// IMU の融合のアクターは dt だけを使い、外周の面を無視するので、dt と界面かどうかだけを比べる
+fn replay_setup_diff(ni: usize, r: &replay::ReplayNode, b: &Block, cfg: &Config, g: &GridGeom, is_imu: bool) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some((nx, ny, ix0, iy0, h, alpha, dt)) = r.setup {
+        let ints = [("nx", nx, b.nx), ("ny", ny, b.ny), ("ix0", ix0, b.ix0), ("iy0", iy0, b.iy0)];
+        let reals = [("h", h, g.h), ("alpha", alpha, cfg.alpha), ("dt", dt, cfg.dt)];
+        for (name, rec, sim) in ints {
+            if !is_imu && rec as usize != sim {
+                out.push(format!("replay-setup node {ni}: {name} {rec} (sim {sim})"));
+            }
+        }
+        for (name, rec, sim) in reals {
+            if (!is_imu || name == "dt") && rec.to_bits() != sim.to_bits() {
+                out.push(format!("replay-setup node {ni}: {name} {rec:e} (sim {sim:e})"));
+            }
+        }
+    }
+    let sim_faces = face_settings(b, cfg);
+    for &(f, kind, param) in &r.faces {
+        let (sk, sp) = sim_faces[f as usize];
+        let same = if is_imu || kind == BC_INTERFACE { (kind == BC_INTERFACE) == (sk == BC_INTERFACE) } else { kind == sk && param == sp };
+        if !same {
+            out.push(format!("replay-setup node {ni}: face {f} kind {kind} param {param:#x} (sim kind {sk} param {sp:#x})"));
+        }
+    }
+    out
+}
+
 fn main() {
     let mut cfg = parse_args();
     let (px, py) = (cfg.px, cfg.py);
@@ -1198,6 +1405,11 @@ fn main() {
     // 波動方程式のアクター (dyne_courant を持つ。alpha = 波の速さ c): 熱拡散の安定条件の検査と
     // 解析解を使わず、クーラン数と最大振幅を報告する (限界をまたぐ掃引のため止めない)
     let is_wave = module.exports().any(|e| e.name() == "dyne_courant");
+    // IMU の融合のアクター (dyne_imu_push を持つ。2026-11-15): 格子を持たず dt (合意の1反復の周期) だけを使うので、
+    // 熱拡散の安定条件の検査と解析解を使わない。入力の IMU の標本は --replay の記録からだけ来る
+    let is_imu = probe.imu_push.is_some();
+    assert!(!cfg.replay_single || cfg.replay.is_some(), "--replay-single は --replay と使う");
+    assert!(!(cfg.replay_single && is_imu), "IMU の融合のアクターの再生では単一ノード解と比べられない (--replay-single を外す)");
     assert!(cfg.extra_cfg.is_empty() || (!is_shape && probe.cfg.is_some()), "--cfg は dyne_cfg を持つ格子型以外のアクター用");
     if let Some(path) = &cfg.model {
         assert!(!is_shape, "--model は熱拡散のアクター用");
@@ -1225,7 +1437,7 @@ fn main() {
         assert!(cfg.scene.is_none(), "--scene は格子型アクター用");
         let h = 1.0 / ((cfg.nx - 1) as f64);
         let r = cfg.alpha * cfg.dt / (h * h);
-        assert!(is_wave || r <= 0.25, "陽解法の安定条件 r = α·dt/h² ≤ 1/4 を満たさない (r = {r})");
+        assert!(is_wave || is_imu || r <= 0.25, "陽解法の安定条件 r = α·dt/h² ≤ 1/4 を満たさない (r = {r})");
         (GridGeom { x0: 0.0, y0: 0.0, h }, None, None)
     };
     assert!(cfg.nx >= 3 && cfg.ny >= 3, "格子は3×3点以上");
@@ -1264,6 +1476,14 @@ fn main() {
         frames = scene::make_frames(sc, &model, cfg.steps, cfg.seed);
     }
 
+    // 実機の入力の再生 (--replay) と記録 (--replay-record)
+    let replay_in = cfg.replay.as_ref().map(|p| {
+        replay::parse(&std::fs::read_to_string(p).expect("--replay の読み込み"), n_nodes, cfg.steps)
+    });
+    let mut recorder = cfg.replay_record.clone().map(|p| replay::Recorder::new(p, cfg.replay_hash_every));
+    // 記録した設定とシミュレータの区画・面の食い違い (再生の結果を信じてよいかの前提)
+    let mut setup_diff: Vec<String> = Vec::new();
+
     let mut nodes = Vec::new();
     for (ni, b) in blocks.iter().enumerate() {
         let mut actor = Actor2d::load(&engine, &module);
@@ -1275,7 +1495,16 @@ fn main() {
             Some(sc) => node_sensors[ni].iter().map(|&si| &sc.sensors[si]).collect(),
             None => Vec::new(),
         };
-        setup_actor(&mut actor, b, &cfg, &geom, shape_cfg.as_ref(), &mine);
+        let rnode = replay_in.as_ref().map(|rp| &rp[ni]);
+        let cfg_override = rnode.filter(|r| r.setup.is_some()).map(|r| r.cfg.as_slice());
+        if let Some(r) = rnode {
+            setup_diff.extend(replay_setup_diff(ni, r, b, &cfg, &geom, is_imu));
+        }
+        setup_actor(&mut actor, b, &cfg, &geom, shape_cfg.as_ref(), &mine, cfg_override);
+        if let Some(w) = recorder.as_mut() {
+            let trace = actor.cfg_trace.clone();
+            w.setup(ni, &trace, &face_settings(b, &cfg), b.nx, b.ny, b.ix0, b.iy0, geom.h, cfg.alpha, cfg.dt);
+        }
         let ifaces: Vec<usize> = b.faces.iter().flatten().map(|&(j, _)| j).collect();
         nodes.push(Node {
             actor,
@@ -1316,8 +1545,19 @@ fn main() {
         frames,
         sensor_ids,
         pan: scene.as_ref().and_then(|s| s.pan),
+        replay: replay_in,
+        rec: recorder,
+        rcount: vec![replay::Counts::default(); n_nodes],
+        rchecks: Vec::new(),
+        rcheck_bad: 0,
     };
     sim.run();
+    if let Some(w) = &sim.rec {
+        std::fs::write(&w.path, &w.out).expect("--replay-record の書き込み");
+    }
+    let replaying = sim.replay.is_some();
+    // 単一ノード解は、再生のときは --replay-single を指定したときだけ解く (実機の再生の確かめは実機とシミュレータの比較)
+    let do_single = !replaying || cfg.replay_single;
 
     // 分割解を全域に組み立てる
     let total = cfg.nx * cfg.ny;
@@ -1357,46 +1597,64 @@ fn main() {
 
     // 単一ノード解 (同じWASMの別インスタンスで全域を解く。センサは全部このノードに付ける)
     let whole = Block { ix0: 0, iy0: 0, nx: cfg.nx, ny: cfg.ny, faces: [None; 4] };
-    let single_module = cfg.single_wasm.as_ref().map(|p| {
-        let b = std::fs::read(p).expect("--single-wasm の読み込み");
-        wasmi::Module::new(&engine, &b[..]).expect("--single-wasm のコンパイル")
-    });
-    let mut single = Actor2d::load(&engine, single_module.as_ref().unwrap_or(&module));
-    let all_sensors: Vec<&scene::Sensor> = match &scene {
-        Some(sc) => sc.sensors.iter().collect(),
-        None => Vec::new(),
-    };
-    setup_actor(&mut single, &whole, &cfg, &geom, shape_cfg.as_ref(), &all_sensors);
-    let mut track = String::new();
-    if cfg.track_csv.is_some() {
-        assert!(is_shape, "--track-csv は格子型アクター用");
-        assert!(cfg.track_every >= 1, "--track-every は1以上");
-        track.push_str("step,n_cross,static_err_mean,static_err_p95,phantom,phantom_old,mover_cov,mover_err_mean,static_cov\n");
-    }
-    for s in 0..cfg.steps {
-        for si in 0..sim.sensor_ids.len() {
-            if !sim.sensor_active(si, s) {
-                continue;
-            }
-            let unit = frame_unit(sim.sensor_ids[si], s, &sim.frames[s as usize][si]);
-            assert_eq!(single.deliver(&unit), INBOX_OK);
-        }
-        let rc = single.step.call(&mut single.store, ()).unwrap();
-        assert_eq!(rc, STEP_OK);
-        if cfg.track_csv.is_some() && (s + 1) % cfg.track_every == 0 {
-            let mut tf = blank();
-            read_block(&mut single, &whole, cfg.nx, &mut tf);
-            let sc = cfg.track_scale.unwrap_or(geom.h);
-            let row = track_row(scene.as_ref().unwrap(), s, &tf, cfg.nx, cfg.ny, &geom, shape_cfg.as_ref().unwrap().mu, sc);
-            track.push_str(&row);
-            track.push('\n');
-        }
-    }
-    if let Some(path) = &cfg.track_csv {
-        std::fs::write(path, &track).expect("--track-csv の書き込み");
-    }
     let mut single_f = blank();
-    read_block(&mut single, &whole, cfg.nx, &mut single_f);
+    let (mut single_late, mut single_overflow) = (0u64, 0u64);
+    if do_single {
+        let single_module = cfg.single_wasm.as_ref().map(|p| {
+            let b = std::fs::read(p).expect("--single-wasm の読み込み");
+            wasmi::Module::new(&engine, &b[..]).expect("--single-wasm のコンパイル")
+        });
+        let mut single = Actor2d::load(&engine, single_module.as_ref().unwrap_or(&module));
+        let all_sensors: Vec<&scene::Sensor> = match &scene {
+            Some(sc) => sc.sensors.iter().collect(),
+            None => Vec::new(),
+        };
+        setup_actor(&mut single, &whole, &cfg, &geom, shape_cfg.as_ref(), &all_sensors, None);
+        let mut track = String::new();
+        if cfg.track_csv.is_some() {
+            assert!(is_shape, "--track-csv は格子型アクター用");
+            assert!(cfg.track_every >= 1, "--track-every は1以上");
+            track.push_str("step,n_cross,static_err_mean,static_err_p95,phantom,phantom_old,mover_cov,mover_err_mean,static_cov\n");
+        }
+        for s in 0..cfg.steps {
+            if let Some(rp) = &sim.replay {
+                // 再生 (--replay-single): 全ノードの記録したフレームを、ノードの順・記録の順に渡す
+                for nd in rp {
+                    for r in nd.range.get(&s).map(|v| v.as_slice()).unwrap_or(&[]) {
+                        single.deliver(&frame_unit_rec(s, r));
+                    }
+                }
+            } else {
+                for si in 0..sim.sensor_ids.len() {
+                    if !sim.sensor_active(si, s) {
+                        continue;
+                    }
+                    let unit = frame_unit(sim.sensor_ids[si], s, &sim.frames[s as usize][si]);
+                    assert_eq!(single.deliver(&unit), INBOX_OK);
+                }
+            }
+            let rc = single.step.call(&mut single.store, ()).unwrap();
+            assert_eq!(rc, STEP_OK);
+            if cfg.track_csv.is_some() && (s + 1) % cfg.track_every == 0 {
+                let mut tf = blank();
+                read_block(&mut single, &whole, cfg.nx, &mut tf);
+                let sc = cfg.track_scale.unwrap_or(geom.h);
+                let row = track_row(scene.as_ref().unwrap(), s, &tf, cfg.nx, cfg.ny, &geom, shape_cfg.as_ref().unwrap().mu, sc);
+                track.push_str(&row);
+                track.push('\n');
+            }
+        }
+        if let Some(path) = &cfg.track_csv {
+            std::fs::write(path, &track).expect("--track-csv の書き込み");
+        }
+        read_block(&mut single, &whole, cfg.nx, &mut single_f);
+        single_late = single.count(single.late);
+        single_overflow = single.count(single.overflow);
+    } else {
+        // 再生で単一ノード解を解かない: 比較の相手を分割解そのものにして、分割解と単一ノード解の判定を出さない
+        assert!(cfg.track_csv.is_none(), "--track-csv は単一ノード解を使う (再生では --replay-single と使う)");
+        single_f = Fields { phi: split_f.phi.clone(), d: split_f.d.clone(), w: split_f.w.clone() };
+    }
 
     let (mut mismatch, mut max_diff) = count_mismatch(&split_f.phi, &single_f.phi);
     if is_shape {
@@ -1411,7 +1669,7 @@ fn main() {
     // 領域が正方形 (nx=ny) のときだけ厳密解になる
     let pi = std::f64::consts::PI;
     let t_end = cfg.steps as f64 * cfg.dt;
-    let analytic_linf = if !is_shape && !is_wave && cfg.outer_kind == BC_DIRICHLET && cfg.outer_value == 0.0 && cfg.nx == cfg.ny {
+    let analytic_linf = if !is_shape && !is_wave && !is_imu && cfg.outer_kind == BC_DIRICHLET && cfg.outer_value == 0.0 && cfg.nx == cfg.ny {
         let h = geom.h;
         let decay = libm::exp(-2.0 * pi * pi * cfg.alpha * t_end);
         let mut e = 0.0f64;
@@ -1590,15 +1848,17 @@ fn main() {
     }
     let mut pass = mismatch == 0;
     if let (Some(sc), Some(shape)) = (&scene, &shape_cfg) {
-        let single_late = single.count(single.late);
-        let single_overflow = single.count(single.overflow);
+        let single_rays = if do_single {
+            format!("(single: late {} overflow {})", single_late, single_overflow)
+        } else {
+            "(single: not solved)".to_string()
+        };
         writeln!(
             out,
-            "rays: late {} overflow {} (single: late {} overflow {}) | max delivery unit {} B{}",
+            "rays: late {} overflow {} {} | max delivery unit {} B{}",
             late_total,
             overflow_total,
-            single_late,
-            single_overflow,
+            single_rays,
             max_unit,
             if max_unit > UDP_PAYLOAD_MAX { format!(" — WARNING: exceeds one UDP datagram ({} B)", UDP_PAYLOAD_MAX) } else { String::new() }
         )
@@ -1609,33 +1869,66 @@ fn main() {
         // 採点は最後のステップの形に対して (動く箱の無い場面では場面そのもの)
         let last = sc.at_step(cfg.steps.saturating_sub(1));
         shape_report(&mut out, &last, &split_f, cfg.nx, cfg.ny, &geom, shape.mu);
+        let single_crc = if do_single {
+            format!("single phi {:08x} d {:08x} w {:08x}", field_crc(&single_f.phi), field_crc(&single_f.d), field_crc(&single_f.w))
+        } else {
+            "single not solved".to_string()
+        };
         writeln!(
             out,
-            "crc32: split phi {:08x} d {:08x} w {:08x} | single phi {:08x} d {:08x} w {:08x}",
+            "crc32: split phi {:08x} d {:08x} w {:08x} | {}",
             field_crc(&split_f.phi),
             field_crc(&split_f.d),
             field_crc(&split_f.w),
-            field_crc(&single_f.phi),
-            field_crc(&single_f.d),
-            field_crc(&single_f.w)
+            single_crc
         )
         .unwrap();
     } else {
-        writeln!(
-            out,
-            "crc32: split {:08x} single {:08x}",
-            field_crc(&split_f.phi),
-            field_crc(&single_f.phi)
-        )
-        .unwrap();
+        let single_crc = if do_single { format!("single {:08x}", field_crc(&single_f.phi)) } else { "single not solved".to_string() };
+        writeln!(out, "crc32: split {:08x} {}", field_crc(&split_f.phi), single_crc).unwrap();
     }
-    if mismatch == 0 && pass {
+    // 実機の再生: 設定の食い違い、CRC32 の照合、ノードごとの計数と最後の CRC32 (scripts/hw_replay.py が読む)
+    let mut replay_ok = true;
+    if replaying {
+        for l in &setup_diff {
+            writeln!(out, "{}", l).unwrap();
+        }
+        let mut lines = sim.rchecks.clone();
+        lines.sort_by_key(|(n, s, _)| (*n, *s));
+        for (_, _, l) in &lines {
+            writeln!(out, "{}", l).unwrap();
+        }
+        for (i, n) in sim.nodes.iter_mut().enumerate() {
+            let b = n.block.clone();
+            let (crc, _, _) = n.actor.state_crc(&b);
+            let c = &sim.rcount[i];
+            writeln!(
+                out,
+                "replay-node {}: range fed {} rej {} imu pushed {} late {} early {} crc32 {:08x}",
+                i, c.range_fed, c.range_rej, c.imu_pushed, c.imu_late, c.imu_early, crc
+            )
+            .unwrap();
+        }
+        let k = lines.len();
+        replay_ok = sim.rcheck_bad == 0 && setup_diff.is_empty();
+        if !replay_ok {
+            writeln!(out, "REPLAY FAIL: {} of {} node hashes differ, {} setup differences", sim.rcheck_bad, k, setup_diff.len()).unwrap();
+        } else if k == 0 {
+            writeln!(out, "REPLAY: no node hashes in the replay input (nothing compared)").unwrap();
+        } else {
+            writeln!(out, "REPLAY PASS: {} node hashes bit-exact ({} nodes)", k, n_nodes).unwrap();
+        }
+    }
+    if !do_single {
+        pass = true; // 単一ノード解との比較をしていない (判定は上の REPLAY の行)
+    } else if mismatch == 0 && pass {
         writeln!(out, "PASS (bit-exact): {} points", total).unwrap();
     } else if mismatch == 0 {
         writeln!(out, "FAIL: bit-exact but rays were late or overflowed").unwrap();
     } else {
         writeln!(out, "FAIL: {} values differ, max |diff| = {:e}", mismatch, max_diff).unwrap();
     }
+    pass &= replay_ok;
     print!("{}", out);
 
     if let Some(path) = &cfg.field_csv {

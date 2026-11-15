@@ -5,26 +5,31 @@
 実機の測距・IMU の値はその場限りの入力なので、「実機の結果 = シミュレータの結果」は、ノードがアクターへ
 渡した入力をそのまま記録してシミュレータで再生したときにだけ確かめられる。
 
-サブコマンド(リポジトリのルートで、.venv の Python で実行する):
-  record  MQTT の dyne/# を記録する(1行1メッセージの JSON Lines)。実機の実行の間、回しておく
+サブコマンド(リポジトリのルートで、.venv の Python で実行する。record 以外は標準ライブラリだけで動く):
+  record  MQTT の dyne/# を記録する(1行1メッセージの JSON Lines)。実機の実行の間、回しておく(paho-mqtt が要る)
             .venv\\Scripts\\python.exe scripts\\hw_replay.py record --broker 127.0.0.1 --out run.jsonl
-  check   記録 → 再生の入力(テキスト)に変換 → dyne-sim2d --replay で再生 → ノードごとに PASS/FAIL
+  check   記録 → 再生の入力(テキスト)に変換 → dyne-sim2d --replay で再生 → ノードごとに PASS/FAIL/INCOMPLETE
             .venv\\Scripts\\python.exe scripts\\hw_replay.py check run.jsonl --wasm <アクター.wasm> -- <dyne-sim2d の引数>
           (-- の後ろは実機の実行と同じ分割・格子・ステップ数にする dyne-sim2d の引数。例: --scene ... --px 2 --py 2 --steps 300)
+          --single を付けると単一ノード解との比較もする(既定はしない。判定は実機とシミュレータの比較)
   convert 記録 → 再生の入力(テキスト)だけを作る(check の前半)
-  corrupt 試験用: 記録の1つの値を最後の1ビットだけ変える(FAIL になることの確認)
+  corrupt 試験用: 記録の1つの値の1ビットを反転する(既定は仮数のビット 40。FAIL になることの確認)
   synth-imu 試験用: IMU の融合のアクター向けの合成の記録(imu_fed と actor_setup。CRC は無い)を作る
 
+実機の側は、実行の設定(dyne/cfg/<id>)に "replay":{"log":true} を入れた実行だけが記録を発行する(QoS 1)。
 記録の形(1行 = {"t": PC の受信時刻 [s], "topic": "dyne/node/<id>/<種類>", "payload": JSON})で使う種類:
-  range_fed    ノードが受信メールボックスへ渡した測距フレーム(ファームの既存の発行。step つき)
-  imu_fed      ノードが dyne_imu_push へ渡した IMU の標本(ファームの DYNE_REPLAY_LOG=y のとき)
-  actor_setup  アクターへの dyne_cfg の全呼び出しと初期化の値(同上。無ければシミュレータ自身の設定で再生)
+  range_fed    ノードが受信メールボックスへ渡した測距フレーム(step つき)
+  imu_fed      ノードが dyne_imu_push へ渡した IMU の標本
+  actor_setup  アクターへの dyne_cfg の全呼び出し・面・初期化の値(無ければシミュレータ自身の設定で再生)
   field2d      途中の CRC32(field_every ごと。ファームの既存の発行。node.idx の番号)
-  status       done の CRC32 と計数(ファームの既存の発行)
+  status       done の CRC32 と計数(ファームの既存の発行。replay_skip = 送らなかった記録の数)
+
+判定: PASS = 記録が揃っていて全ての CRC32 が一致。FAIL = 記録が揃っているのに食い違う(または設定の食い違い・
+CRC32 が無い)。INCOMPLETE = 記録が欠けている(MQTT のアウトボックスがあふれた・数が合わない)ので比べられない。
+1台でも INCOMPLETE なら、隣の食い違いはその欠けから来うるので、全体を INCOMPLETE とする(終了コード 2)。
 """
 import argparse
 import json
-import math
 import os
 import random
 import re
@@ -85,8 +90,9 @@ def convert(log_path, steps, idmap, since):
     nodes = {}
 
     def node(n):
+        # warn = 注意だけ、lost = 記録が欠けている(比べられない)
         return nodes.setdefault(n, {"setup": None, "range": [], "imu": {}, "checks": [], "done": None,
-                                    "warn": []})
+                                    "warn": [], "lost": []})
 
     for i, (_, nid, kind, p) in enumerate(recs):
         n = idx_of(nid, kind)
@@ -118,6 +124,8 @@ def convert(log_path, steps, idmap, since):
                                                                hexbits(ini["dt"])))
                 for k, v in st["cfg"]:
                     lines.append("cfg %d %d %s" % (n, int(k), hexbits(v)))
+                for f, (kind, param) in enumerate(st.get("faces", [])):
+                    lines.append("face %d %d %d %d" % (n, f, int(kind), int(param)))
         # 測距: ファームは1ステップに最大1枚。同じステップが2回あれば複数の実行が混ざっている
         seen = set()
         for p in sorted(nd["range"], key=lambda q: int(q["step"])):
@@ -130,7 +138,7 @@ def convert(log_path, steps, idmap, since):
             # 距離 [m]: d_m(シミュレータの記録だけが持つ正確な値)があればそれ、無ければファームと同じ d_mm / 1000.0
             ds = p["d_m"] if "d_m" in p else [mm / 1000.0 for mm in p["d_mm"]]
             if len(ds) != cnt or len(p["st"]) != cnt:
-                nd["warn"].append("range_fed step %d: count %d but %d values (truncated JSON?)" % (s, cnt, len(ds)))
+                nd["lost"].append("range_fed step %d: count %d but %d values (truncated JSON?)" % (s, cnt, len(ds)))
                 continue
             t_us = int(p.get("t_us", 0))
             t_us = t_us if t_us > 0 else 0  # ファームは同期前の時刻を 0 にして渡す (node_v2.c feed_range)
@@ -142,7 +150,7 @@ def convert(log_path, steps, idmap, since):
             got = 0
             for p in sorted(nd["imu"][s], key=lambda q: int(q.get("i0", 0))):
                 if int(p.get("i0", 0)) != got:
-                    nd["warn"].append("imu_fed step %d: samples %d.. missing (MQTT loss?)" % (s, got))
+                    nd["lost"].append("imu_fed step %d: samples %d.. missing" % (s, got))
                 for smp in p["s"]:
                     lines.append("imu %d %d %d %s" % (n, s, int(smp[0]), " ".join(hexbits(v) for v in smp[1:7])))
                     got += 1
@@ -158,21 +166,27 @@ def convert(log_path, steps, idmap, since):
                     checks.append((max(fs), parse_crc(d["crc32"]), "done"))
             else:
                 checks.append((steps - 1, parse_crc(d["crc32"]), "done"))
-            # 完全さ: ノードの計数と記録の数
+            # 完全さ: ノードが送らなかった記録の数と、ノードの計数と記録の数
+            if int(d.get("replay_skip", 0)) > 0:
+                nd["lost"].append("node skipped %d replay records (MQTT outbox full or disconnected)"
+                                  % int(d["replay_skip"]))
+            if "replay_skip" not in d and (nd["range"] or n_imu or nd["setup"] is not None):
+                nd["warn"].append("done has no replay_skip (firmware before 2026-11-15?)")
             if "range_fed" in d:
                 lo, hi = int(d["range_fed"]), int(d["range_fed"]) + int(d.get("range_rej", 0))
                 if not lo <= len(nd["range"]) <= hi:
-                    nd["warn"].append("range_fed records %d, node counted fed %d rej %d (records lost?)"
+                    nd["lost"].append("range_fed records %d, node counted fed %d rej %d"
                                       % (len(nd["range"]), lo, hi - lo))
             if "imu_pushed" in d:
                 calls = int(d["imu_pushed"]) + int(d.get("imu_late", 0)) + int(d.get("imu_early", 0))
-                if n_imu != calls and (n_imu > 0 or nd["setup"] is not None):
-                    nd["warn"].append("imu_fed samples %d, node pushed %d (records lost, or DYNE_REPLAY_LOG off)"
-                                      % (n_imu, calls))
+                if n_imu != calls:
+                    nd["lost"].append("imu_fed samples %d, node pushed %d (or replay.log was off)" % (n_imu, calls))
+        else:
+            nd["warn"].append("no done status: completeness of the records is unknown")
         for s, c, src in sorted(checks):
             lines.append("check %d %d %08x %s" % (n, s, c, src))
         info[n] = {"range": len(nd["range"]), "imu": n_imu, "checks": len(checks),
-                   "setup": st is not None and not st.get("trunc"), "warn": nd["warn"]}
+                   "setup": st is not None and not st.get("trunc"), "warn": nd["warn"], "lost": nd["lost"]}
     return "\n".join(lines) + "\n", info
 
 
@@ -198,6 +212,8 @@ def cmd_convert(a):
     for n, i in sorted(info.items()):
         print("node %d: range %d, imu %d, checks %d, setup %s" % (n, i["range"], i["imu"], i["checks"],
                                                                  "recorded" if i["setup"] else "simulator"))
+        for w in i["lost"]:
+            print("  incomplete: " + w)
         for w in i["warn"]:
             print("  warning: " + w)
     print("wrote " + a.out)
@@ -205,8 +221,6 @@ def cmd_convert(a):
 
 def cmd_check(a):
     sim_args = list(a.sim_args)
-    if sim_args and sim_args[0] == "--":
-        sim_args = sim_args[1:]
     steps = sim_steps(sim_args)
     text, info = convert(a.log, steps, parse_map(a.map), a.since)
     out_dir = a.out or os.path.splitext(a.log)[0] + "_replay"
@@ -214,8 +228,12 @@ def cmd_check(a):
     rp = os.path.join(out_dir, "replay.txt")
     with open(rp, "w", encoding="utf-8", newline="\n") as f:
         f.write(text)
-    exe = a.sim or os.path.join(ROOT, "target", "release", "dyne-sim2d" + (".exe" if os.name == "nt" else ""))
-    cmd = [exe, "--wasm", a.wasm, "--replay", rp] + sim_args
+    exe = os.path.abspath(a.sim) if a.sim else os.path.join(ROOT, "target", "release", "dyne-sim2d")
+    if os.name == "nt" and not exe.lower().endswith(".exe"):
+        exe += ".exe"
+    if not os.path.isfile(exe):
+        raise SystemExit("dyne-sim2d not found: %s (cargo build --release -p dyne-sim2d, or give --sim)" % exe)
+    cmd = [exe, "--wasm", a.wasm, "--replay", rp] + (["--replay-single"] if a.single else []) + sim_args
     r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
     with open(os.path.join(out_dir, "sim.log"), "w", encoding="utf-8", newline="\n") as f:
         f.write(r.stdout)
@@ -237,32 +255,58 @@ def cmd_check(a):
         m = re.match(r"replay-node (\d+): .* crc32 ([0-9a-f]{8})", line)
         if m:
             final[int(m.group(1))] = m.group(2)
+    single = None
+    for line in r.stdout.splitlines():
+        if line.startswith("PASS (bit-exact)") or line.startswith("FAIL:"):
+            single = line
     nodes = sorted(set(info) | set(checks) | set(final))
-    all_ok = bool(nodes)
     print("replay of %s (%d nodes) with %s" % (a.log, len(nodes), os.path.basename(a.wasm)))
+    verdict = {}
     for n in nodes:
         cs = checks.get(n, [])
         bad = [c for c in cs if not c[4]]
-        i = info.get(n, {"range": 0, "imu": 0, "setup": False, "warn": []})
-        ok = bool(cs) and not bad and n not in setup_bad
-        all_ok &= ok
+        i = info.get(n, {"range": 0, "imu": 0, "setup": False, "warn": [], "lost": []})
         why = ""
+        if i["lost"]:
+            v = "INCOMPLETE"
+        elif cs and not bad and n not in setup_bad:
+            v = "PASS"
+        else:
+            v = "FAIL"
         if not cs:
             why = " (no hash reported by the node)"
         elif bad:
             s0 = min(c[0] for c in bad)
-            why = " (first differing step %d: sim %s node %s)" % (s0, [c for c in bad if c[0] == s0][0][2],
-                                                                  [c for c in bad if c[0] == s0][0][3])
+            first = [c for c in bad if c[0] == s0][0]
+            why = " (first differing step %d: sim %s node %s)" % (s0, first[2], first[3])
         if n in setup_bad:
             why += " (setup differs: %s)" % "; ".join(setup_bad[n])
-        print("node %2d: %s  checks %d/%d  range %d  imu %d  setup %s%s"
-              % (n, "PASS" if ok else "FAIL", len(cs) - len(bad), len(cs), i["range"], i["imu"],
+        verdict[n] = v
+        print("node %2d: %-10s checks %d/%d  range %d  imu %d  setup %s%s"
+              % (n, v, len(cs) - len(bad), len(cs), i["range"], i["imu"],
                  "recorded" if i["setup"] else "simulator", why))
+        for w in i["lost"]:
+            print("         incomplete: " + w)
         for w in i["warn"]:
             print("         warning: " + w)
-    print("ALL PASS (bit-exact with the nodes)" if all_ok else "FAIL")
+    if single is not None:
+        print("single-node comparison: " + single)
+    incomplete = [n for n in nodes if verdict[n] == "INCOMPLETE"]
+    if not nodes:
+        print("FAIL (no node in the record)")
+        code = 1
+    elif incomplete:
+        print("INCOMPLETE: records of node(s) %s are missing; differences on other nodes may follow from that"
+              % ", ".join(str(n) for n in incomplete))
+        code = 2
+    elif all(v == "PASS" for v in verdict.values()) and (single is None or single.startswith("PASS")):
+        print("ALL PASS (bit-exact with the nodes)")
+        code = 0
+    else:
+        print("FAIL")
+        code = 1
     print("(replay input %s, simulator log %s)" % (rp, os.path.join(out_dir, "sim.log")))
-    sys.exit(0 if all_ok else 1)
+    sys.exit(code)
 
 
 def cmd_record(a):
@@ -297,6 +341,13 @@ def cmd_record(a):
     print("%d messages" % n[0])
 
 
+def flip_bit(v, bit):
+    """f64 の1ビットを反転する (bit 0 = 仮数の最下位)。最下位のビット (1 ulp) の差は、アクターの計算の丸めに
+    吸収されて状態に現れないことがある (2026-11-15 の確認) ので、既定は仮数のビット 40 (相対で約 2^-12)"""
+    b = struct.unpack("<Q", struct.pack("<d", float(v)))[0] ^ (1 << bit)
+    return struct.unpack("<d", struct.pack("<Q", b))[0]
+
+
 def cmd_corrupt(a):
     out, done = [], False
     with open(a.log, encoding="utf-8") as f:
@@ -308,12 +359,12 @@ def cmd_corrupt(a):
                 p = r["payload"]
                 if a.kind == "range":
                     if "d_m" in p:
-                        p["d_m"][0] = math.nextafter(p["d_m"][0], math.inf)
+                        p["d_m"][0] = flip_bit(p["d_m"][0], a.bit)
                     else:
-                        p["d_mm"][0] += 1
+                        p["d_mm"][0] += 1  # 実機の記録は mm の整数: 1 mm だけ変える
                 else:
-                    p["s"][0][1] = math.nextafter(p["s"][0][1], math.inf)
-                print("corrupted %s at step %d (node %d)" % (r["topic"], p["step"], a.node))
+                    p["s"][0][1] = flip_bit(p["s"][0][1], a.bit)
+                print("corrupted %s at step %d (node %d, bit %d)" % (r["topic"], p["step"], a.node, a.bit))
                 done = True
                 line = json.dumps(r, separators=(",", ":")) + "\n"
             out.append(line)
@@ -381,7 +432,8 @@ def main():
             p.add_argument("--wasm", required=True, help="ノードと同じアクターの .wasm")
             p.add_argument("--sim", help="dyne-sim2d の実行ファイル(既定 target/release/dyne-sim2d)")
             p.add_argument("--out", help="再生の入力とシミュレータの記録の置き場(既定 <記録>_replay/)")
-            p.add_argument("sim_args", nargs=argparse.REMAINDER, help="-- の後ろに dyne-sim2d の引数")
+            p.add_argument("--single", action="store_true",
+                           help="単一ノード解との比較もする(dyne-sim2d --replay-single。既定はしない)")
             p.set_defaults(func=cmd_check)
     p = sub.add_parser("corrupt")
     p.add_argument("log")
@@ -389,6 +441,7 @@ def main():
     p.add_argument("--node", type=int, default=0)
     p.add_argument("--kind", choices=["range", "imu"], default="range")
     p.add_argument("--step", type=int, default=0, help="このステップ以降の最初の記録を変える")
+    p.add_argument("--bit", type=int, default=40, help="反転する f64 のビット (0 = 仮数の最下位。既定 40)")
     p.set_defaults(func=cmd_corrupt)
     p = sub.add_parser("synth-imu")
     p.add_argument("out")
@@ -398,7 +451,12 @@ def main():
     p.add_argument("--epoch", type=int, default=10, help="CFG_EPOCH_STEPS")
     p.add_argument("--seed", type=int, default=1)
     p.set_defaults(func=cmd_synth_imu)
-    a = ap.parse_args()
+    # "--" の後ろは dyne-sim2d の引数 (argparse の REMAINDER は位置引数の後の選択肢まで飲み込むので、先に分ける)
+    argv = sys.argv[1:]
+    sim_args = argv[argv.index("--") + 1:] if "--" in argv else []
+    argv = argv[:argv.index("--")] if "--" in argv else argv
+    a = ap.parse_args(argv)
+    a.sim_args = sim_args
     a.func(a)
 
 
