@@ -6,8 +6,7 @@ and the project uses [Semantic Versioning](https://semver.org/) (0.x: interfaces
 
 ## [Unreleased]
 
-### Fixed
-- Firmware: `range` and `range_fed` MQTT messages no longer share one JSON buffer (#8).
+Entries for the next release are collected in [`changelog.d/`](changelog.d/README.md).
 
 ## [0.1.0] - 2026-11-15
 
