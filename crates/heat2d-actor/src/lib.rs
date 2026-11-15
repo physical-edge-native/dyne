@@ -376,6 +376,40 @@ impl Field {
     }
 }
 
+// ---------- 初期場の差し替え口 (2026-11-08、他クレートのアクター向け) ----------
+
+/// dyne_init2d の直後・最初のステップの前に、初期場を格子点ごとの値 f(x, y) で置き換える。
+/// x = (ix0+i)·h, y = (iy0+j)·h は dyne_init2d と同じ式 (区画の切り方によらず同じ点は
+/// 同じ入力になる)。置き換えた後、値固定の面を再び固定する。
+/// heat2d-mlp-actor (外部で学習したモデルの予測を初期場にするアクター) が使う。
+/// 本クレートの差込口の動作 (既存の経路の数値) は変えない。
+/// 戻り値: 0=成功 / −1=未初期化または既にステップを進めた / −2=f が非有限の値を返した
+pub fn replace_initial(mut f: impl FnMut(f64, f64) -> f64) -> i32 {
+    let s = state();
+    if s.nx == 0 || s.step != 0 {
+        return -1;
+    }
+    let mut bad = false;
+    for j in 0..s.ny {
+        let y = ((s.iy0 as usize + j) as f64) * s.h;
+        for i in 0..s.nx {
+            let x = ((s.ix0 as usize + i) as f64) * s.h;
+            let v = f(x, y);
+            if !v.is_finite() {
+                bad = true;
+            }
+            let k = s.at(i as isize, j as isize);
+            s.u[k] = v;
+        }
+    }
+    s.apply_dirichlet();
+    if bad {
+        -2
+    } else {
+        0
+    }
+}
+
 // ---------- WASMエクスポート ----------
 
 /// 面の設定 (dyne_init2d の前に呼ぶ。init をまたいで保持)。

@@ -1,0 +1,23 @@
+[package]
+name = "mlp-actor"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+# cdylib = WASMアクター本体 / rlib = ネイティブの単体テスト用 (heat2d-actor と同方針)
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# .dynm の検証・読み出し・推論の部品 (単体テストもこちらにある)
+mlp-core = { path = "../mlp-core" }
+
+[features]
+# 実機向けの縮小版: パラメータ数の上限を 2048 に下げ、線形メモリを小さくする
+small = ["mlp-core/small"]
+
+[profile.release]
+panic = "abort"
+opt-level = "z"
+lto = true
+
+[workspace]

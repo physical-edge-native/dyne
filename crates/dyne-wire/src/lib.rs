@@ -16,7 +16,7 @@
 //! offset size field
 //! 0      1    version  = 2
 //! 1      1    kind     (0=IFACE_SCALAR, 1=IFACE_BAND, 2=POSITION, 3=HEARSAY)
-//! 2      1    quantity (物理量種別: 0=温度, 1=流速, 255=指定なし)
+//! 2      1    quantity (物理量種別: 0=温度, 1=流速, 2=変位, 3=慣性(加速度+角速度), 255=指定なし)
 //! 3      1    reserved = 0
 //! 4      4    src      u32 (kind=IFACE_*: 界面ID / kind=POSITION,HEARSAY: 個体ID)
 //! 8      8    step     u64 (論理ステップ)
@@ -56,6 +56,8 @@
 #![cfg_attr(not(test), no_std)]
 
 pub mod abi;
+/// 実機の無線 (UDP) で運ぶための外箱 (通番+CRC32。v2の外側。2026-11-08)
+pub mod envelope;
 
 pub const VERSION: u8 = 2;
 
@@ -102,6 +104,10 @@ pub fn zone_angle_offset(c: u32, cols: u32, fov_rad: f64) -> f64 {
 /// 物理量種別
 pub const QTY_TEMPERATURE: u8 = 0;
 pub const QTY_FLOW: u8 = 1;
+/// 変位 (波動方程式の u。2026-11-13、wave2d-actor が使う。docs/2026-11-13-imu-fusion.md §6)
+pub const QTY_DISPLACEMENT: u8 = 2;
+/// 慣性の量 (加速度と角速度の組。2026-11-13、imu-fusion-actor の合意平均の交換に使う)
+pub const QTY_INERTIAL: u8 = 3;
 pub const QTY_NONE: u8 = 255;
 
 /// ヘッダ長 (バイト)
@@ -681,5 +687,27 @@ mod tests {
         buf[0] = VERSION;
         buf[1] = 99;
         assert_eq!(decode(&buf), Err(WireError::BadKind));
+    }
+
+    /// 物理量種別の番号は重ならず、ヘッダの1バイトにそのまま載って往復する (2026-11-13 追加)
+    #[test]
+    fn quantity_codes_distinct_and_roundtrip() {
+        let q = [QTY_TEMPERATURE, QTY_FLOW, QTY_DISPLACEMENT, QTY_INERTIAL, QTY_NONE];
+        for i in 0..q.len() {
+            for j in i + 1..q.len() {
+                assert_ne!(q[i], q[j]);
+            }
+        }
+        for &qq in &q {
+            let hdr = Header { kind: KIND_IFACE_BAND, quantity: qq, src: 1, step: 3, t_us: 5 };
+            let data = 1.5f64.to_le_bytes();
+            let pl = Payload::IfaceBand { data: &data, count: 1, per_point: 1 };
+            let mut buf = [0u8; 64];
+            let n = encode(&mut buf, &hdr, &pl).unwrap();
+            assert_eq!(buf[2], qq);
+            let (h2, _, used) = decode(&buf[..n]).unwrap();
+            assert_eq!(used, n);
+            assert_eq!(h2.quantity, qq);
+        }
     }
 }

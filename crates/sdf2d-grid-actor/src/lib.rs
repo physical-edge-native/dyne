@@ -35,42 +35,146 @@
 //!   送信待ちの光線は次のステップの頭の送信メールボックスで、その面の界面サンプル列と
 //!   一緒に (同じ界面ID・同じステップで) 出す。
 //!
+//! ## 古い観測を忘れる仕組み (2026-11-11、docs/2026-11-11-dynamic-shape.md)
+//!   物が動いたときに古い形の跡を消し、新しい形を早く出すための設定 (既定ではどれも働かない)。
+//!   - 重みの減衰 (CFG_DECAY = λ < 1): 手順2と3の間で全格子点の重みを w ← λ·w にする。
+//!     見え続けている点は w が 1/(1−λ) 付近で釣り合い、見えなくなった点の重みは減っていく。
+//!     CFG_W_FORGET > 0 なら、重みがそれ未満になった点を未観測 (w = 0, d = 0) に戻す。
+//!   - 食い違いの検出 (CFG_DISAGREE = τ > 0): 統合のとき |観測 − d| > τ なら、統合済みの重みを
+//!     CFG_DISAGREE_W まで下げてから加える (新しい観測を強く信じる)。
+//!   どれも格子点ごとに閉じた計算で、順序も固定なので、分割解と単一ノード解のビット一致は保たれる。
+//!
 //! no_std / 静的確保 / libm (純Rust) のみ依存。同一入力で全出力がビット一致する。
 
-#![cfg_attr(target_arch = "wasm32", no_std)]
+#![cfg_attr(all(target_arch = "wasm32", not(feature = "std-math")), no_std)]
 
 use dyne_wire as wire;
 use dyne_wire::abi::field2d::*;
 use dyne_wire::abi::sdf2d::*;
 use dyne_wire::Ray;
 
-// ---------- 容量 (シミュレータ用のフル版。実機の縮小版は実機対応の段で足す) ----------
+// ---------- 容量 ----------
+// フル版 (シミュレータ用) と実機用の縮小版 (--features small、線形メモリ1ページ=64KB)。
+// 縮小版は配列の大きさと、計算結果を変えない省メモリの書き方 (下記) だけが違う。
+// 置き場があふれない限り、出力はフル版とビット一致する (あふれは dyne_overflow で数える)。
 
+#[cfg(not(feature = "small"))]
 const PAD_MAX: usize = 40_000;
+#[cfg(not(feature = "small"))]
 const SIDE_MAX: usize = 196;
-const MAX_SENSORS: usize = 8;
+/// 枠なしの格子点の数の上限 (d・w)
+#[cfg(not(feature = "small"))]
+const CELL_MAX: usize = PAD_MAX;
+const MAX_SENSORS: usize = 64;
+/// 視野の中の印 (1点1ビット) の語数
+const SEEN_WORDS: usize = (CELL_MAX + 31) / 32;
 /// 1ステップに受け取れる光線 (隣から+自分のセンサから)
-const RECV_MAX: usize = 512;
+#[cfg(not(feature = "small"))]
+const RECV_MAX: usize = 8192;
 /// 統合待ちの光線
-const PEND_MAX: usize = 2048;
+#[cfg(not(feature = "small"))]
+const PEND_MAX: usize = 65536;
 /// 面ごとの送信待ちの光線
-const FWD_MAX: usize = 256;
+#[cfg(not(feature = "small"))]
+const FWD_MAX: usize = 4096;
+
+// 縮小版: 6畳 (3.6m×2.7m) を刻み 2.5cm (145×109 点) で 4×4 または 5×3 に分けた区画
+// (最大 37×28 / 29×37 点) が入る大きさ。光線は部屋全体で1ステップ 64 本 (8区画×8台) 程度を想定。
+// 省メモリの書き方: (1) 距離の反復は φ の2枚目を持たず、前の行と今の行の古い値だけを
+// 写して同じ式で上書きする (同じ値から同じ演算をするので結果は同じ)。(2) 統合待ちの光線に
+// 期限を持たせず、取得ステップ + L で求める (取り込み時に入れていた値と同じ)。
+// (3) 期限の来た光線を別の列へ取り出さず、統合待ちの列を安定に並べ替えて先頭から統合する
+// (fuse_due の説明)。統合待ちの 304 本は、4×4 分割・測距8台で統合の遅れ L = 7 の間に
+// 1ノードが抱える最大 (シミュレータで 234 本) に余裕を持たせた値。
+#[cfg(feature = "small")]
+const PAD_MAX: usize = 1210;
+#[cfg(feature = "small")]
+const SIDE_MAX: usize = 40;
+#[cfg(feature = "small")]
+const CELL_MAX: usize = 1080;
+#[cfg(feature = "small")]
+const RECV_MAX: usize = 64;
+#[cfg(feature = "small")]
+const PEND_MAX: usize = 304;
+#[cfg(feature = "small")]
+const FWD_MAX: usize = 24;
 /// 受け渡し用の作業領域: 4面 × (界面サンプル列 + 光線束)
 const SCRATCH_CAP: usize = 4 * ((4 + 32 + 8 * SIDE_MAX) + (4 + 32 + wire::RAY_LEN * FWD_MAX));
 
+/// 場と光線の幾何の計算に使う実数の型。既定は f64 (倍精度)。`--features f32` で単精度にする
+/// (2026-11-11、docs/2026-11-11-shape-speedup.md。ESP32 は単精度の演算器だけを持ち、倍精度は
+/// ソフトウェアの関数呼び出しになる)。f32 版は f64 版と結果が違う (分割解と単一ノード解は、
+/// どちらも f32 版で解けばビット一致する)。ワイヤ形式・光線・dyne_cfg・dyne_get は f64 のまま
+#[cfg(not(feature = "f32"))]
+pub type R = f64;
+#[cfg(feature = "f32")]
+pub type R = f32;
+
 /// 情報なし (未観測で、どの表面からも距離が伝わっていない)
-pub const BIG: f64 = 1.0e30;
+pub const BIG: R = 1.0e30;
 /// 自分のセンサから作った光線の「来た面」
 const FROM_SELF: usize = 4;
+
+// ---------- 浮動小数点の基本関数 (2026-11-11、docs/2026-11-11-shape-speedup.md) ----------
+// wasm では libm (純Rust) の floor・sqrt が整数演算の長い命令列になり、マイコンのインタプリタで
+// 重い。
+// - 格子点の添字に使う「floor(x) を整数にしたもの」を、整数への切り捨て (wasm の1命令) と
+//   1回の比較で求める (floor_i)。floor は誤差のない演算で、どちらも同じ整数を返す (NaN は 0、
+//   範囲外は i64 の端に飽和するのも `floor(x) as i64` と同じ)。結果のビット列は変わらない。
+// - sqrt は、機能 std-math を付けると標準ライブラリの sqrt (wasm の sqrt 命令1つ) を使う。
+//   IEEE 754 の sqrt は正しく丸めた値と定められ、libm の sqrt も正しく丸めるので、結果の
+//   ビット列は同じ。wasm の sqrt 命令を直接使う関数は安定版の Rust では使えない
+//   (core::arch::wasm32::f64_sqrt は不安定機能) ので、標準ライブラリを結合する
+//   (wasm が約 15KB 大きくなり、線形メモリ1ページに入れるにはスタックを 4KB にする)。
+mod fm {
+    use super::R;
+
+    #[cfg(not(feature = "f32"))]
+    #[inline(always)]
+    pub fn fabs(x: R) -> R {
+        libm::fabs(x)
+    }
+    #[cfg(feature = "f32")]
+    #[inline(always)]
+    pub fn fabs(x: R) -> R {
+        libm::fabsf(x)
+    }
+
+    #[cfg(all(target_arch = "wasm32", feature = "std-math"))]
+    #[inline(always)]
+    pub fn sqrt(x: R) -> R {
+        x.sqrt()
+    }
+    #[cfg(all(not(all(target_arch = "wasm32", feature = "std-math")), not(feature = "f32")))]
+    #[inline(always)]
+    pub fn sqrt(x: R) -> R {
+        libm::sqrt(x)
+    }
+    #[cfg(all(not(all(target_arch = "wasm32", feature = "std-math")), feature = "f32"))]
+    #[inline(always)]
+    pub fn sqrt(x: R) -> R {
+        libm::sqrtf(x)
+    }
+
+    /// `floor(x) as i64` と同じ値 (R)
+    #[inline(always)]
+    pub fn floor_i(x: R) -> i64 {
+        if x < i64::MIN as R {
+            return i64::MIN;
+        }
+        let t = x as i64;
+        if (t as R) > x { t - 1 } else { t }
+    }
+}
 
 // ---------- 光線の幾何 (純粋関数。ネイティブの単体テストから直接呼ぶ) ----------
 
 /// 区画と格子の幾何 (光線の標本点の分類に要るものだけ)
 #[derive(Clone, Copy, Debug)]
 pub struct Geom {
-    pub x0: f64,
-    pub y0: f64,
-    pub h: f64,
+    pub x0: R,
+    pub y0: R,
+    pub h: R,
     pub ix0: i64,
     pub iy0: i64,
     pub nx: i64,
@@ -80,22 +184,24 @@ pub struct Geom {
 /// 光線の標本化に要る量 (原点・単位ベクトル・測った距離・標本点の数)
 #[derive(Clone, Copy, Debug)]
 pub struct Walk {
-    pub ox: f64,
-    pub oy: f64,
-    pub vx: f64,
-    pub vy: f64,
-    pub r: f64,
+    pub ox: R,
+    pub oy: R,
+    pub vx: R,
+    pub vy: R,
+    pub r: R,
     /// 標本点 k = 0..n_samples
     pub n_samples: u32,
-    pub delta: f64,
+    pub delta: R,
     pub carve: bool,
 }
 
 /// 光線から標本化の量を作る。r が小さすぎる光線は None
-pub fn walk_of(ray: &Ray, h: f64, mu: f64) -> Option<Walk> {
-    let dx = ray.ex - ray.ox;
-    let dy = ray.ey - ray.oy;
-    let r = libm::sqrt(dx * dx + dy * dy);
+pub fn walk_of(ray: &Ray, h: R, mu: R) -> Option<Walk> {
+    // 光線はワイヤ形式どおり f64。計算の型 R に直してから使う (既定の f64 では何もしない)
+    let (ox, oy) = (ray.ox as R, ray.oy as R);
+    let dx = ray.ex as R - ox;
+    let dy = ray.ey as R - oy;
+    let r = fm::sqrt(dx * dx + dy * dy);
     if !(r > 1.0e-6) {
         return None;
     }
@@ -106,18 +212,18 @@ pub fn walk_of(ray: &Ray, h: f64, mu: f64) -> Option<Walk> {
     if !(reach > 0.0) {
         return None;
     }
-    let n_samples = libm::floor(reach / delta) as u32 + 1;
-    Some(Walk { ox: ray.ox, oy: ray.oy, vx: dx / r, vy: dy / r, r, n_samples, delta, carve })
+    let n_samples = fm::floor_i(reach / delta).clamp(0, u32::MAX as i64) as u32 + 1;
+    Some(Walk { ox, oy, vx: dx / r, vy: dy / r, r, n_samples, delta, carve })
 }
 
 /// 標本点 k の最寄りの格子点の大域添字
 #[inline]
-pub fn sample_cell(w: &Walk, g: &Geom, k: u32) -> (i64, i64, f64) {
-    let s = (k as f64) * w.delta;
+pub fn sample_cell(w: &Walk, g: &Geom, k: u32) -> (i64, i64, R) {
+    let s = (k as R) * w.delta;
     let px = w.ox + w.vx * s;
     let py = w.oy + w.vy * s;
-    let gi = libm::floor((px - g.x0) / g.h + 0.5) as i64;
-    let gj = libm::floor((py - g.y0) / g.h + 0.5) as i64;
+    let gi = fm::floor_i((px - g.x0) / g.h + 0.5);
+    let gj = fm::floor_i((py - g.y0) / g.h + 0.5);
     (gi, gj, s)
 }
 
@@ -139,9 +245,93 @@ fn face_offset(face: usize) -> (i64, i64) {
     }
 }
 
+/// 標本点のうち、最寄りの格子点が区画に入りうるものの番号の範囲 [ka, kb] (無ければ None)。
+/// 区画を格子1点ぶん広げた長方形と光線の交わりから求め、両端に標本点2つずつの余裕を持たせる。
+/// 範囲の外の標本点は区画から h 以上離れているので、最寄りの格子点は必ず区画の外
+/// (丸めの誤差は 1e-12 m 程度で、余白 h より桁違いに小さい)。標本点の位置と格子点の添字は
+/// 範囲の中でも従来と同じ式で求めるので、範囲を使っても結果は変わらない
+/// (2026-11-11、docs/2026-11-11-shape-speedup.md。光線1本の処理を「光線の全長」から
+/// 「区画の中の長さ」に比例する量に減らす)
+pub fn clip_range(w: &Walk, g: &Geom) -> Option<(u32, u32)> {
+    let last = w.n_samples - 1;
+    let mut s0 = 0.0 as R;
+    let mut s1 = (last as R) * w.delta;
+    let axes = [
+        (w.ox, w.vx, g.x0 + ((g.ix0 as R) - 1.5) * g.h, g.x0 + (((g.ix0 + g.nx) as R) + 0.5) * g.h),
+        (w.oy, w.vy, g.y0 + ((g.iy0 as R) - 1.5) * g.h, g.y0 + (((g.iy0 + g.ny) as R) + 0.5) * g.h),
+    ];
+    for (o, v, lo, hi) in axes {
+        if fm::fabs(v) < 1.0e-12 {
+            if o < lo || o > hi {
+                return None;
+            }
+        } else {
+            let a = (lo - o) / v;
+            let b = (hi - o) / v;
+            let (a, b) = if a < b { (a, b) } else { (b, a) };
+            if a > s0 {
+                s0 = a;
+            }
+            if b < s1 {
+                s1 = b;
+            }
+        }
+    }
+    if !(s0 <= s1) {
+        return None;
+    }
+    let ka = (fm::floor_i(s0 / w.delta) - 2).max(0);
+    let kb = (fm::floor_i(s1 / w.delta) + 2).min(last as i64);
+    if ka > kb {
+        return None;
+    }
+    Some((ka as u32, kb as u32))
+}
+
 /// 光線の経路の判定: (自分の区画に標本点があるか, 出ていく面)。
-/// from_face は光線が来た面 (自分のセンサなら FROM_SELF)
+/// from_face は光線が来た面 (自分のセンサなら FROM_SELF)。
+/// 自分の区画に標本点があれば clip_range の範囲だけを後ろから調べる (最後の自分の標本点が
+/// 決まれば出ていく面が決まる)。無ければ全標本点を調べる route_full (来た面の側の最後の
+/// 標本点を探す) に任せる。どちらも route_full と同じ答え (単体テスト route_matches_full)
 pub fn route(w: &Walk, g: &Geom, from_face: usize) -> (bool, Option<usize>) {
+    if let Some((ka, kb)) = clip_range(w, g) {
+        let mut k = kb;
+        loop {
+            let (gi, gj, _) = sample_cell(w, g, k);
+            if rel(g, gi, gj) == (0, 0) {
+                return (true, exit_face(w, g, k));
+            }
+            if k == ka {
+                break;
+            }
+            k -= 1;
+        }
+    }
+    route_full(w, g, from_face)
+}
+
+/// 標本点 k0 の次の標本点が出ていく面 (無ければ None)
+fn exit_face(w: &Walk, g: &Geom, k0: u32) -> Option<usize> {
+    if k0 + 1 >= w.n_samples {
+        return None;
+    }
+    let (gi, gj, _) = sample_cell(w, g, k0 + 1);
+    let (dx, dy) = rel(g, gi, gj);
+    if dx < 0 {
+        Some(FACE_W as usize)
+    } else if dx > 0 {
+        Some(FACE_E as usize)
+    } else if dy < 0 {
+        Some(FACE_S as usize)
+    } else if dy > 0 {
+        Some(FACE_N as usize)
+    } else {
+        None
+    }
+}
+
+/// 光線の経路の判定 (全標本点を調べる従来の版)
+pub fn route_full(w: &Walk, g: &Geom, from_face: usize) -> (bool, Option<usize>) {
     let mut last_own: Option<u32> = None;
     let mut last_from: Option<u32> = None;
     let from_off = if from_face < 4 { Some(face_offset(from_face)) } else { None };
@@ -204,10 +394,44 @@ struct Sensor {
     yaw: f64,
 }
 
+#[cfg(not(feature = "small"))]
 #[derive(Clone, Copy)]
 struct Pending {
     ray: Ray,
     due: u64,
+}
+
+#[cfg(not(feature = "small"))]
+impl Pending {
+    const NONE: Pending = Pending { ray: NO_RAY, due: 0 };
+    #[inline]
+    fn new(ray: Ray, due: u64) -> Self {
+        Pending { ray, due }
+    }
+    #[inline]
+    fn due(&self, _delay: u64) -> u64 {
+        self.due
+    }
+}
+
+/// 縮小版: 期限は取得ステップ + L (取り込み時の due と同じ値) で求める
+#[cfg(feature = "small")]
+#[derive(Clone, Copy)]
+struct Pending {
+    ray: Ray,
+}
+
+#[cfg(feature = "small")]
+impl Pending {
+    const NONE: Pending = Pending { ray: NO_RAY };
+    #[inline]
+    fn new(ray: Ray, _due: u64) -> Self {
+        Pending { ray }
+    }
+    #[inline]
+    fn due(&self, delay: u64) -> u64 {
+        self.ray.acq_step as u64 + delay
+    }
 }
 
 const NO_RAY: Ray = Ray { ox: 0.0, oy: 0.0, ex: 0.0, ey: 0.0, acq_step: 0, id: 0 };
@@ -217,18 +441,25 @@ pub struct Grid {
     ny: usize,
     ix0: u32,
     iy0: u32,
-    h: f64,
+    h: R,
     // 設定 (dyne_cfg。init をまたいで保持)
     defaults_set: bool,
-    x0: f64,
-    y0: f64,
-    mu: f64,
-    w_max: f64,
+    x0: R,
+    y0: R,
+    mu: R,
+    w_max: R,
     delay: u64,
     range_def: u32,
     carve: bool,
     max_range: f64,
     fov: f64,
+    /// 古い観測を忘れる仕組み (既定 1 / 0 / 0 / 1 = 働かない)
+    decay: R,
+    w_forget: R,
+    dis_tau: R,
+    dis_w: R,
+    /// 距離の反復の間引き (n ステップに1回。既定 1 = 毎ステップ、docs/2026-11-11-shape-speedup.md)
+    sweep_every: u64,
     zone_row: u32,
     sensor_sel: usize,
     sensors: [Sensor; MAX_SENSORS],
@@ -236,12 +467,18 @@ pub struct Grid {
     param: [u64; 4],
     // 場
     /// 枠つき配列 (幅 nx+2、高さ ny+2)
-    phi: [f64; PAD_MAX],
-    phi_next: [f64; PAD_MAX],
+    phi: [R; PAD_MAX],
+    #[cfg(not(feature = "small"))]
+    phi_next: [R; PAD_MAX],
+    /// 縮小版の反復用: 前の行と今の行の古い φ (枠つきの幅)
+    #[cfg(feature = "small")]
+    row_prev: [R; SIDE_MAX + 2],
+    #[cfg(feature = "small")]
+    row_cur: [R; SIDE_MAX + 2],
     /// 枠なし (k = j·nx + i)
-    d: [f64; PAD_MAX],
-    w: [f64; PAD_MAX],
-    ghost: [[f64; SIDE_MAX]; 4],
+    d: [R; CELL_MAX],
+    w: [R; CELL_MAX],
+    ghost: [[R; SIDE_MAX]; 4],
     got: [bool; 4],
     step: u64,
     // 光線
@@ -252,6 +489,7 @@ pub struct Grid {
     n_pend: usize,
     fwd: [[Ray; FWD_MAX]; 4],
     n_fwd: [usize; 4],
+    #[cfg(not(feature = "small"))]
     due_buf: [Ray; PEND_MAX],
     // 受け渡し
     scratch: [u8; SCRATCH_CAP],
@@ -263,6 +501,12 @@ pub struct Grid {
     missing: u64,
     late: u64,
     overflow: u64,
+    /// 減衰・忘却を視野の中 (そのステップに統合する光線が通る格子点) だけに効かせる (CFG_DECAY_IN_VIEW)
+    decay_in_view: bool,
+    /// 視野の中だけ減衰するとき、視野の外の格子点の減衰率 (CFG_DECAY_OUT、既定 1 = 保つ)
+    decay_out: R,
+    /// このステップに光線が通った格子点の印 (1点1ビット。decay_in_view のときだけ使う)
+    seen: [u32; SEEN_WORDS],
 }
 
 static mut S: Grid = Grid {
@@ -283,25 +527,36 @@ static mut S: Grid = Grid {
     carve: false,
     max_range: 0.0,
     fov: 0.0,
+    decay: 0.0,
+    w_forget: 0.0,
+    dis_tau: 0.0,
+    dis_w: 0.0,
+    sweep_every: 0,
     zone_row: 0,
     sensor_sel: 0,
     sensors: [Sensor { present: false, x: 0.0, y: 0.0, yaw: 0.0 }; MAX_SENSORS],
     kind: [BC_DIRICHLET; 4],
     param: [0; 4],
     phi: [0.0; PAD_MAX], // init で BIG にする (静的領域を0にしてwasmのデータ節を小さく保つ)
+    #[cfg(not(feature = "small"))]
     phi_next: [0.0; PAD_MAX],
-    d: [0.0; PAD_MAX],
-    w: [0.0; PAD_MAX],
+    #[cfg(feature = "small")]
+    row_prev: [0.0; SIDE_MAX + 2],
+    #[cfg(feature = "small")]
+    row_cur: [0.0; SIDE_MAX + 2],
+    d: [0.0; CELL_MAX],
+    w: [0.0; CELL_MAX],
     ghost: [[0.0; SIDE_MAX]; 4],
     got: [false; 4],
     step: 0,
     recv: [NO_RAY; RECV_MAX],
     recv_from: [0; RECV_MAX],
     n_recv: 0,
-    pend: [Pending { ray: NO_RAY, due: 0 }; PEND_MAX],
+    pend: [Pending::NONE; PEND_MAX],
     n_pend: 0,
     fwd: [[NO_RAY; FWD_MAX]; 4],
     n_fwd: [0; 4],
+    #[cfg(not(feature = "small"))]
     due_buf: [NO_RAY; PEND_MAX],
     scratch: [0; SCRATCH_CAP],
     edge: [0; 8 * SIDE_MAX],
@@ -311,6 +566,9 @@ static mut S: Grid = Grid {
     missing: 0,
     late: 0,
     overflow: 0,
+    decay_in_view: false,
+    decay_out: 0.0,
+    seen: [0; SEEN_WORDS],
 };
 
 fn state() -> &'static mut Grid {
@@ -376,22 +634,35 @@ impl Grid {
             self.delay = 1;
             self.max_range = 4.0;
             self.fov = core::f64::consts::FRAC_PI_4; // 45°
+            self.decay = 1.0;
+            self.w_forget = 0.0;
+            self.dis_tau = 0.0;
+            self.dis_w = 1.0;
+            self.sweep_every = 1;
+            self.decay_out = 1.0;
         }
     }
 
     fn cfg(&mut self, key: u32, val: f64) {
         self.ensure_defaults();
         match key {
-            CFG_ORIGIN_X => self.x0 = val,
-            CFG_ORIGIN_Y => self.y0 = val,
-            CFG_MU => self.mu = val,
-            CFG_W_MAX => self.w_max = val,
+            CFG_ORIGIN_X => self.x0 = val as R,
+            CFG_ORIGIN_Y => self.y0 = val as R,
+            CFG_MU => self.mu = val as R,
+            CFG_W_MAX => self.w_max = val as R,
             CFG_DELAY => self.delay = val as u64,
             CFG_RANGE_DEF => self.range_def = val as u32,
             CFG_CARVE_NO_TARGET => self.carve = val != 0.0,
             CFG_MAX_RANGE => self.max_range = val,
             CFG_FOV => self.fov = val,
             CFG_ZONE_ROW => self.zone_row = val as u32,
+            CFG_DECAY => self.decay = val as R,
+            CFG_W_FORGET => self.w_forget = val as R,
+            CFG_DISAGREE => self.dis_tau = val as R,
+            CFG_DISAGREE_W => self.dis_w = val as R,
+            CFG_SWEEP_EVERY => self.sweep_every = val as u64,
+            CFG_DECAY_IN_VIEW => self.decay_in_view = val != 0.0,
+            CFG_DECAY_OUT => self.decay_out = val as R,
             CFG_SENSOR_SEL => {
                 let id = val as usize;
                 if id < MAX_SENSORS {
@@ -409,23 +680,33 @@ impl Grid {
     fn init(&mut self, nx: u32, ny: u32, ix0: u32, iy0: u32, h: f64) -> i32 {
         self.ensure_defaults();
         let (nx, ny) = (nx as usize, ny as usize);
-        if nx < 2 || ny < 2 || nx > SIDE_MAX || ny > SIDE_MAX || (nx + 2) * (ny + 2) > PAD_MAX {
+        if nx < 2 || ny < 2 || nx > SIDE_MAX || ny > SIDE_MAX || (nx + 2) * (ny + 2) > PAD_MAX || nx * ny > CELL_MAX {
             return -1;
         }
         if !(h > 0.0) || !(self.mu > 0.0) || !(self.w_max >= 1.0) || self.delay < 1 {
+            return -2;
+        }
+        if !(self.decay > 0.0 && self.decay <= 1.0) || !(self.w_forget >= 0.0) || !(self.dis_tau >= 0.0) || !(self.dis_w >= 0.0) || self.sweep_every < 1
+            || !(self.decay_out > 0.0 && self.decay_out <= 1.0)
+        {
+            return -2;
+        }
+        // 減衰させるなら忘却の閾値は λ 未満であること (1回観測した点 w=1 が次の統合の前に
+        // 忘れられて、どの点も平均が育たなくなるのを防ぐ)
+        if self.decay < 1.0 && self.w_forget >= self.decay {
             return -2;
         }
         self.nx = nx;
         self.ny = ny;
         self.ix0 = ix0;
         self.iy0 = iy0;
-        self.h = h;
+        self.h = h as R;
         // センサは自分の区画の中にあること (光線の経路の判定の前提)
         let g = self.geom();
         for s in self.sensors.iter() {
             if s.present {
-                let gi = libm::floor((s.x - g.x0) / g.h + 0.5) as i64;
-                let gj = libm::floor((s.y - g.y0) / g.h + 0.5) as i64;
+                let gi = fm::floor_i((s.x as R - g.x0) / g.h + 0.5);
+                let gj = fm::floor_i((s.y as R - g.y0) / g.h + 0.5);
                 if rel(&g, gi, gj) != (0, 0) {
                     return -3;
                 }
@@ -466,7 +747,7 @@ impl Grid {
             let n = self.face_len(face);
             for k in 0..n {
                 let (i, j) = self.edge_point(face, k);
-                let v = self.phi[self.at(i, j)];
+                let v = self.phi[self.at(i, j)] as f64;
                 self.edge[8 * k..8 * k + 8].copy_from_slice(&v.to_bits().to_le_bytes());
             }
             let hdr = wire::Header {
@@ -597,7 +878,7 @@ impl Grid {
                     }
                     let pp = per_point as usize;
                     for k in 0..n {
-                        self.ghost[f][k] = wire::band_get(data, k * pp);
+                        self.ghost[f][k] = wire::band_get(data, k * pp) as R;
                     }
                     self.got[f] = true;
                 }
@@ -662,6 +943,7 @@ impl Grid {
     }
 
     /// 距離の反復 (Jacobi)
+    #[cfg(not(feature = "small"))]
     fn sweep(&mut self) {
         self.fill_halo();
         let wp = self.wp();
@@ -672,19 +954,19 @@ impl Grid {
                 let c = (j + 1) * wp + (i + 1);
                 let k = j * self.nx + i;
                 let (d, w) = (self.d[k], self.w[k]);
-                let v = if w > 0.0 && libm::fabs(d) < mu {
+                let v = if w > 0.0 && fm::fabs(d) < mu {
                     d
                 } else {
-                    let a = fmin(libm::fabs(self.phi[c - 1]), libm::fabs(self.phi[c + 1]));
-                    let b = fmin(libm::fabs(self.phi[c - wp]), libm::fabs(self.phi[c + wp]));
+                    let a = fmin(fm::fabs(self.phi[c - 1]), fm::fabs(self.phi[c + 1]));
+                    let b = fmin(fm::fabs(self.phi[c - wp]), fm::fabs(self.phi[c + wp]));
                     let m = fmin(a, b);
                     let u = if m >= BIG {
                         BIG
-                    } else if libm::fabs(a - b) >= h {
+                    } else if fm::fabs(a - b) >= h {
                         m + h
                     } else {
                         let t = a - b;
-                        (a + b + libm::sqrt(2.0 * h * h - t * t)) * 0.5
+                        (a + b + fm::sqrt(2.0 * h * h - t * t)) * 0.5
                     };
                     if w > 0.0 && d < 0.0 { -u } else { u }
                 };
@@ -692,6 +974,46 @@ impl Grid {
             }
         }
         core::mem::swap(&mut self.phi, &mut self.phi_next);
+    }
+
+    /// 距離の反復 (Jacobi、縮小版)。フル版と同じ式・同じ入力値で、φ を行ごとに上書きする。
+    /// 左右と下 (j−1) の古い値は写し (row_cur・row_prev) から、上 (j+1) はまだ書き換えて
+    /// いない φ から読む
+    #[cfg(feature = "small")]
+    fn sweep(&mut self) {
+        self.fill_halo();
+        let wp = self.wp();
+        let h = self.h;
+        let mu = self.mu;
+        // 下の枠の行 (j = −1) の古い値
+        self.row_prev[..wp].copy_from_slice(&self.phi[..wp]);
+        for j in 0..self.ny {
+            let base = (j + 1) * wp;
+            self.row_cur[..wp].copy_from_slice(&self.phi[base..base + wp]);
+            for i in 0..self.nx {
+                let c = base + (i + 1);
+                let k = j * self.nx + i;
+                let (d, w) = (self.d[k], self.w[k]);
+                let v = if w > 0.0 && fm::fabs(d) < mu {
+                    d
+                } else {
+                    let a = fmin(fm::fabs(self.row_cur[i]), fm::fabs(self.row_cur[i + 2]));
+                    let b = fmin(fm::fabs(self.row_prev[i + 1]), fm::fabs(self.phi[c + wp]));
+                    let m = fmin(a, b);
+                    let u = if m >= BIG {
+                        BIG
+                    } else if fm::fabs(a - b) >= h {
+                        m + h
+                    } else {
+                        let t = a - b;
+                        (a + b + fm::sqrt(2.0 * h * h - t * t)) * 0.5
+                    };
+                    if w > 0.0 && d < 0.0 { -u } else { u }
+                };
+                self.phi[c] = v;
+            }
+            core::mem::swap(&mut self.row_prev, &mut self.row_cur);
+        }
     }
 
     /// 受け取った光線の取り込み: 統合待ちと送信待ちへ
@@ -709,7 +1031,7 @@ impl Grid {
             let (owned, out) = route(&wk, &g, from);
             if owned {
                 if self.n_pend < PEND_MAX {
-                    self.pend[self.n_pend] = Pending { ray, due };
+                    self.pend[self.n_pend] = Pending::new(ray, due);
                     self.n_pend += 1;
                 } else {
                     self.overflow += 1;
@@ -729,13 +1051,61 @@ impl Grid {
         self.n_recv = 0;
     }
 
+    /// 重みの減衰と、重みの小さくなった点の忘却 (既定の設定では何もしない)
+    fn decay_weights(&mut self) {
+        if self.decay_in_view {
+            // 視野の中だけ減衰する設定: ここでは「このステップに光線が通った」印を消すだけ
+            // (減衰は fuse_ray が最初の統合の直前に行う)
+            let words = (self.nx * self.ny + 31) / 32;
+            for v in self.seen[..words].iter_mut() {
+                *v = 0;
+            }
+            return;
+        }
+        if !(self.decay < 1.0) && !(self.w_forget > 0.0) {
+            return;
+        }
+        let (lam, wf) = (self.decay, self.w_forget);
+        for k in 0..self.nx * self.ny {
+            let w = self.w[k] * lam;
+            if w < wf {
+                self.w[k] = 0.0;
+                self.d[k] = 0.0;
+            } else {
+                self.w[k] = w;
+            }
+        }
+    }
+
+    /// 視野の中だけ減衰する設定で、このステップに光線が通らなかった格子点を λ_out で減衰・忘却する
+    /// (CFG_DECAY_OUT < 1 のときだけ。統合の後に行う。格子点ごとに閉じた計算で順序も固定)
+    fn decay_out_of_view(&mut self) {
+        if !self.decay_in_view || !(self.decay_out < 1.0) {
+            return;
+        }
+        let (lam, wf) = (self.decay_out, self.w_forget);
+        for k in 0..self.nx * self.ny {
+            if self.seen[k >> 5] & (1u32 << (k & 31)) != 0 {
+                continue;
+            }
+            let w = self.w[k] * lam;
+            if w < wf {
+                self.w[k] = 0.0;
+                self.d[k] = 0.0;
+            } else {
+                self.w[k] = w;
+            }
+        }
+    }
+
     /// 期限が今ステップの光線を固定の順序で統合する
+    #[cfg(not(feature = "small"))]
     fn fuse_due(&mut self) {
         let mut n_due = 0usize;
         let mut keep = 0usize;
         for q in 0..self.n_pend {
             let p = self.pend[q];
-            if p.due == self.step {
+            if p.due(self.delay) == self.step {
                 self.due_buf[n_due] = p.ray;
                 n_due += 1;
             } else {
@@ -745,54 +1115,146 @@ impl Grid {
         }
         self.n_pend = keep;
         sort_rays(&mut self.due_buf[..n_due]);
-        let g = self.geom();
-        let mu = self.mu;
         for q in 0..n_due {
             let ray = self.due_buf[q];
-            let Some(wk) = walk_of(&ray, self.h, mu) else { continue };
-            let mut prev: (i64, i64) = (i64::MIN, i64::MIN);
-            for k in 0..wk.n_samples {
-                let (gi, gj, _) = sample_cell(&wk, &g, k);
-                // 同じ光線の続く標本点が同じ格子点に落ちたら1回だけ統合する
-                if (gi, gj) == prev {
-                    continue;
-                }
-                prev = (gi, gj);
-                if rel(&g, gi, gj) != (0, 0) {
-                    continue;
-                }
-                let li = (gi - g.ix0) as usize;
-                let lj = (gj - g.iy0) as usize;
-                let idx = lj * self.nx + li;
-                // 観測値は格子点そのものを光線へ投影した位置で測る (標本点の位置で測ると、
-                // 最寄りの格子点とのずれ (最大 h/√2) がそのまま誤差になるため)
-                let gx = g.x0 + (gi as f64) * g.h;
-                let gy = g.y0 + (gj as f64) * g.h;
-                let along = (gx - wk.ox) * wk.vx + (gy - wk.oy) * wk.vy;
-                let obs = if wk.carve { mu } else { clamp(wk.r - along, -mu, mu) };
-                let w = self.w[idx];
-                self.d[idx] = (self.d[idx] * w + obs) / (w + 1.0);
-                self.w[idx] = fmin(w + 1.0, self.w_max);
+            self.fuse_ray(&ray);
+        }
+    }
+
+    /// 縮小版: 統合待ちの列そのものを (取得ステップ, センサID, 区画番号) で安定に並べ替え、
+    /// 先頭の期限が今ステップのものを統合して取り除く (作業用の2つ目の列を持たない)。
+    /// 統合待ちには取得ステップが s−L 以上の光線しか無い (それより古いものは前のステップで
+    /// 統合済み、遅着は取り込まない) ので、期限が今ステップの光線は鍵が最小で、並べ替えの先頭に
+    /// 集まる。安定な並べ替えなので、同じ鍵の光線の順は取り込みの順のまま = フル版の
+    /// 「取り出してから並べ替え」と同じ順に統合する
+    #[cfg(feature = "small")]
+    fn fuse_due(&mut self) {
+        let n = self.n_pend;
+        for i in 1..n {
+            let mut j = i;
+            while j > 0 && ray_key(&self.pend[j - 1].ray) > ray_key(&self.pend[j].ray) {
+                self.pend.swap(j - 1, j);
+                j -= 1;
             }
+        }
+        let mut n_due = 0usize;
+        while n_due < n && self.pend[n_due].due(self.delay) == self.step {
+            n_due += 1;
+        }
+        for q in 0..n_due {
+            let ray = self.pend[q].ray;
+            self.fuse_ray(&ray);
+        }
+        self.pend.copy_within(n_due..n, 0);
+        self.n_pend = n - n_due;
+    }
+
+    /// 光線1本の統合 (視野の中だけの減衰の有無で命令列を分ける: 既定の設定の内側の繰り返しに
+    /// 判定を足さないため)
+    #[inline]
+    fn fuse_ray(&mut self, ray: &Ray) {
+        if self.decay_in_view {
+            self.fuse_ray_impl::<true>(ray)
+        } else {
+            self.fuse_ray_impl::<false>(ray)
+        }
+    }
+
+    fn fuse_ray_impl<const IN_VIEW: bool>(&mut self, ray: &Ray) {
+        let g = self.geom();
+        let mu = self.mu;
+        let Some(wk) = walk_of(ray, self.h, mu) else { return };
+        // 区画に入りうる標本点だけを調べる (clip_range。範囲の直前の標本点は区画の外なので、
+        // 「続く標本点が同じ格子点なら1回だけ」の判定も全標本点を調べたときと同じになる)
+        let Some((ka, kb)) = clip_range(&wk, &g) else { return };
+        let (lam, wf, dis_tau, dis_w, w_max) = (self.decay, self.w_forget, self.dis_tau, self.dis_w, self.w_max);
+        let mut prev: (i64, i64) = (i64::MIN, i64::MIN);
+        for k in ka..=kb {
+            let (gi, gj, _) = sample_cell(&wk, &g, k);
+            // 同じ光線の続く標本点が同じ格子点に落ちたら1回だけ統合する
+            if (gi, gj) == prev {
+                continue;
+            }
+            prev = (gi, gj);
+            if rel(&g, gi, gj) != (0, 0) {
+                continue;
+            }
+            let li = (gi - g.ix0) as usize;
+            let lj = (gj - g.iy0) as usize;
+            let idx = lj * self.nx + li;
+            // 観測値は格子点そのものを光線へ投影した位置で測る (標本点の位置で測ると、
+            // 最寄りの格子点とのずれ (最大 h/√2) がそのまま誤差になるため)
+            let gx = g.x0 + (gi as R) * g.h;
+            let gy = g.y0 + (gj as R) * g.h;
+            let along = (gx - wk.ox) * wk.vx + (gy - wk.oy) * wk.vy;
+            let obs = if wk.carve { mu } else { clamp(wk.r - along, -mu, mu) };
+            // 視野の中だけの減衰 (CFG_DECAY_IN_VIEW): このステップで最初に光線が通ったときに1回だけ、
+            // decay_weights と同じ式で減衰・忘却してから統合する (統合の前に減衰する順序は従来と同じ)
+            if IN_VIEW {
+                let (wd, bit) = (idx >> 5, 1u32 << (idx & 31));
+                if self.seen[wd] & bit == 0 {
+                    self.seen[wd] |= bit;
+                    let wv = self.w[idx] * lam;
+                    if wv < wf {
+                        self.w[idx] = 0.0;
+                        self.d[idx] = 0.0;
+                    } else {
+                        self.w[idx] = wv;
+                    }
+                }
+            }
+            let mut w = self.w[idx];
+            // 食い違いの検出 (既定 dis_tau = 0 では働かない)
+            if dis_tau > 0.0 && w > dis_w && fm::fabs(obs - self.d[idx]) > dis_tau {
+                w = dis_w;
+            }
+            self.d[idx] = (self.d[idx] * w + obs) / (w + 1.0);
+            self.w[idx] = fmin(w + 1.0, w_max);
         }
     }
 
     fn step(&mut self) -> i32 {
-        let mut status = STEP_OK;
-        for face in 0..4 {
-            if self.kind[face] == BC_INTERFACE && !self.got[face] {
-                status = STEP_MISSING_GHOST;
+        let status = self.step_part(0);
+        self.step_part(1);
+        self.step_part(2);
+        status
+    }
+
+    /// 1ステップを3つに分けたもの (計測用に dyne_step_part からも呼ぶ。順に 0・1・2 を呼べば
+    /// dyne_step と同じ)。0 = 界面の値の確認と距離の反復、1 = 光線の取り込み、
+    /// 2 = 重みの減衰・統合・ステップを進める
+    fn step_part(&mut self, part: u32) -> i32 {
+        match part {
+            0 => {
+                let mut status = STEP_OK;
+                for face in 0..4 {
+                    if self.kind[face] == BC_INTERFACE && !self.got[face] {
+                        status = STEP_MISSING_GHOST;
+                    }
+                }
+                if status != STEP_OK {
+                    self.missing += 1;
+                }
+                // 反復の間引き (CFG_SWEEP_EVERY = n): ステップ番号が n の倍数のときだけ反復する。
+                // ステップ番号は全ノードで同じなので、分割解と単一ノード解で同じ判断になる
+                if self.sweep_every <= 1 || self.step % self.sweep_every == 0 {
+                    self.sweep();
+                }
+                status
+            }
+            1 => {
+                self.intake();
+                STEP_OK
+            }
+            _ => {
+                self.decay_weights();
+                self.fuse_due();
+                self.decay_out_of_view();
+                self.step += 1;
+                self.got = [false; 4];
+                STEP_OK
             }
         }
-        if status != STEP_OK {
-            self.missing += 1;
-        }
-        self.sweep();
-        self.intake();
-        self.fuse_due();
-        self.step += 1;
-        self.got = [false; 4];
-        status
     }
 
     fn get(&self, k: usize) -> f64 {
@@ -800,7 +1262,7 @@ impl Grid {
             return f64::NAN;
         }
         let (i, j) = (k % self.nx, k / self.nx);
-        self.phi[self.at(i as isize, j as isize)]
+        self.phi[self.at(i as isize, j as isize)] as f64
     }
 
     fn get_aux(&self, q: u32, k: usize) -> f64 {
@@ -808,20 +1270,20 @@ impl Grid {
             return f64::NAN;
         }
         match q {
-            AUX_D => self.d[k],
-            AUX_W => self.w[k],
+            AUX_D => self.d[k] as f64,
+            AUX_W => self.w[k] as f64,
             _ => self.get(k),
         }
     }
 }
 
 #[inline]
-fn fmin(a: f64, b: f64) -> f64 {
+fn fmin(a: R, b: R) -> R {
     if a < b { a } else { b }
 }
 
 #[inline]
-fn clamp(v: f64, lo: f64, hi: f64) -> f64 {
+fn clamp(v: R, lo: R, hi: R) -> R {
     if v < lo {
         lo
     } else if v > hi {
@@ -889,6 +1351,14 @@ pub extern "C" fn dyne_step() -> i32 {
     state().step()
 }
 
+/// 計測用: 1ステップを3つに分けて呼ぶ (0 = 界面の確認と距離の反復、1 = 光線の取り込み、
+/// 2 = 減衰・統合・ステップを進める)。0・1・2 を順に呼べば dyne_step と同じ結果になる。
+/// bench-c5 と recfuel が内訳を測るのに使う (2026-11-11、docs/2026-11-11-shape-speedup.md)
+#[no_mangle]
+pub extern "C" fn dyne_step_part(part: u32) -> i32 {
+    state().step_part(part)
+}
+
 #[no_mangle]
 pub extern "C" fn dyne_len() -> u32 {
     let s = state();
@@ -945,7 +1415,19 @@ pub extern "C" fn dyne_pending() -> u32 {
     state().n_pend as u32
 }
 
-#[cfg(target_arch = "wasm32")]
+/// 計測用 (縮小版のみ): 距離の反復だけを n 回行う。状態 φ を書き換えるので、
+/// 結果の照合を済ませた後にだけ呼ぶこと (bench-c5 が反復と光線の処理の時間を分けるのに使う)
+#[cfg(feature = "small")]
+#[no_mangle]
+pub extern "C" fn dyne_bench_sweep(n: u32) -> u32 {
+    let s = state();
+    for _ in 0..n {
+        s.sweep();
+    }
+    n
+}
+
+#[cfg(all(target_arch = "wasm32", not(feature = "std-math")))]
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
     core::arch::wasm32::unreachable()
@@ -1054,6 +1536,61 @@ mod tests {
         }
     }
 
+    /// clip_range を使う route が全標本点を調べる route_full と同じ答えを返し、範囲の外に
+    /// 区画の標本点が無いこと (2026-11-11、docs/2026-11-11-shape-speedup.md)
+    #[test]
+    fn route_matches_full() {
+        for &h in &[0.025, 0.05] {
+            for &(px, py) in &[(4usize, 4usize), (5, 3), (3, 3), (1, 3)] {
+                let bl = blocks((3.6 / h) as i64 + 1, (2.7 / h) as i64 + 1, px as i64, py as i64, h);
+                let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+                let mut rnd = || {
+                    seed ^= seed >> 12;
+                    seed ^= seed << 25;
+                    seed ^= seed >> 27;
+                    (seed.wrapping_mul(0x2545F4914F6CDD1D) >> 11) as f64 / (1u64 << 53) as f64
+                };
+                for q in 0..3000 {
+                    let (ox, oy) = (3.6 * rnd(), 2.7 * rnd());
+                    // 軸に平行な光線と、区画の境目の上を通る光線も混ぜる
+                    let th = match q % 5 {
+                        0 => 0.5 * core::f64::consts::PI * ((q / 5) % 4) as f64,
+                        _ => 2.0 * core::f64::consts::PI * rnd(),
+                    };
+                    let (ox, oy) = if q % 7 == 0 { (bl[1].ix0 as f64 * h - 0.5 * h, oy) } else { (ox, oy) };
+                    let r = 0.05 + 4.0 * rnd();
+                    let id = if q % 3 == 0 { wire::RAY_FLAG_NO_TARGET } else { 0 };
+                    let ray = Ray { ox, oy, ex: ox + r * th.cos(), ey: oy + r * th.sin(), acq_step: 0, id };
+                    let Some(wk) = walk_of(&ray, h, 0.15) else { continue };
+                    for g in &bl {
+                        for from in 0..5 {
+                            assert_eq!(route(&wk, g, from), route_full(&wk, g, from), "ray {:?}", ray);
+                        }
+                        let clip = clip_range(&wk, g);
+                        for k in 0..wk.n_samples {
+                            let (gi, gj, _) = sample_cell(&wk, g, k);
+                            if rel(g, gi, gj) == (0, 0) {
+                                let (ka, kb) = clip.expect("区画に標本点があるのに範囲が空");
+                                assert!(ka < k && k < kb || k == 0 && ka == 0 || k == wk.n_samples - 1 && kb == k,
+                                        "標本点 {k} が範囲 {:?} の端 (余裕なし)", clip);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn floor_i_matches_libm() {
+        let vals = [0.0, -0.0, 0.5, -0.5, 1.0, -1.0, 2.999999999, -2.999999999, 1e15 + 0.5, -1e15 - 0.5,
+                    4503599627370497.0, -4503599627370497.0, 1e19, -1e19, f64::NAN, f64::INFINITY, f64::NEG_INFINITY,
+                    -9.223372036854775808e18, 9.223372036854775807e18, f64::MIN_POSITIVE, -f64::MIN_POSITIVE];
+        for &v in &vals {
+            assert_eq!(fm::floor_i(v), libm::floor(v) as i64, "{v}");
+        }
+    }
+
     #[test]
     fn sort_by_acq_then_sensor_zone() {
         let mk = |a: u32, s: u32, z: u32| Ray { acq_step: a, id: (s << 16) | (z << 8), ..NO_RAY };
@@ -1063,3 +1600,4 @@ mod tests {
         assert_eq!(keys, vec![(1, 7), (1, (1 << 8) | 2), (1, (1 << 8) | 3), (2, 0)]);
     }
 }
+

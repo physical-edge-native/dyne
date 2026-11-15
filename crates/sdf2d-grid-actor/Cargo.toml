@@ -7,6 +7,13 @@ edition = "2021"
 # cdylib = WASMアクター本体 / rlib = ネイティブの単体テスト用 (swarm-agent-actor と同方針)
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# 実機用の縮小版 (線形メモリ1ページ=64KB に収める。区画は 1辺40点・枠なし1100点まで、
+# 光線は1ステップ64本まで。docs/2026-11-11-esp32-interp-bench.md)
+small = []
+std-math = []
+f32 = []
+
 [dependencies]
 # 純Rustの数学関数 (sqrt・sin・cos・floor)。プラットフォーム非依存で決定論を保つ
 libm = "0.2"

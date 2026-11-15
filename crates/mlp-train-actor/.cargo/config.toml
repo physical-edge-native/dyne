@@ -1,0 +1,5 @@
+# WASMアクターのスタックサイズ調整 (既定1MBのままではESP32の線形メモリに収まらない)
+# rustup / apt どちらの環境でも有効。リンカの差し替えはしない
+# (apt版Rustの場合のみ、環境変数 CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_LINKER=wasm-ld を併用)
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "link-arg=-zstack-size=32768"]

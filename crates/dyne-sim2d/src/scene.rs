@@ -6,10 +6,19 @@
 //! 場面ファイルの書式 (1行1要素、単位メートル、`#` 以降は注釈):
 //!   room x0 y0 x1 y1              外壁 (長方形。内側が部屋)
 //!   roompoly x1 y1 x2 y2 ...      外壁 (多角形。内側が部屋)
-//!   box x0 y0 x1 y1               遮蔽物 (長方形)
+//!   box x0 y0 x1 y1 [高さ]        遮蔽物 (長方形。高さは表示・書き出し用で、計算には使わない)
 //!   poly x1 y1 x2 y2 ...          遮蔽物 (多角形)
 //!   circle cx cy r                遮蔽物 (円)
 //!   sensor id x y yaw_deg [高さ]  センサ (向きは x軸から反時計回りの度。高さは記録のみ)
+//!
+//! 動く箱 (2026-11-11、docs/2026-11-11-dynamic-shape.md。形の変化への追従の検証用):
+//!   movebox 名前 x0 y0 x1 y1 [高さ]  動く箱の最初の位置 (長方形)
+//!   move 名前 ステップ x0 y0 x1 y1    そのステップの測距から箱をこの位置に置く (瞬間移動)
+//!   move 名前 ステップ off            そのステップから箱を測距の面から外す (持ち上げて運んでいる間)
+//!   pan N D   サーボの首振りの模擬: センサ id は (id mod N) == (ステップ / D) mod N のステップだけ測る
+//!             (2026-11-13、docs/2026-11-11-shape-speedup.md。無い場面ファイルの動作・出力は従来と同じ)
+//!   ステップは測距フレームの番号 (= シミュレータのステップ)。正解の形状 (採点) も同じ時刻で切り替わる。
+//!   動く箱の無い場面ファイルの動作・出力は従来と同じ。
 
 use dyne_core::rng::{derive_seed, Rng};
 
@@ -31,6 +40,31 @@ pub struct Scene {
     /// 遮蔽物の円 (cx, cy, r)
     pub circles: Vec<(f64, f64, f64)>,
     pub sensors: Vec<Sensor>,
+    /// 動く箱 (無ければ静止した場面)
+    pub movers: Vec<Mover>,
+    /// サーボの首振りの模擬 (pan N D): センサ id は (id mod N) == (ステップ / D) mod N のステップだけ
+    /// 測る (同じ位置の向き違いを別のセンサ id で書き、N 方向を D ステップずつ順に向く)。無ければ全センサが毎ステップ測る
+    pub pan: Option<(u32, u64)>,
+}
+
+/// 動く箱: 名前と、(切り替えのステップ, 位置 (None = 測距の面に無い)) の列 (ステップの昇順)
+#[derive(Clone, Debug)]
+pub struct Mover {
+    pub name: String,
+    pub poses: Vec<(u64, Option<Vec<(f64, f64)>>)>,
+}
+
+impl Mover {
+    /// ステップ step での位置
+    pub fn pose_at(&self, step: u64) -> Option<&Vec<(f64, f64)>> {
+        let mut cur = None;
+        for (s, p) in &self.poses {
+            if *s <= step {
+                cur = p.as_ref();
+            }
+        }
+        cur
+    }
 }
 
 fn nums(toks: &[&str], line: usize) -> Vec<f64> {
@@ -51,7 +85,14 @@ fn pairs(v: &[f64], line: usize) -> Vec<(f64, f64)> {
 
 impl Scene {
     pub fn parse(text: &str) -> Scene {
-        let mut sc = Scene { room: Vec::new(), polys: Vec::new(), circles: Vec::new(), sensors: Vec::new() };
+        let mut sc = Scene {
+            room: Vec::new(),
+            polys: Vec::new(),
+            circles: Vec::new(),
+            sensors: Vec::new(),
+            movers: Vec::new(),
+            pan: None,
+        };
         for (ln, raw) in text.lines().enumerate() {
             let line = ln + 1;
             let body = raw.split('#').next().unwrap().trim();
@@ -59,6 +100,33 @@ impl Scene {
                 continue;
             }
             let toks: Vec<&str> = body.split_whitespace().collect();
+            // 動く箱 (先頭の引数が名前なので数値の解釈より先に扱う)
+            if toks[0] == "movebox" {
+                assert!(toks.len() == 6 || toks.len() == 7, "場面ファイル {line}行目: movebox 名前 x0 y0 x1 y1 [高さ]");
+                let name = toks[1].to_string();
+                assert!(sc.movers.iter().all(|m| m.name != name), "場面ファイル {line}行目: 動く箱 '{name}' が重複");
+                let v = nums(&toks[2..], line);
+                sc.movers.push(Mover { name, poses: vec![(0, Some(rect(&v[..4])))] });
+                continue;
+            }
+            if toks[0] == "move" {
+                assert!(toks.len() == 4 || toks.len() == 7, "場面ファイル {line}行目: move 名前 ステップ (x0 y0 x1 y1 | off)");
+                let step: u64 = toks[2].parse().unwrap_or_else(|_| panic!("場面ファイル {line}行目: ステップが整数でない"));
+                let pose = if toks.len() == 4 {
+                    assert_eq!(toks[3], "off", "場面ファイル {line}行目: move 名前 ステップ off");
+                    None
+                } else {
+                    Some(rect(&nums(&toks[3..], line)))
+                };
+                let m = sc
+                    .movers
+                    .iter_mut()
+                    .find(|m| m.name == toks[1])
+                    .unwrap_or_else(|| panic!("場面ファイル {line}行目: 動く箱 '{}' が movebox で定義されていない", toks[1]));
+                assert!(step > m.poses.last().unwrap().0, "場面ファイル {line}行目: move のステップは箱ごとに増加順");
+                m.poses.push((step, pose));
+                continue;
+            }
             let v = nums(&toks[1..], line);
             match toks[0] {
                 "room" => {
@@ -67,8 +135,8 @@ impl Scene {
                 }
                 "roompoly" => sc.room = pairs(&v, line),
                 "box" => {
-                    assert_eq!(v.len(), 4, "場面ファイル {line}行目: box x0 y0 x1 y1");
-                    sc.polys.push(rect(&v));
+                    assert!(v.len() == 4 || v.len() == 5, "場面ファイル {line}行目: box x0 y0 x1 y1 [高さ]");
+                    sc.polys.push(rect(&v[..4]));
                 }
                 "poly" => sc.polys.push(pairs(&v, line)),
                 "circle" => {
@@ -85,13 +153,50 @@ impl Scene {
                         height: if v.len() == 5 { v[4] } else { 0.0 },
                     });
                 }
+                "pan" => {
+                    assert!(v.len() == 2 && v[0] >= 1.0 && v[1] >= 1.0, "場面ファイル {line}行目: pan N D (N 方向・D ステップずつ)");
+                    sc.pan = Some((v[0] as u32, v[1] as u64));
+                }
                 k => panic!("場面ファイル {line}行目: 未知の要素 '{k}'"),
             }
         }
         assert!(!sc.room.is_empty(), "場面ファイルに room / roompoly が無い");
-        for s in &sc.sensors {
-            assert!(s.id < 8, "センサIDは0〜7");
-            assert!(sc.signed_distance(s.x, s.y) > 0.0, "センサ{}が部屋の空きの外にある", s.id);
+        for &step in &sc.change_steps() {
+            let now = sc.at_step(step);
+            for s in &sc.sensors {
+                assert!(s.id < 64, "センサIDは0〜63");
+                assert!(now.signed_distance(s.x, s.y) > 0.0, "センサ{}が部屋の空きの外にある (ステップ{step})", s.id);
+            }
+        }
+        sc
+    }
+
+    /// 形が切り替わるステップの一覧 (0 を含む昇順)
+    pub fn change_steps(&self) -> Vec<u64> {
+        let mut v: Vec<u64> = vec![0];
+        for m in &self.movers {
+            v.extend(m.poses.iter().map(|p| p.0));
+        }
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
+    /// ステップ step の形 (動く箱をその時の位置に置いた静止した場面)。
+    /// 動く箱は静止した遮蔽物の後ろに足す (動く箱の無い場面では自分と同じ内容)
+    pub fn at_step(&self, step: u64) -> Scene {
+        let mut sc = Scene {
+            room: self.room.clone(),
+            polys: self.polys.clone(),
+            circles: self.circles.clone(),
+            sensors: self.sensors.clone(),
+            movers: Vec::new(),
+            pan: self.pan,
+        };
+        for m in &self.movers {
+            if let Some(p) = m.pose_at(step) {
+                sc.polys.push(p.clone());
+            }
         }
         sc
     }
@@ -237,7 +342,13 @@ pub const STATUS_NO_TARGET: u32 = 255;
 pub fn make_frames(sc: &Scene, model: &SensorModel, steps: u64, seed: u64) -> Vec<Vec<Vec<(f64, u32)>>> {
     let mut rngs: Vec<Rng> = sc.sensors.iter().map(|s| Rng::new(derive_seed(seed, 1000 + s.id as u64))).collect();
     let mut frames = Vec::with_capacity(steps as usize);
-    for _ in 0..steps {
+    let changes = sc.change_steps();
+    let mut now = sc.at_step(0);
+    for step in 0..steps {
+        if step > 0 && changes.binary_search(&step).is_ok() {
+            now = sc.at_step(step);
+        }
+        let sc = &now;
         let mut per_sensor = Vec::with_capacity(sc.sensors.len());
         for (si, s) in sc.sensors.iter().enumerate() {
             let mut zones = Vec::with_capacity(model.cols as usize);
@@ -283,5 +394,24 @@ mod tests {
         assert!((sc.raycast(0.5, 1.5, 1.0, 0.0).unwrap() - 0.5).abs() < 1e-12);
         // 円に当たる
         assert!((sc.raycast(2.0, 3.0, 1.0, 0.0).unwrap() - 0.9).abs() < 1e-12);
+    }
+
+    #[test]
+    fn moving_box() {
+        let sc = Scene::parse(
+            "room 0 0 4 4
+movebox b 1 1 2 2
+move b 10 off
+move b 15 2.5 1 3.5 2
+sensor 0 0.5 1.5 0
+",
+        );
+        assert_eq!(sc.change_steps(), vec![0, 10, 15]);
+        // ステップ9までは (1,1)-(2,2) に当たり、10〜14は奥の壁、15からは (2.5,1)-(3.5,2) に当たる
+        assert!((sc.at_step(9).raycast(0.5, 1.5, 1.0, 0.0).unwrap() - 0.5).abs() < 1e-12);
+        assert!((sc.at_step(10).raycast(0.5, 1.5, 1.0, 0.0).unwrap() - 3.5).abs() < 1e-12);
+        assert!((sc.at_step(15).raycast(0.5, 1.5, 1.0, 0.0).unwrap() - 2.0).abs() < 1e-12);
+        assert!(sc.at_step(20).signed_distance(1.5, 1.5) > 0.0);
+        assert!(sc.at_step(0).signed_distance(1.5, 1.5) < 0.0);
     }
 }

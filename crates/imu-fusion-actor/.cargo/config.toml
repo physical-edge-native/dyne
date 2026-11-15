@@ -1,0 +1,4 @@
+# 状態が小さいので、実機用とシミュレータ用を分けず1種類だけ作る。
+# スタック8KB (既定1MBのままでは ESP32 の線形メモリ1ページ=64KB に収まらない)
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "link-arg=-zstack-size=8192"]

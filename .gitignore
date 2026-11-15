@@ -10,6 +10,17 @@
 /crates/swarm-agent-actor/target/
 /crates/heat2d-actor/target/
 /crates/sdf2d-grid-actor/target/
+/crates/mlp-actor/target/
+/crates/wave2d-actor/target/
+/crates/imu-fusion-actor/target/
+/crates/wave2d-actor/target-small/
+/crates/sdf2d-grid-actor/target-small/
+/crates/sdf2d-grid-actor/target-small-std/
+/crates/sdf2d-grid-actor/target-small-f32std/
+/crates/sdf2d-grid-actor/target-f32/
+/bench-c5/tools/recfuel/target/
+# 上に挙げていないクレートの個別ビルド出力も含め、target/ という名前のフォルダはすべて無視する (2026-11-15)
+target/
 
 # Cargo.lock の方針:
 # - dyne-host はバイナリなので Cargo.lock をコミットするのが Rust の慣例
@@ -60,6 +71,9 @@ mqtt_log/
 # Python のバイトコードキャッシュ
 __pycache__/
 
+# Python の仮想環境 (PC側ツールの依存ライブラリはここに入れる。グローバル環境を汚さない)
+.venv/
+
 # AOT実験の生成物 (wamrcで再生成できるためコミットしない)
 *.aot
 
@@ -90,9 +104,31 @@ slides/**/old25_degradation.jpg
 # 実機実測の記録 (measured/) も *.csv の例外として追跡する (実測の正本。詳細は measured/README.md)
 !measured/**/*.csv
 
+# ESP-IDF のパーティションテーブル (フラッシュの使い方の表) はソースなので追跡する (2026-11-15)
+!node-esp32/partitions_*.csv
+!bench-c5/partitions_*.csv
+
 # ESP-IDF (vl53-eval/ = VL53L5CX評価用ファーム)
 vl53-eval/build/
 vl53-eval/managed_components/
 vl53-eval/sdkconfig
 vl53-eval/sdkconfig.old
 vl53-eval/dependencies.lock
+
+# ESP-IDF (bench-c5/ = WASMアクターの速度・メモリ計測ファーム。方式・ターゲット別に build-*/ を作る)
+bench-c5/build/
+bench-c5/build-*/
+bench-c5/managed_components/
+bench-c5/sdkconfig
+bench-c5/sdkconfig.old
+bench-c5/dependencies.lock
+# bench-c5 の2次元の再生の記録 (計約1.1MB、tools/interp_bench.py make で再生成できる)
+bench-c5/assets/*.rec
+
+# node-esp32/ の ESP32-C5 向けの別ビルド (idf.py -B build-c5 -D SDKCONFIG=build-c5/sdkconfig。既定の build/・sdkconfig は ESP32 のまま)
+node-esp32/build-c5/
+
+# node-esp32/ の OTA 対応版のビルド (node-esp32/build.ps1。ターゲットごとに build-ota-esp32/・build-ota-esp32c5/、sdkconfig もその中)
+node-esp32/build-ota-*/
+# node-esp32/build.ps1 が重ねる手元の設定 (Wi-Fi の SSID・パスワード・ブローカーの URI。2026-11-13)
+node-esp32/sdkconfig.local

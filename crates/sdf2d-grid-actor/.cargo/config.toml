@@ -2,4 +2,6 @@
 # rustup / apt どちらの環境でも有効。リンカの差し替えはしない
 # (apt版Rustの場合のみ、環境変数 CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_LINKER=wasm-ld を併用)
 [target.wasm32-unknown-unknown]
-rustflags = ["-C", "link-arg=-zstack-size=32768"]
+# 2026-11-13: 32KB → 28KB。フル版に視野の印 (5KB) を足しても線形メモリを従来と同じ 136 ページに保ち、
+# シミュレータの出力 (先頭行の wasm memory) を変えないため。スタックの使用は数KB (docs/2026-11-11-shape-speedup.md)
+rustflags = ["-C", "link-arg=-zstack-size=28672"]

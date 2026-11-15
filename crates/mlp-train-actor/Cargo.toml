@@ -1,0 +1,25 @@
+[package]
+name = "mlp-train-actor"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+# cdylib = WASMアクター本体 / rlib = ネイティブの単体テスト用
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# 純Rustの数学関数 (tanh, exp, sqrt)。プラットフォーム非依存で決定論を保つ
+libm = "0.2"
+# .dynm の検証・読み出しと活性化関数を推論専用アクター (mlp-actor) と共有する部品
+mlp-core = { path = "../mlp-core" }
+
+[features]
+# 実機向けの縮小版: パラメータ上限 (推論側 2048、LM法 64) と作業領域を小さくする
+small = ["mlp-core/small"]
+
+[profile.release]
+panic = "abort"
+opt-level = "z"
+lto = true
+
+[workspace]

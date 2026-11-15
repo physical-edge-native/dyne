@@ -96,6 +96,28 @@ pub mod sdf2d {
     pub const CFG_SENSOR_Y: u32 = 12;
     /// センサの向き (x軸から反時計回り)
     pub const CFG_SENSOR_YAW: u32 = 13;
+    /// 古い観測を忘れる仕組み (2026-11-11、docs/2026-11-11-dynamic-shape.md)。
+    /// 既定値ではどれも働かず、従来とビット単位で同じ結果になる。
+    /// 重みの減衰率 λ (1ステップごとに w ← λ·w。既定 1 = 減衰しない)
+    pub const CFG_DECAY: u32 = 14;
+    /// 減衰した重みがこれ未満になった格子点を未観測 (w = 0, d = 0) に戻す (既定 0 = 戻さない)
+    pub const CFG_W_FORGET: u32 = 15;
+    /// 食い違いの閾値 τ: 新しい観測と統合済みの値の差が τ を超えたら、統合済みの重みを
+    /// CFG_DISAGREE_W まで下げてから統合する (既定 0 = 使わない)
+    pub const CFG_DISAGREE: u32 = 16;
+    /// 食い違いのときに残す重み (既定 1)
+    pub const CFG_DISAGREE_W: u32 = 17;
+    /// 距離の反復の間引き n: ステップ番号が n の倍数のときだけ反復する (既定 1 = 毎ステップ。
+    /// 2026-11-11、docs/2026-11-11-shape-speedup.md。表面の近くの φ は観測 d そのものなので、
+    /// 間引いて遅くなるのは表面から離れた点への距離の伝わり方だけ)
+    pub const CFG_SWEEP_EVERY: u32 = 18;
+    /// 減衰・忘却を視野の中の格子点だけに効かせる (0/1。既定 0 = 全格子点を毎ステップ減衰)。
+    /// 1 なら、そのステップに統合する光線が通る格子点だけを、最初の統合の直前に1回減衰・忘却する。
+    /// サーボで別の向きを見ている間に壁が消えないようにする (2026-11-13、docs/2026-11-11-shape-speedup.md)
+    pub const CFG_DECAY_IN_VIEW: u32 = 19;
+    /// CFG_DECAY_IN_VIEW = 1 のとき、視野の外の格子点に毎ステップ掛ける減衰率 (既定 1 = 保つ)。
+    /// 1 未満なら、見えなくなった古い表面 (動かした物の、今は隠れた側の跡) もいずれ忘れる (2026-11-13)
+    pub const CFG_DECAY_OUT: u32 = 20;
 
     /// 距離の定義の値
     pub const RANGE_DEF_RADIAL: u32 = 0;
@@ -109,4 +131,101 @@ pub mod sdf2d {
     /// dyne_get_aux の量の番号
     pub const AUX_D: u32 = 1;
     pub const AUX_W: u32 = 2;
+}
+
+/// 2次元の波動方程式のアクター (wave2d-actor) の dyne_cfg のキー (2026-11-11、
+/// docs/2026-11-11-wave2d.md)。dyne_init2d の前に注入する (init をまたいで保持)。
+/// 差込口の残り (面・メールボックス・観測) は field2d と同じ。dyne_init2d の alpha は
+/// 波の速さ c として解釈する。
+pub mod wave2d {
+    /// 初期条件の種類 (値は IC_*。既定 IC_SIN_MODE)。初速度はどれも0
+    pub const CFG_IC: u32 = 0;
+    /// 定在波のモード番号 m (x方向)、n (y方向)。既定 1, 1
+    pub const CFG_MODE_M: u32 = 1;
+    pub const CFG_MODE_N: u32 = 2;
+    /// 振幅 (既定 1)
+    pub const CFG_AMP: u32 = 3;
+    /// ガウス型の山の中心 (x, y) と幅 σ (既定 0.5, 0.5, 0.05)
+    pub const CFG_GX: u32 = 4;
+    pub const CFG_GY: u32 = 5;
+    pub const CFG_SIGMA: u32 = 6;
+    /// 吸収境界にする外周の面のビット列 (bit f = 面ID f。既定 0 = なし)。界面の面では無視。
+    /// 1次のエングクイスト・マイダ条件をムーアの方法で離散化したものを使う
+    pub const CFG_ABSORB: u32 = 7;
+
+    /// 初期条件: sin(mπx)·sin(nπy) (値固定0の正方形の定在波)
+    pub const IC_SIN_MODE: u32 = 0;
+    /// 初期条件: ガウス型の山 A·exp(−((x−gx)²+(y−gy)²)/(2σ²))
+    pub const IC_GAUSS: u32 = 1;
+    /// 初期条件: cos(mπx)·cos(nπy) (ゼロ勾配の正方形の定在波)
+    pub const IC_COS_MODE: u32 = 2;
+}
+
+/// IMU の値を隣との通信だけで融合するアクター (imu-fusion-actor) の差込口の共有定数
+/// (2026-11-13、docs/2026-11-13-imu-fusion.md)。差込口は field2d と同じ一式
+/// (dyne_cfg → dyne_set_face → dyne_init2d、メールボックス、dyne_step、dyne_len/dyne_get) に、
+/// 標本を入れる dyne_imu_push と待ち合わせ用の dyne_imu_need_until_us を足したもの。
+/// 隣は「界面」の面 (field2d::BC_INTERFACE) で表す (直線・環・格子は1ノードあたり隣4つまで)。
+/// dyne_init2d(nx, ny, ix0, iy0, h, alpha, dt) は dt (合意の1反復の周期 [s]) だけを使う。
+pub mod imu {
+    /// dyne_cfg のキー: 1区間のステップ数 M (区間 = 標本を平均する時間窓。1区間 = M·dt。既定 10)
+    pub const CFG_EPOCH_STEPS: u32 = 0;
+    /// dyne_cfg のキー: 標本の区間への割り当て方 (値は TIME_*。既定 TIME_STAMP)
+    pub const CFG_TIME_MODE: u32 = 1;
+    /// dyne_cfg のキー: ステップ0の時刻 t0 [µs] (同期した時刻。f64 で整数を正確に運べる範囲)。既定 0
+    pub const CFG_T0_US: u32 = 2;
+    /// dyne_cfg のキー: 標本の時刻印に足すずれ [µs] (実験で時計をわざとずらすため。既定 0)
+    pub const CFG_TS_OFFSET_US: u32 = 3;
+    /// dyne_cfg のキー: 相補フィルタの係数 α (角度 = α·(前の角度 + 角速度·区間) + (1−α)·加速度からの角度。既定 0.9)
+    pub const CFG_CF_ALPHA: u32 = 4;
+    /// dyne_cfg のキー: 角速度のゼロ点の較正に使う最初の区間の数 (その間は板を静止させる。既定 0 = 較正しない)
+    pub const CFG_GYRO_CAL_EPOCHS: u32 = 5;
+    /// dyne_cfg のキー: 合意の始め方 (値は CONS_*。既定 CONS_DYNAMIC)
+    pub const CFG_CONSENSUS: u32 = 6;
+
+    /// 合意の始め方: 区間ごとに状態を自分の和で置き直す (区間内の M 回の反復だけで平均に近づける)
+    pub const CONS_RESET: u32 = 0;
+    /// 合意の始め方: 動的合意平均。状態に「今の区間の和 − 前の区間の和」だけを足す。
+    /// 全ノードの状態の和は常に今の区間の和の総和に等しく、変わらない成分 (ゼロ点のずれ) の
+    /// 食い違いは区間をまたいで混ざり続けて消える。隣の値が届かなかった反復があると和の誤差が残り続ける
+    pub const CONS_DYNAMIC: u32 = 1;
+
+    /// 割り当て方: 時刻印で区間を決める (区間 e は (t0 + e·E, t0 + (e+1)·E]、E = M·dt)
+    pub const TIME_STAMP: u32 = 0;
+    /// 割り当て方: 時刻印を使わず、届いた順 (前の区間を閉じた後に入った標本を今の区間に入れる)
+    pub const TIME_ARRIVAL: u32 = 1;
+
+    /// 合意平均で交換する界面サンプル列の1点あたりの量の数:
+    /// [次数 (隣の数), 合意の状態 x (重み, 重み×平均 ax, ay, az, gx, gy, gz)] (count = 1)。
+    /// 重みは区間に標本があったノードで 1、無ければ 0 (ノードごとに等しい重みで平均する)
+    pub const PER_POINT: u32 = 8;
+
+    /// dyne_imu_push の戻り値: 受理
+    pub const PUSH_OK: i32 = 0;
+    /// dyne_imu_push の戻り値: その区間はもう閉じていた (遅れた標本。捨てて計数)
+    pub const PUSH_LATE: i32 = 1;
+    /// dyne_imu_push の戻り値: 先の区間すぎる (ため置きの外。捨てて計数)
+    pub const PUSH_EARLY: i32 = 2;
+    /// dyne_imu_push の戻り値: dyne_init2d の前
+    pub const PUSH_NOT_READY: i32 = -1;
+
+    /// dyne_get の番号 (dyne_len = G_LEN)。角度はラジアン、加速度 m/s²、角速度 rad/s
+    /// 最後に融合を終えた区間の番号 (まだ無ければ −1)
+    pub const G_EPOCH: u32 = 0;
+    /// 標本のあったノードの割合 (合意の状態の重みの平均。全ノードに標本があれば 1 に収束する)
+    pub const G_FUSED_N: u32 = 1;
+    /// 融合した ax, ay, az, gx, gy, gz (6個続く)
+    pub const G_FUSED: u32 = 2;
+    pub const G_FUSED_ROLL: u32 = 8;
+    pub const G_FUSED_PITCH: u32 = 9;
+    /// 自分だけの標本数・平均 (6個)・角度 (同じ区間。比較用)
+    pub const G_LOCAL_N: u32 = 10;
+    pub const G_LOCAL: u32 = 11;
+    pub const G_LOCAL_ROLL: u32 = 17;
+    pub const G_LOCAL_PITCH: u32 = 18;
+    /// 計数: 遅れた標本・先すぎる標本・届かなかった隣の値
+    pub const G_LATE: u32 = 19;
+    pub const G_EARLY: u32 = 20;
+    pub const G_MISSING: u32 = 21;
+    pub const G_LEN: u32 = 22;
 }

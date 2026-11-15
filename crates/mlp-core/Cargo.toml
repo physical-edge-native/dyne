@@ -1,0 +1,22 @@
+[package]
+name = "mlp-core"
+version = "0.1.0"
+edition = "2021"
+
+# 部品のクレート (rlib のみ)。差込口とパニック時の処理は持たない。
+# 使う側: mlp-actor / mlp-train-actor / heat2d-mlp-actor
+
+[dependencies]
+# 純Rustの数学関数 (tanh, exp)。プラットフォーム非依存で決定論を保つ
+libm = "0.2"
+
+[features]
+# 実機向けの縮小版: パラメータ数の上限を 2048 に下げ、線形メモリを小さくする
+small = []
+
+[profile.release]
+panic = "abort"
+opt-level = "z"
+lto = true
+
+[workspace]

@@ -1,0 +1,21 @@
+[package]
+name = "heat2d-mlp-actor"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+# cdylib = WASMアクター本体 / rlib = ネイティブの単体テスト用
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# 2次元熱拡散の区画 (差込口・メールボックス・パニック時の処理をそのまま使う)
+heat2d-actor = { path = "../heat2d-actor" }
+# .dynm の検証・読み出し・推論の部品
+mlp-core = { path = "../mlp-core" }
+
+[profile.release]
+panic = "abort"
+opt-level = "z"
+lto = true
+
+[workspace]

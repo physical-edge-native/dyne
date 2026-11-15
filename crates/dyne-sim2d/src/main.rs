@@ -29,6 +29,20 @@
 //!     --pause 3@2000:6000 --partition 0-1@10000:15000
 //!   (pause: ノード3を仮想2〜6秒停止。partition: ノード0と1の間を仮想10〜15秒分断)
 //!   dyne-sim2d --wasm sdf2d_grid_actor.wasm --scene scenes/empty.txt --px 2 --py 2 --steps 300
+//!   dyne-sim2d --wasm heat2d_mlp_actor.wasm --model field.dynm --px 2 --py 2 --steps 500
+//!   (--model: 外部で学習したモデル (ONNX → scripts/onnx_import.py → .dynm) を各ノードに配り、
+//!    各ノードが自分の区画の初期場をそのモデルの予測で作る。dyne_model_load を持つアクター用。
+//!    指定しなければ従来の経路と完全に同じ動作)
+//!
+//! 形の変化への追従 (2026-11-11、docs/2026-11-11-dynamic-shape.md):
+//!   --decay λ --w-forget w --disagree τ --disagree-w w … 古い観測を忘れる仕組みの設定
+//!   --sweep-every n … 形の格子型アクターの距離の反復を n ステップに1回にする (既定 毎ステップ)
+//!   --decay-in-view … 減衰・忘却を視野の中 (そのステップに統合する光線が通る格子点) だけに効かせる
+//!   --decay-out λ … --decay-in-view のとき、視野の外の格子点を毎ステップ λ で減衰させる (既定 保つ)
+//!   --track-scale-m L … --track-csv の採点 (幻の表面の閾値 2L・覆い率の半径 L) を刻み h の代わりに L で行う
+//!     (指定しなければアクターに渡さず、従来と同じ動作・出力)
+//!   --track-csv 経路 [--track-every N] … 単一ノード解の N ステップごとの採点を CSV に書く
+//!     (その時刻の正解の形状に対して。動く箱のある場面ファイルで追従の時間を測る)
 
 mod scene;
 
@@ -75,6 +89,9 @@ struct Config {
     outer_value: f64,
     field_csv: Option<String>,
     quiet: bool,
+    /// 初期場のモデル (.dynm) の経路と中身 (heat2d-mlp-actor 用。None なら使わない)
+    model: Option<String>,
+    model_bytes: Option<Vec<u8>>,
     // ---- 格子型アクター (測距による形状構成) ----
     scene: Option<String>,
     /// 格子の刻み [m]
@@ -90,6 +107,34 @@ struct Config {
     fov_deg: f64,
     max_range: f64,
     zones: u32,
+    /// 古い観測を忘れる仕組み (None = アクターに渡さない = アクターの既定値)
+    decay: Option<f64>,
+    w_forget: Option<f64>,
+    dis_tau: Option<f64>,
+    dis_w: Option<f64>,
+    /// --sweep-every n: 形の格子型アクターの距離の反復を n ステップに1回にする (既定は渡さない = 毎ステップ。
+    /// 2026-11-11、docs/2026-11-11-shape-speedup.md)
+    sweep_every: Option<f64>,
+    /// --decay-in-view: 減衰・忘却を視野の中の格子点だけに効かせる (2026-11-13、docs/2026-11-11-shape-speedup.md)
+    decay_in_view: Option<f64>,
+    /// --decay-out λ: --decay-in-view のとき視野の外の格子点に掛ける減衰率 (既定は渡さない = 保つ)
+    decay_out: Option<f64>,
+    /// --track-scale-m L: --track-csv の採点の尺度を格子の刻みの代わりに固定の長さ L にする (2026-11-13)
+    track_scale: Option<f64>,
+    track_csv: Option<String>,
+    track_every: u64,
+    /// --cfg キー=値 (繰り返し可): 格子型以外のアクターへ dyne_init2d の前に dyne_cfg で渡す
+    /// (波動方程式のアクターの初期条件・吸収境界など。2026-11-11、docs/2026-11-11-wave2d.md)
+    extra_cfg: Vec<(u32, f64)>,
+    /// --dump-node N --dump-file 経路: ノード N のアクターへの呼び出し (設定・面・初期化・
+    /// 受信メールボックス・送信メールボックス・ステップ) を記録し、最後に期待 CRC を付けて書き出す。
+    /// 実機の計測ファーム (bench-c5) が同じ呼び出しを再生して時間を測り、CRC を照合する
+    /// (2026-11-11、docs/2026-11-11-esp32-interp-bench.md)
+    dump_node: Option<usize>,
+    dump_file: Option<String>,
+    /// --single-wasm 経路: 単一ノード解だけを別の wasm で解く (実機用の縮小版の分割解を、
+    /// フル版の単一ノード解と比べるため。縮小版は全域を1区画に持てない)
+    single_wasm: Option<String>,
 }
 
 fn parse_ms(s: &str) -> u64 {
@@ -119,6 +164,8 @@ fn parse_args() -> Config {
         outer_value: 0.0,
         field_csv: None,
         quiet: false,
+        model: None,
+        model_bytes: None,
         scene: None,
         h: 0.05,
         mu: None,
@@ -130,6 +177,20 @@ fn parse_args() -> Config {
         fov_deg: 45.0,
         max_range: 4.0,
         zones: 8,
+        decay: None,
+        w_forget: None,
+        dis_tau: None,
+        dis_w: None,
+        sweep_every: None,
+        decay_in_view: None,
+        decay_out: None,
+        track_scale: None,
+        track_csv: None,
+        track_every: 1,
+        extra_cfg: Vec::new(),
+        dump_node: None,
+        dump_file: None,
+        single_wasm: None,
     };
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -181,6 +242,7 @@ fn parse_args() -> Config {
                 }
             }
             "--field-csv" => c.field_csv = Some(val),
+            "--model" => c.model = Some(val),
             "--scene" => c.scene = Some(val),
             "--h" => c.h = val.parse().unwrap(),
             "--mu" => c.mu = Some(val.parse().unwrap()),
@@ -201,6 +263,26 @@ fn parse_args() -> Config {
             "--fov-deg" => c.fov_deg = val.parse().unwrap(),
             "--max-range" => c.max_range = val.parse().unwrap(),
             "--zones" => c.zones = val.parse().unwrap(),
+            "--decay" => c.decay = Some(val.parse().unwrap()),
+            "--w-forget" => c.w_forget = Some(val.parse().unwrap()),
+            "--disagree" => c.dis_tau = Some(val.parse().unwrap()),
+            "--disagree-w" => c.dis_w = Some(val.parse().unwrap()),
+            "--sweep-every" => c.sweep_every = Some(val.parse().unwrap()),
+            "--decay-out" => c.decay_out = Some(val.parse().unwrap()),
+            "--decay-in-view" => {
+                c.decay_in_view = Some(1.0);
+                used = false;
+            }
+            "--track-csv" => c.track_csv = Some(val),
+            "--track-every" => c.track_every = val.parse().unwrap(),
+            "--track-scale-m" => c.track_scale = Some(val.parse().unwrap()),
+            "--dump-node" => c.dump_node = Some(val.parse().unwrap()),
+            "--dump-file" => c.dump_file = Some(val),
+            "--single-wasm" => c.single_wasm = Some(val),
+            "--cfg" => {
+                let (k, v) = val.split_once('=').expect("--cfg キー=値");
+                c.extra_cfg.push((k.parse().unwrap(), v.parse().unwrap()));
+            }
             "--quiet" => {
                 c.quiet = true;
                 used = false;
@@ -233,10 +315,33 @@ struct Actor2d {
     late: Option<wasmi::TypedFunc<(), u64>>,
     overflow: Option<wasmi::TypedFunc<(), u64>>,
     pending: Option<wasmi::TypedFunc<(), u32>>,
+    // ---- 初期場をモデルで作るアクターのみ (heat2d-mlp-actor) ----
+    model_buf: Option<wasmi::TypedFunc<(), u32>>,
+    model_load: Option<wasmi::TypedFunc<u32, i32>>,
+    model_init: Option<wasmi::TypedFunc<(), i32>>,
     buf: u32,
     cap: u32,
     memory_pages: u64,
+    /// 呼び出しの記録 (--dump-node のノードのみ Some)
+    log: Option<Vec<u8>>,
 }
+
+// 呼び出しの記録の書式 (すべて little endian、bench-c5/main/bench.c の再生と一致させること)
+//   先頭 "DYNEREC1"
+//   1 CFG   u32 key, f64 val
+//   2 FACE  u32 face, u32 kind, u64 param
+//   3 INIT  u32 nx, ny, ix0, iy0, f64 h, alpha, dt
+//   4 INBOX u32 len, len バイト (終端印 0 を含む)
+//   5 OUTBOX
+//   6 STEP
+//   7 END   u32 点数, u32 crc(φ), u32 crc(d), u32 crc(w) (格子型でなければ d・w は 0)
+const REC_CFG: u8 = 1;
+const REC_FACE: u8 = 2;
+const REC_INIT: u8 = 3;
+const REC_INBOX: u8 = 4;
+const REC_OUTBOX: u8 = 5;
+const REC_STEP: u8 = 6;
+const REC_END: u8 = 7;
 
 impl Actor2d {
     fn load(engine: &wasmi::Engine, module: &wasmi::Module) -> Self {
@@ -276,11 +381,15 @@ impl Actor2d {
             late: opt!("dyne_late", (), u64),
             overflow: opt!("dyne_overflow", (), u64),
             pending: opt!("dyne_pending", (), u32),
+            model_buf: opt!("dyne_load_buf", (), u32),
+            model_load: opt!("dyne_model_load", u32, i32),
+            model_init: opt!("dyne_model_init_field", (), i32),
             memory,
             store,
             buf: 0,
             cap: 0,
             memory_pages,
+            log: None,
         };
         a.buf = msg_buf.call(&mut a.store, ()).unwrap();
         a.cap = msg_cap.call(&mut a.store, ()).unwrap();
@@ -293,6 +402,9 @@ impl Actor2d {
 
     /// 送信メールボックスの中身 (枠つきメッセージ列) を取り出す
     fn collect_outbox(&mut self) -> Vec<u8> {
+        if let Some(l) = self.log.as_mut() {
+            l.push(REC_OUTBOX);
+        }
         let n = self.outbox_read.call(&mut self.store, (self.buf, self.cap)).unwrap() as usize;
         let mut bundle = vec![0u8; n];
         if n > 0 {
@@ -307,12 +419,22 @@ impl Actor2d {
         b.extend_from_slice(framed);
         b.extend_from_slice(&0u32.to_le_bytes());
         assert!(b.len() <= self.cap as usize, "配送単位が作業領域に入らない");
+        if let Some(l) = self.log.as_mut() {
+            l.push(REC_INBOX);
+            l.extend_from_slice(&(b.len() as u32).to_le_bytes());
+            l.extend_from_slice(&b);
+        }
         self.memory.write(&mut self.store, self.buf as usize, &b).unwrap();
         self.inbox_write.call(&mut self.store, (self.buf, b.len() as u32)).unwrap()
     }
 
     fn cfg_set(&mut self, key: u32, val: f64) {
         let f = self.cfg.expect("dyne_cfg が無い");
+        if let Some(l) = self.log.as_mut() {
+            l.push(REC_CFG);
+            l.extend_from_slice(&key.to_le_bytes());
+            l.extend_from_slice(&val.to_le_bytes());
+        }
         f.call(&mut self.store, (key, val)).unwrap();
     }
 
@@ -415,6 +537,9 @@ fn setup_actor(
     shape: Option<&ShapeCfg>,
     sensors: &[&scene::Sensor],
 ) {
+    for &(key, v) in &cfg.extra_cfg {
+        a.cfg_set(key, v);
+    }
     if let Some(sc) = shape {
         a.cfg_set(sdf2d::CFG_ORIGIN_X, g.x0);
         a.cfg_set(sdf2d::CFG_ORIGIN_Y, g.y0);
@@ -426,6 +551,19 @@ fn setup_actor(
         a.cfg_set(sdf2d::CFG_MAX_RANGE, cfg.max_range);
         a.cfg_set(sdf2d::CFG_FOV, cfg.fov_deg.to_radians());
         a.cfg_set(sdf2d::CFG_ZONE_ROW, 0.0);
+        for (key, v) in [
+            (sdf2d::CFG_DECAY, cfg.decay),
+            (sdf2d::CFG_W_FORGET, cfg.w_forget),
+            (sdf2d::CFG_DISAGREE, cfg.dis_tau),
+            (sdf2d::CFG_DISAGREE_W, cfg.dis_w),
+            (sdf2d::CFG_SWEEP_EVERY, cfg.sweep_every),
+            (sdf2d::CFG_DECAY_IN_VIEW, cfg.decay_in_view),
+            (sdf2d::CFG_DECAY_OUT, cfg.decay_out),
+        ] {
+            if let Some(v) = v {
+                a.cfg_set(key, v);
+            }
+        }
         for s in sensors {
             a.cfg_set(sdf2d::CFG_SENSOR_SEL, s.id as f64);
             a.cfg_set(sdf2d::CFG_SENSOR_X, s.x);
@@ -438,13 +576,37 @@ fn setup_actor(
             Some((iface, _)) => (BC_INTERFACE, iface as u64),
             None => (cfg.outer_kind, cfg.outer_value.to_bits()),
         };
+        if let Some(l) = a.log.as_mut() {
+            l.push(REC_FACE);
+            l.extend_from_slice(&face.to_le_bytes());
+            l.extend_from_slice(&kind.to_le_bytes());
+            l.extend_from_slice(&param.to_le_bytes());
+        }
         a.set_face.call(&mut a.store, (face, kind, param)).unwrap();
+    }
+    if let Some(l) = a.log.as_mut() {
+        l.push(REC_INIT);
+        for v in [b.nx as u32, b.ny as u32, b.ix0 as u32, b.iy0 as u32] {
+            l.extend_from_slice(&v.to_le_bytes());
+        }
+        for v in [g.h, cfg.alpha, cfg.dt] {
+            l.extend_from_slice(&v.to_le_bytes());
+        }
     }
     let rc = a
         .init
         .call(&mut a.store, (b.nx as u32, b.ny as u32, b.ix0 as u32, b.iy0 as u32, g.h, cfg.alpha, cfg.dt))
         .unwrap();
     assert_eq!(rc, 0, "dyne_init2d が失敗 (rc={rc}, 区画 {:?})", b);
+    if let Some(model) = &cfg.model_bytes {
+        // 各ノードへ .dynm を配り、ノード自身が自分の区画の初期場を推論で作る
+        let buf = a.model_buf.expect("dyne_load_buf が無い").call(&mut a.store, ()).unwrap();
+        a.memory.write(&mut a.store, buf as usize, model).unwrap();
+        let rc = a.model_load.unwrap().call(&mut a.store, model.len() as u32).unwrap();
+        assert_eq!(rc, 0, "dyne_model_load が失敗 (rc={rc})");
+        let rc = a.model_init.expect("dyne_model_init_field が無い").call(&mut a.store, ()).unwrap();
+        assert_eq!(rc, 0, "dyne_model_init_field が失敗 (rc={rc}, 区画 {:?})", b);
+    }
 }
 
 /// 1メッセージを枠 ([u32 len][メッセージ]) に入れて追記する
@@ -534,9 +696,19 @@ struct Sim {
     /// 測距フレーム [ステップ][センサ添字] (格子型アクターのみ)
     frames: Vec<Vec<Vec<(f64, u32)>>>,
     sensor_ids: Vec<u32>,
+    /// サーボの首振りの模擬 (場面ファイルの pan N D。無ければ全センサが毎ステップ測る)
+    pan: Option<(u32, u64)>,
 }
 
 impl Sim {
+    /// センサ (場面のセンサ一覧の添字 si) がステップ step で測るか (pan N D の首振りの模擬)
+    fn sensor_active(&self, si: usize, step: u64) -> bool {
+        match self.pan {
+            Some((n, d)) => self.sensor_ids[si] % n == ((step / d) % n as u64) as u32,
+            None => true,
+        }
+    }
+
     fn schedule(&mut self, t: u64, ev: Ev) {
         self.queue.schedule(t, ev);
     }
@@ -620,6 +792,9 @@ impl Sim {
         if !self.frames.is_empty() {
             let sensors = self.nodes[node].sensors.clone();
             for si in sensors {
+                if !self.sensor_active(si, step) {
+                    continue;
+                }
                 let unit = frame_unit(self.sensor_ids[si], step, &self.frames[step as usize][si]);
                 let rc = self.nodes[node].actor.deliver(&unit);
                 assert_eq!(rc, INBOX_OK, "測距フレームが受理されない (ノード{node})");
@@ -670,6 +845,9 @@ impl Sim {
         let now = self.now_us;
         let n = &mut self.nodes[node];
         n.wait_us += now - n.wait_since;
+        if let Some(l) = n.actor.log.as_mut() {
+            l.push(REC_STEP);
+        }
         let rc = n.actor.step.call(&mut n.actor.store, ()).unwrap();
         assert_eq!(rc, STEP_OK, "未受領の界面を抱えて計算した (ノード{node})");
         n.phase = Phase::Computing;
@@ -887,6 +1065,119 @@ fn shape_report(out: &mut String, sc: &Scene, f: &Fields, nx: usize, ny: usize, 
     ).unwrap();
 }
 
+/// 推定した表面 (φ のゼロ等値線) の通過点。表示 (scripts/twin_demo.py) と同じく、
+/// 観測済み (w>0) で |φ| < 2μ の隣り合う2点の間で符号が変わる所を線形補間で取る
+fn zero_crossings(f: &Fields, nx: usize, ny: usize, g: &GridGeom, mu: f64) -> Vec<(f64, f64)> {
+    let mut out = Vec::new();
+    let ok = |k: usize| f.w[k] > 0.0 && f.phi[k].abs() < 2.0 * mu;
+    for j in 0..ny {
+        for i in 0..nx {
+            let a = j * nx + i;
+            for (b, dx, dy) in [(a + 1, 1.0, 0.0), (a + nx, 0.0, 1.0)] {
+                if (dx > 0.0 && i + 1 >= nx) || (dy > 0.0 && j + 1 >= ny) {
+                    continue;
+                }
+                if !ok(a) || !ok(b) || (f.phi[a] < 0.0) == (f.phi[b] < 0.0) {
+                    continue;
+                }
+                let t = f.phi[a] / (f.phi[a] - f.phi[b]);
+                out.push((g.x0 + (i as f64 + t * dx) * g.h, g.y0 + (j as f64 + t * dy) * g.h));
+            }
+        }
+    }
+    out
+}
+
+/// 点から多角形の周までの距離
+fn poly_dist(p: (f64, f64), poly: &[(f64, f64)]) -> f64 {
+    let n = poly.len();
+    (0..n)
+        .map(|i| {
+            let (a, b) = (poly[i], poly[(i + 1) % n]);
+            let (ex, ey) = (b.0 - a.0, b.1 - a.1);
+            let l2 = ex * ex + ey * ey;
+            let t = if l2 > 0.0 { (((p.0 - a.0) * ex + (p.1 - a.1) * ey) / l2).clamp(0.0, 1.0) } else { 0.0 };
+            ((a.0 + t * ex - p.0).powi(2) + (a.1 + t * ey - p.1).powi(2)).sqrt()
+        })
+        .fold(f64::MAX, f64::min)
+}
+
+/// 追従の採点 (CSV の1行)。step の時刻の正解の形状に対して:
+/// 通過点の数, 静止した表面の付近の通過点の位置の誤差 (平均・95%点), 幻の表面 (正解の表面から 2h より
+/// 遠い通過点) の数, そのうち動く箱の今でない位置の付近 (μ 以内) のもの, 動く箱の今の位置の
+/// 表面の覆い率と誤差の平均, 静止した表面の覆い率
+fn track_row(full: &Scene, step: u64, f: &Fields, nx: usize, ny: usize, g: &GridGeom, mu: f64, sc: f64) -> String {
+    // sc = 採点の尺度 (幻の表面の閾値 2·sc、覆い率の半径・標本の間隔 sc)。既定は格子の刻み h
+    // (--track-scale-m で固定の長さにでき、刻みの違う実行を同じ基準で比べられる)
+    let now = full.at_step(step);
+    let xs = zero_crossings(f, nx, ny, g, mu);
+    let cur: Vec<&Vec<(f64, f64)>> = full.movers.iter().filter_map(|m| m.pose_at(step)).collect();
+    let all_poses: Vec<&Vec<(f64, f64)>> =
+        full.movers.iter().flat_map(|m| m.poses.iter().filter_map(|(_, p)| p.as_ref())).collect();
+    let others: Vec<&Vec<(f64, f64)>> =
+        all_poses.iter().copied().filter(|p| !cur.iter().any(|c| std::ptr::eq(*c, *p))).collect();
+    let near = |p: (f64, f64), set: &[&Vec<(f64, f64)>], r: f64| set.iter().any(|q| poly_dist(p, q) <= r);
+    let tau = 2.0 * sc;
+    let mut stat = Vec::new();
+    let mut mov = Vec::new();
+    let (mut phantom, mut phantom_old) = (0usize, 0usize);
+    for &p in &xs {
+        let e = now.signed_distance(p.0, p.1).abs();
+        if e > tau {
+            phantom += 1;
+            if near(p, &others, mu) {
+                phantom_old += 1;
+            }
+            continue;
+        }
+        if near(p, &cur, tau) {
+            mov.push(e);
+        } else if !near(p, &all_poses, tau) {
+            stat.push(e);
+        }
+    }
+    stat.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let mean = |v: &[f64]| if v.is_empty() { f64::NAN } else { v.iter().sum::<f64>() / v.len() as f64 };
+    let p95 = |v: &[f64]| if v.is_empty() { f64::NAN } else { v[((v.len() - 1) as f64 * 0.95) as usize] };
+    // 覆い率: 表面上の間隔 h の標本点のうち、h 以内に通過点があるもの
+    let covered = |pts: &[(f64, f64)]| -> (usize, usize) {
+        let c = pts
+            .iter()
+            .filter(|s| xs.iter().any(|x| (x.0 - s.0).powi(2) + (x.1 - s.1).powi(2) <= sc * sc))
+            .count();
+        (c, pts.len())
+    };
+    let mut mov_samples = Vec::new();
+    for p in &cur {
+        let tmp = Scene { room: (*p).clone(), polys: Vec::new(), circles: Vec::new(), sensors: Vec::new(), movers: Vec::new(), pan: None };
+        mov_samples.extend(tmp.surface_samples(sc));
+    }
+    // 静止した表面 = 動く箱を除いた場面の表面
+    let stat_scene = Scene {
+        room: full.room.clone(),
+        polys: full.polys.clone(),
+        circles: full.circles.clone(),
+        sensors: Vec::new(),
+        movers: Vec::new(),
+        pan: None,
+    };
+    let stat_samples = stat_scene.surface_samples(sc);
+    let (mc, mn) = covered(&mov_samples);
+    let (sc, sn) = covered(&stat_samples);
+    format!(
+        "{},{},{:.6},{:.6},{},{},{:.4},{:.6},{:.4}",
+        step,
+        xs.len(),
+        mean(&stat),
+        p95(&stat),
+        phantom,
+        phantom_old,
+        if mn > 0 { mc as f64 / mn as f64 } else { f64::NAN },
+        mean(&mov),
+        sc as f64 / sn.max(1) as f64
+    )
+}
+
 fn main() {
     let mut cfg = parse_args();
     let (px, py) = (cfg.px, cfg.py);
@@ -902,7 +1193,21 @@ fn main() {
     let bytes = std::fs::read(&cfg.wasm).expect("wasmの読み込み");
     let engine = wasmi::Engine::default();
     let module = wasmi::Module::new(&engine, &bytes[..]).expect("wasmのコンパイル");
-    let is_shape = Actor2d::load(&engine, &module).is_shape();
+    let probe = Actor2d::load(&engine, &module);
+    let is_shape = probe.is_shape();
+    // 波動方程式のアクター (dyne_courant を持つ。alpha = 波の速さ c): 熱拡散の安定条件の検査と
+    // 解析解を使わず、クーラン数と最大振幅を報告する (限界をまたぐ掃引のため止めない)
+    let is_wave = module.exports().any(|e| e.name() == "dyne_courant");
+    assert!(cfg.extra_cfg.is_empty() || (!is_shape && probe.cfg.is_some()), "--cfg は dyne_cfg を持つ格子型以外のアクター用");
+    if let Some(path) = &cfg.model {
+        assert!(!is_shape, "--model は熱拡散のアクター用");
+        assert!(
+            probe.model_load.is_some() && probe.model_init.is_some(),
+            "--model には dyne_model_load / dyne_model_init_field を持つアクター (heat2d-mlp-actor) が必要"
+        );
+        cfg.model_bytes = Some(std::fs::read(path).expect("--model の読み込み"));
+    }
+    drop(probe);
 
     // 格子の幾何と、格子型アクターなら場面・測距フレーム
     let (geom, scene, shape_cfg) = if is_shape {
@@ -920,7 +1225,7 @@ fn main() {
         assert!(cfg.scene.is_none(), "--scene は格子型アクター用");
         let h = 1.0 / ((cfg.nx - 1) as f64);
         let r = cfg.alpha * cfg.dt / (h * h);
-        assert!(r <= 0.25, "陽解法の安定条件 r = α·dt/h² ≤ 1/4 を満たさない (r = {r})");
+        assert!(is_wave || r <= 0.25, "陽解法の安定条件 r = α·dt/h² ≤ 1/4 を満たさない (r = {r})");
         (GridGeom { x0: 0.0, y0: 0.0, h }, None, None)
     };
     assert!(cfg.nx >= 3 && cfg.ny >= 3, "格子は3×3点以上");
@@ -962,6 +1267,10 @@ fn main() {
     let mut nodes = Vec::new();
     for (ni, b) in blocks.iter().enumerate() {
         let mut actor = Actor2d::load(&engine, &module);
+        if cfg.dump_node == Some(ni) {
+            assert!(cfg.model_bytes.is_none(), "--dump-node は --model と併用できない");
+            actor.log = Some(b"DYNEREC1".to_vec());
+        }
         let mine: Vec<&scene::Sensor> = match &scene {
             Some(sc) => node_sensors[ni].iter().map(|&si| &sc.sensors[si]).collect(),
             None => Vec::new(),
@@ -1006,6 +1315,7 @@ fn main() {
         now_us: 0,
         frames,
         sensor_ids,
+        pan: scene.as_ref().and_then(|s| s.pan),
     };
     sim.run();
 
@@ -1017,22 +1327,73 @@ fn main() {
         let b = n.block.clone();
         read_block(&mut n.actor, &b, cfg.nx, &mut split_f);
     }
+    if let Some(dn) = cfg.dump_node {
+        let path = cfg.dump_file.clone().expect("--dump-node には --dump-file が必要");
+        let n = &mut sim.nodes[dn];
+        let b = n.block.clone();
+        let cnt = b.nx * b.ny;
+        let shape = n.actor.is_shape();
+        let (mut phi, mut d, mut w) = (Vec::new(), Vec::new(), Vec::new());
+        for k in 0..cnt as u32 {
+            phi.push(n.actor.get.call(&mut n.actor.store, k).unwrap());
+            if shape {
+                d.push(n.actor.aux(sdf2d::AUX_D, k));
+                w.push(n.actor.aux(sdf2d::AUX_W, k));
+            }
+        }
+        let crcs = [field_crc(&phi), if shape { field_crc(&d) } else { 0 }, if shape { field_crc(&w) } else { 0 }];
+        let mut l = n.actor.log.take().unwrap();
+        l.push(REC_END);
+        l.extend_from_slice(&(cnt as u32).to_le_bytes());
+        for c in crcs {
+            l.extend_from_slice(&c.to_le_bytes());
+        }
+        std::fs::write(&path, &l).expect("--dump-file の書き込み");
+        eprintln!(
+            "dump: node {dn} block {}x{} at ({}, {}) sensors {} -> {path} ({} bytes) crc phi {:08x} d {:08x} w {:08x}",
+            b.nx, b.ny, b.ix0, b.iy0, n.sensors.len(), l.len(), crcs[0], crcs[1], crcs[2]
+        );
+    }
 
     // 単一ノード解 (同じWASMの別インスタンスで全域を解く。センサは全部このノードに付ける)
     let whole = Block { ix0: 0, iy0: 0, nx: cfg.nx, ny: cfg.ny, faces: [None; 4] };
-    let mut single = Actor2d::load(&engine, &module);
+    let single_module = cfg.single_wasm.as_ref().map(|p| {
+        let b = std::fs::read(p).expect("--single-wasm の読み込み");
+        wasmi::Module::new(&engine, &b[..]).expect("--single-wasm のコンパイル")
+    });
+    let mut single = Actor2d::load(&engine, single_module.as_ref().unwrap_or(&module));
     let all_sensors: Vec<&scene::Sensor> = match &scene {
         Some(sc) => sc.sensors.iter().collect(),
         None => Vec::new(),
     };
     setup_actor(&mut single, &whole, &cfg, &geom, shape_cfg.as_ref(), &all_sensors);
+    let mut track = String::new();
+    if cfg.track_csv.is_some() {
+        assert!(is_shape, "--track-csv は格子型アクター用");
+        assert!(cfg.track_every >= 1, "--track-every は1以上");
+        track.push_str("step,n_cross,static_err_mean,static_err_p95,phantom,phantom_old,mover_cov,mover_err_mean,static_cov\n");
+    }
     for s in 0..cfg.steps {
         for si in 0..sim.sensor_ids.len() {
+            if !sim.sensor_active(si, s) {
+                continue;
+            }
             let unit = frame_unit(sim.sensor_ids[si], s, &sim.frames[s as usize][si]);
             assert_eq!(single.deliver(&unit), INBOX_OK);
         }
         let rc = single.step.call(&mut single.store, ()).unwrap();
         assert_eq!(rc, STEP_OK);
+        if cfg.track_csv.is_some() && (s + 1) % cfg.track_every == 0 {
+            let mut tf = blank();
+            read_block(&mut single, &whole, cfg.nx, &mut tf);
+            let sc = cfg.track_scale.unwrap_or(geom.h);
+            let row = track_row(scene.as_ref().unwrap(), s, &tf, cfg.nx, cfg.ny, &geom, shape_cfg.as_ref().unwrap().mu, sc);
+            track.push_str(&row);
+            track.push('\n');
+        }
+    }
+    if let Some(path) = &cfg.track_csv {
+        std::fs::write(path, &track).expect("--track-csv の書き込み");
     }
     let mut single_f = blank();
     read_block(&mut single, &whole, cfg.nx, &mut single_f);
@@ -1050,7 +1411,7 @@ fn main() {
     // 領域が正方形 (nx=ny) のときだけ厳密解になる
     let pi = std::f64::consts::PI;
     let t_end = cfg.steps as f64 * cfg.dt;
-    let analytic_linf = if !is_shape && cfg.outer_kind == BC_DIRICHLET && cfg.outer_value == 0.0 && cfg.nx == cfg.ny {
+    let analytic_linf = if !is_shape && !is_wave && cfg.outer_kind == BC_DIRICHLET && cfg.outer_value == 0.0 && cfg.nx == cfg.ny {
         let h = geom.h;
         let decay = libm::exp(-2.0 * pi * pi * cfg.alpha * t_end);
         let mut e = 0.0f64;
@@ -1087,6 +1448,38 @@ fn main() {
             cfg.carve
         )
         .unwrap();
+        if cfg.decay.is_some() || cfg.w_forget.is_some() || cfg.dis_tau.is_some() || cfg.dis_w.is_some() {
+            let show = |v: Option<f64>| v.map_or("default".to_string(), |x| x.to_string());
+            writeln!(
+                out,
+                "forget: w-max {} decay {} w-forget {} disagree {} disagree-w {}",
+                cfg.w_max,
+                show(cfg.decay),
+                show(cfg.w_forget),
+                show(cfg.dis_tau),
+                show(cfg.dis_w)
+            )
+            .unwrap();
+        }
+        if cfg.decay_in_view.is_some() {
+            writeln!(out, "decay-in-view: on (out-of-view decay {})", cfg.decay_out.map_or("none".to_string(), |x| x.to_string())).unwrap();
+        }
+        if let Some(n) = cfg.sweep_every {
+            writeln!(out, "sweep-every: {}", n).unwrap();
+        }
+        if let Some(scn) = &scene {
+            for m in &scn.movers {
+                let poses: Vec<String> = m
+                    .poses
+                    .iter()
+                    .map(|(st, p)| match p {
+                        Some(p) => format!("{}@({:.2},{:.2})-({:.2},{:.2})", st, p[0].0, p[0].1, p[2].0, p[2].1),
+                        None => format!("{}@off", st),
+                    })
+                    .collect();
+                writeln!(out, "mover {}: {}", m.name, poses.join(" -> ")).unwrap();
+            }
+        }
         if !cfg.quiet {
             if let Some(scn) = &scene {
                 for (si, se) in scn.sensors.iter().enumerate() {
@@ -1113,6 +1506,9 @@ fn main() {
             px, py, cfg.nx, cfg.ny, cfg.steps, r, outer, mem_pages
         )
         .unwrap();
+        if let (Some(path), Some(m)) = (&cfg.model, &cfg.model_bytes) {
+            writeln!(out, "model: {} ({} bytes), initial field = model(x, y) evaluated on each node", path, m.len()).unwrap();
+        }
     }
     writeln!(
         out,
@@ -1177,6 +1573,21 @@ fn main() {
     if let Some(e) = analytic_linf {
         writeln!(out, "analytic: Linf = {:.3e} (t = {})", e, t_end).unwrap();
     }
+    if is_wave {
+        let nu = cfg.alpha * cfg.dt / geom.h;
+        let amax = split_f.phi.iter().fold(0.0f64, |m, v| if v.is_nan() || m.is_nan() { f64::NAN } else { m.max(v.abs()) });
+        writeln!(
+            out,
+            "wave: c = {} courant nu = {:.6} (1/sqrt2 = 0.707107{}) cfg {:?} | max|u| = {:e} (t = {})",
+            cfg.alpha,
+            nu,
+            if nu > std::f64::consts::FRAC_1_SQRT_2 { ", ABOVE the infinite-domain limit" } else { "" },
+            cfg.extra_cfg,
+            amax,
+            t_end
+        )
+        .unwrap();
+    }
     let mut pass = mismatch == 0;
     if let (Some(sc), Some(shape)) = (&scene, &shape_cfg) {
         let single_late = single.count(single.late);
@@ -1195,7 +1606,9 @@ fn main() {
         if late_total + overflow_total + single_late + single_overflow > 0 {
             pass = false;
         }
-        shape_report(&mut out, sc, &split_f, cfg.nx, cfg.ny, &geom, shape.mu);
+        // 採点は最後のステップの形に対して (動く箱の無い場面では場面そのもの)
+        let last = sc.at_step(cfg.steps.saturating_sub(1));
+        shape_report(&mut out, &last, &split_f, cfg.nx, cfg.ny, &geom, shape.mu);
         writeln!(
             out,
             "crc32: split phi {:08x} d {:08x} w {:08x} | single phi {:08x} d {:08x} w {:08x}",
@@ -1228,6 +1641,7 @@ fn main() {
     if let Some(path) = &cfg.field_csv {
         let mut s = String::new();
         if let Some(sc) = &scene {
+            let last = sc.at_step(cfg.steps.saturating_sub(1));
             s.push_str("gx,gy,x,y,phi,d,w,truth\n");
             for gy in 0..cfg.ny {
                 for gx in 0..cfg.nx {
@@ -1236,7 +1650,7 @@ fn main() {
                     writeln!(
                         s,
                         "{},{},{},{},{:e},{:e},{},{:e}",
-                        gx, gy, x, y, split_f.phi[k], split_f.d[k], split_f.w[k], sc.signed_distance(x, y)
+                        gx, gy, x, y, split_f.phi[k], split_f.d[k], split_f.w[k], last.signed_distance(x, y)
                     )
                     .unwrap();
                 }
