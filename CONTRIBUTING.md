@@ -16,7 +16,9 @@ and its output. For hardware problems, also include the board and ESP-IDF versio
 3. Run `bash scripts/ci-check.sh`. All checks must pass: numerical results are
    compared **bit for bit**, so any change in output is treated as a regression
    unless it is intended and explained in the pull request.
-4. Open a pull request describing what changed and why.
+4. Add one changelog fragment `changelog.d/<issue>.<section>.md` (see
+   [changelog.d/README.md](changelog.d/README.md)); do not edit `CHANGELOG.md` directly.
+5. Open a pull request describing what changed and why, with `Closes #<issue>`.
 
 Issues and pull requests may be written in English or Japanese.
 
