@@ -1,5 +1,5 @@
 # Dyne node-esp32 のパーティションテーブル (8MB フラッシュ: XIAO ESP32C5 を想定) (2026-11-11)
-# アプリ2面 (ota_0/ota_1) + OTA の起動先の記録 (otadata) + 計算部品の区画 (actors、2枠)
+# アプリ2面 (ota_0/ota_1) + OTA の起動先の記録 (otadata) + 計算部品のパーティション (actors、2枠)
 # フラッシュが 4MB の基板では partitions_4mb.csv を使う (menuconfig で切り替え)
 # 説明: docs/2026-11-11-timesync-ota.md
 # Name,     Type, SubType, Offset,   Size

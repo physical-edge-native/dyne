@@ -27,7 +27,7 @@ PC 上の検査(C の計算部分。Rust のワイヤ形式の定義とのバイ
 
 | 項目 | できたこと | 確認の方法 |
 |---|---|---|
-| DevKitC-VE 向けの設定 | 基板の切り替え(build.ps1 -Board)。PSRAM を有効にし、計算部品と WAMR の内部の表・線形メモリは「内部 RAM を先に、足りなければ PSRAM」で確保。Wi-Fi・lwIP のバッファは PSRAM へ。8MB のパーティションテーブル(アプリ2面 + 計算部品の区画) | ビルド成功(§8) |
+| DevKitC-VE 向けの設定 | 基板の切り替え(build.ps1 -Board)。PSRAM を有効にし、計算部品と WAMR の内部の表・線形メモリは「内部 RAM を先に、足りなければ PSRAM」で確保。Wi-Fi・lwIP のバッファは PSRAM へ。8MB のパーティションテーブル(アプリ2面 + 計算部品のパーティション) | ビルド成功(§8) |
 | ESPr 向け | 従来どおり(PSRAM なし、4MB)。同じピン割り当て | ビルド成功(§8) |
 | G3 測距 | rjrp44/vl53l5cx 4.0.1(ST の ULD 2.0.0 の移植。BSD-3-Clause の条件で使う)をノードへ。起動時に探し、居れば 8×8・15Hz で測る。フレームを MQTT へ発行し、ワイヤ形式v2 の経路では RANGE_FRAME としてアクターへ渡す | RANGE_FRAME の組み立てを Rust の定義(dyne-wire)が作るバイト列と照合(一致) |
 | 首振り(P11) | LEDC(パルス幅変調の周辺回路)で SG90 を動かす。位置の順・常に角度の小さい側から近づける・動いている間に積分したフレームを捨てる・落ち着いたら PWM を止める・位置ごとに別のセンサID・較正表 | 手順の計算部分を PC で模擬(3巡、順序・捨て方・近づけ方を検査) |
@@ -71,7 +71,7 @@ powershell -ExecutionPolicy Bypass -File node-esp32\build.ps1 -Board xiao-c5    
 
 | 基板 | 重ねる設定 | フラッシュ・パーティションテーブル | PSRAM |
 |---|---|---|---|
-| devkitc-ve | sdkconfig.defaults → sdkconfig.board.devkitc-ve → (sdkconfig.local) | 8MB、partitions_8mb.csv(アプリ 3MB × 2面、計算部品の区画 約1.9MB) | 有効。malloc は 16KB 以上を PSRAM に。Wi-Fi・lwIP のバッファも PSRAM に。チップの改版3以上(WROVER-E は改版3)向けにして PSRAM の古い回避策を外した |
+| devkitc-ve | sdkconfig.defaults → sdkconfig.board.devkitc-ve → (sdkconfig.local) | 8MB、partitions_8mb.csv(アプリ 3MB × 2面、計算部品のパーティション 約1.9MB) | 有効。malloc は 16KB 以上を PSRAM に。Wi-Fi・lwIP のバッファも PSRAM に。チップの改版3以上(WROVER-E は改版3)向けにして PSRAM の古い回避策を外した |
 | espr | sdkconfig.defaults → sdkconfig.board.espr → (sdkconfig.local) | 4MB、partitions_4mb.csv | なし |
 
 - **DevKitC-VE のフラッシュが 4MB だった場合**: 秋月の商品名の「8MB」がフラッシュか PSRAM かは確認できていない
@@ -307,7 +307,7 @@ IMU の I2C 番地は 0x6A と 0x6B の両方を探す(Arduino の資料の既�
 
 ESP-IDF 5.5.5、2026-11-13。どちらも警告 0 件。
 
-| 基板 | アプリの大きさ | アプリの区画(1面) | 静的 RAM(DRAM: .data + .bss) | IRAM |
+| 基板 | アプリの大きさ | アプリのパーティション(1面) | 静的 RAM(DRAM: .data + .bss) | IRAM |
 |---|---|---|---|---|
 | espr(build-ota-esp32) | 1,340,291 B | 1,703,936 B(79%) | 66,984 B(11/11 の版 65,128 B から **+1.9KB**) | 96,763 B |
 | devkitc-ve(build-ota-devkitc-ve) | 1,346,835 B | 3,145,728 B(43%) | 67,196 B | 102,091 B(PSRAM の処理の分 +5KB) |
@@ -485,7 +485,7 @@ PC 側の常駐版(scripts/twin_live.py)が受ける「形の区画のメッセ�
 
 ### 12.5 ビルドの結果(本節の変更の後、警告 0 件)
 
-| 基板 | アプリの大きさ | アプリの区画(1面) | 静的 RAM(DRAM) | IRAM |
+| 基板 | アプリの大きさ | アプリのパーティション(1面) | 静的 RAM(DRAM) | IRAM |
 |---|---|---|---|---|
 | espr | 1,342,039 B(+1.7 KB) | 79% | 67,000 B(+16 B) | 96,763 B |
 | devkitc-ve | 1,348,611 B(+1.8 KB) | 43% | 67,212 B(+16 B) | 102,091 B |
@@ -579,7 +579,7 @@ docs/2026-11-13-imu-fusion.md の「ファームへの依頼」2件と、実験9
 
 ### 13.6 ビルドの結果(本節の変更の後、警告 0 件)
 
-| 基板 | アプリの大きさ | アプリの区画(1面) | 静的 RAM(DRAM) | IRAM |
+| 基板 | アプリの大きさ | アプリのパーティション(1面) | 静的 RAM(DRAM) | IRAM |
 |---|---|---|---|---|
 | espr | 1,345,203 B | 79% | 67,024 B | 96,763 B |
 | devkitc-ve | 1,351,795 B | 43% | 67,236 B | 102,091 B |

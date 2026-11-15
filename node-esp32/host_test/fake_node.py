@@ -5,7 +5,7 @@
 ただし PC 側ツールのコードは使わず独立に書いている (同じ誤りを共有しないため):
   ota_fw    : HTTP で取得 → 長さ・像の付属 SHA-256 (末尾32バイト = 直前までの SHA-256) を確かめる →
               合わなければ rejected → 合えば downloaded → 再起動のふり → 目印が "FAIL" なら
-              selftest_fail のあと rolled_back、そうでなければ ok (起動区画が入れ替わる)
+              selftest_fail のあと rolled_back、そうでなければ ok (起動パーティションが入れ替わる)
   ota_actor : HTTP で取得 → 長さと SHA-256 を目録と照合 (違えば rejected) → downloaded → 再起動のふり →
               中身が WASM (先頭が \\0asm) なら ok、そうでなければ fallback
   計算の実行中のふり (--busy で指定したノード) は busy を返す。

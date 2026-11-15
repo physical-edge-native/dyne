@@ -43,7 +43,7 @@
 #include "dyne_node.h"
 #include "dyne_wire2.h" /* 2026-11-08: ワイヤ形式v2の外箱 (起動時自己検査) */
 #include "node_v2.h"    /* 2026-11-08: メールボックス方式のアクター用の経路 */
-#include "dyne_ops.h"      /* 2026-11-11: OTA・計算部品の保存区画・自己確認・稼働時間の報告 */
+#include "dyne_ops.h"      /* 2026-11-11: OTA・計算部品のパーティション・自己確認・稼働時間の報告 */
 #include "dyne_timesync.h" /* 2026-11-11: 時刻同期 */
 #include "dyne_sense.h"    /* 2026-11-13: 測距・首振り・IMU */
 
@@ -467,7 +467,7 @@ static bool wasm_try(uint8_t *wbuf, uint32_t wsize, const char *what)
     return true;
 }
 
-/* 2026-11-11: 計算部品の保存区画 (OTA で書いたもの) を新しい順に試し、
+/* 2026-11-11: 計算部品のパーティション (OTA で書いたもの) を新しい順に試し、
  * どれも使えなければファームに埋め込んだ計算部品を使う (dyne_ops.c) */
 /* 2026-11-13: 内部RAMを先に使い、足りなければ PSRAM (外付けのRAM) を使う確保。
  * PSRAM の無い基板 (ESPr) では malloc と同じ。PSRAM のある基板 (DevKitC-VE) では、malloc は

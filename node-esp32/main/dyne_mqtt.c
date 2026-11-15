@@ -73,7 +73,7 @@ void dyne_mqtt_pub_status(dyne_state_t st, const char *extra)
         esp_netif_ip_info_t ip = { 0 };
         esp_netif_t *nif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
         if (nif) esp_netif_get_ip_info(nif, &ip);
-        /* 2026-11-11: 対象チップ・版・起動区画・再起動の理由・使っている計算部品 (dyne_ops.c) */
+        /* 2026-11-11: 対象チップ・版・起動パーティション・再起動の理由・使っている計算部品 (dyne_ops.c) */
         char ops[480];
         dyne_ops_online_fields(ops, sizeof(ops));
         snprintf(json, sizeof(json),

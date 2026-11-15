@@ -186,7 +186,7 @@ void dyne_ops_boot_early(void)
 {
     esp_err_t e = nvs_flash_init();
     if (e == ESP_ERR_NVS_NO_FREE_PAGES || e == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        /* パーティションテーブルを変えた直後などで NVS の区画の中身が合わない。消して作り直す
+        /* パーティションテーブルを変えた直後などで NVS のパーティションの中身が合わない。消して作り直す
          * (NVS に置くのは Wi-Fi の較正値と本ファイルの記録だけで、失っても困らない) */
         ESP_LOGW(TAG, "nvs: %s -> erase", esp_err_to_name(e));
         nvs_flash_erase();
@@ -203,7 +203,7 @@ void dyne_ops_boot_early(void)
            reset_name(s_reset), (unsigned)s_prev_up_s, run ? run->label : "?", ota_state_name());
 }
 
-/* ==== 計算部品の保存区画 ==== */
+/* ==== 計算部品のパーティション ==== */
 
 static const esp_partition_t *act_part(uint32_t *slot_size)
 {
@@ -494,7 +494,7 @@ static void fw_ota_task(void *arg)
             esp_https_ota_abort(h);
             break;
         }
-        e = esp_https_ota_finish(h); /* 像の検査 (付属の SHA-256 ほか) と、次に起動する区画の設定 */
+        e = esp_https_ota_finish(h); /* 像の検査 (付属の SHA-256 ほか) と、次に起動するパーティションの設定 */
         if (e != ESP_OK) {
             phase = e == ESP_ERR_OTA_VALIDATE_FAILED ? "rejected" : "fail";
             err = e == ESP_ERR_OTA_VALIDATE_FAILED ? "image invalid (checksum/sha256/chip)" : "finish";
@@ -542,7 +542,7 @@ typedef struct {
     bool has_wasm, has_aot, reboot;
 } act_req_t;
 
-/* HTTP で取ってきて区画へ書く。SHA-256 と長さを照合する。戻り値: NULL = 成功 / 誤りの説明。
+/* HTTP で取ってきてパーティションへ書く。SHA-256 と長さを照合する。戻り値: NULL = 成功 / 誤りの説明。
  * *rejected = 照合の不一致 (届いた中身が目録と違う) */
 static const char *http_to_part(const esp_partition_t *p, uint32_t off, const blob_req_t *b, bool *rejected,
                                 uint32_t *got_len)
