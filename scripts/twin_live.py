@@ -9,8 +9,16 @@ PC はその結果(φ・d・w)を区画ごとに受け取って並べるだけ(C
 流れ:
   1. MQTT で dyne/node/+/shape(scripts/dyne_shape_msg.py の形式)を受け、ノードごとに最新の区画を持つ
   2. --every 秒ごとに(新しい区画が届いていれば)全体の格子に並べる。届いていない区画は未観測(w = 0)
-  3. scripts/twin_demo.py を呼び、frames/<時刻>_<通し番号>/ に room.usda・room.xml・room.html・room.json を書く
-     (USD の prim のパスは書き出し直しても変わらない。twin_physics.py の冒頭を参照)
+  3. scripts/twin_demo.py の export() を同じプロセスの中で呼び、frames/<時刻>_<通し番号>/ に room.usda・room.xml・
+     room.json(と room.html)を書く(USD の prim のパスは書き出し直しても変わらない。twin_physics.py の冒頭を参照)。
+     2026-11-15(GitHub issue #3): 以前は書き出しのたびに twin_demo.py を別のプロセスで起動し、温度のダミーと HTML も
+     毎回作っていた(1 回 3.3〜6.5 秒)。いまは
+       - プロセスを起動しない(twin_demo を import して呼ぶ。pxr の読み込みは起動時に 1 回)
+       - 形に依らない部分(場面ファイル・正解の面の標本・温度のダミーとその表示用の要素)を ExportCache で使い回す
+         (場面ファイル・格子の範囲・引数が変われば作り直す。同じ入力なら出力のバイト列は以前と同じ)
+       - HTML は既定で最初の 1 回だけ書く(--html once。ダッシュボードは ?poll で room.json を読み直すので足りる)
+     以前の動作は --subprocess(毎回 twin_demo.py を起動し、HTML も毎回)。同じプロセスで毎回すべて作り直すのは
+     --no-cache --html every
   4. latest/ に同じ名前で写す(置き換えは一時ファイルからの os.replace なので、読み手が書きかけを見ない)。
      Windows では記号リンクに管理者の権限が要るので、リンクでなく写しにした
   5. HTTP サーバ(既定 127.0.0.1:8765)で出力先を配る。ダッシュボードは
@@ -167,6 +175,13 @@ def main():
     ap.add_argument("--once", action="store_true", help="1 回書き出したら終える(試験用)")
     ap.add_argument("--max-exports", type=int, default=0, help="この回数書き出したら終える(0 = 無限)")
     ap.add_argument("--timeout", type=float, default=0.0, help="この秒数で終える(0 = 無限)")
+    # 書き出しの速さ(2026-11-15、GitHub issue #3)
+    ap.add_argument("--subprocess", action="store_true",
+                    help="以前の動作: 書き出しのたびに twin_demo.py を別のプロセスで起動する(使い回しなし)")
+    ap.add_argument("--no-cache", action="store_true",
+                    help="同じプロセスの中でも、温度のダミーなど形に依らない部分を毎回作り直す")
+    ap.add_argument("--html", choices=["once", "every", "never"], default=None,
+                    help="room.html を書く頻度(既定: 同じプロセスなら once = 最初の 1 回だけ、--subprocess なら every)")
     # twin_demo.py へそのまま渡すもの
     ap.add_argument("--scene", default=None, help="場面ファイル・図面(省略可。twin_demo.py の --scene)")
     ap.add_argument("--room-height", type=float, default=2.4)
@@ -213,6 +228,17 @@ def main():
         print("ダッシュボード: http://%s:%d/latest/room.html?poll=3" % (a.http_bind, a.http_port), flush=True)
 
     py = sys.executable
+    html_mode = a.html or ("every" if a.subprocess else "once")
+    html_written = False
+    cache = None
+    if not a.subprocess:
+        import twin_demo
+        import twin_physics
+        twin_physics._require_pxr()  # pxr の読み込み(約 0.3 秒)を最初の書き出しの前に済ませる
+        cache = None if a.no_cache else twin_demo.ExportCache()
+        print("書き出し: 同じプロセスで(使い回し %s、HTML %s)" % ("なし" if a.no_cache else "あり", html_mode), flush=True)
+    else:
+        print("書き出し: 毎回 twin_demo.py を起動(以前の動作、HTML %s)" % html_mode, flush=True)
     seq = 0
     seen_version = 0
     t_start = time.time()
@@ -243,17 +269,30 @@ def main():
                 print("まとめられない: %s" % e, flush=True)
                 continue
             csv_path, log_path = write_inputs(field, snap, frame_dir, stamp)
-            cmd = [py, os.path.join(HERE, "twin_demo.py"), "--shape-csv", csv_path, "--sim-log", log_path,
-                   "--out", os.path.join(frame_dir, "room"), "--sequence", str(seq), "--timestamp", stamp, "--json",
-                   "--room-height", str(a.room_height), "--zones", str(a.zones), "--fov-deg", str(a.fov_deg),
-                   "--unobserved-solid", a.unobserved_solid, "--collider-shape", a.collider_shape, "--title", a.title]
+            # twin_demo.py の引数(別のプロセスでも同じプロセスでも同じ引数で解析するので、出力は同じ)
+            targs = ["--shape-csv", csv_path, "--sim-log", log_path,
+                     "--out", os.path.join(frame_dir, "room"), "--sequence", str(seq), "--timestamp", stamp, "--json",
+                     "--room-height", str(a.room_height), "--zones", str(a.zones), "--fov-deg", str(a.fov_deg),
+                     "--unobserved-solid", a.unobserved_solid, "--collider-shape", a.collider_shape, "--title", a.title]
             if a.scene:
-                cmd += ["--scene", a.scene]
-            p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
-                               env=dict(os.environ, PYTHONIOENCODING="utf-8"))
-            if p.returncode != 0:
-                print("twin_demo.py が失敗 (%d): %s" % (p.returncode, p.stderr[-800:]), flush=True)
-                continue
+                targs += ["--scene", a.scene]
+            want_html = html_mode == "every" or (html_mode == "once" and not html_written)
+            if not want_html:
+                targs += ["--no-html"]
+            if a.subprocess:
+                p = subprocess.run([py, os.path.join(HERE, "twin_demo.py")] + targs, capture_output=True, text=True,
+                                   encoding="utf-8", env=dict(os.environ, PYTHONIOENCODING="utf-8"))
+                if p.returncode != 0:
+                    print("twin_demo.py が失敗 (%d): %s" % (p.returncode, p.stderr[-800:]), flush=True)
+                    continue
+                console = p.stdout.splitlines()
+            else:
+                try:
+                    console = twin_demo.export(twin_demo.build_parser().parse_args(targs), cache=cache, quiet=True)["console"]
+                except Exception as e:  # noqa: BLE001  1 回の失敗で常駐を止めない
+                    print("書き出しに失敗: %s: %s" % (type(e).__name__, e), flush=True)
+                    continue
+            html_written = html_written or want_html
             publish_latest(frame_dir, latest, ["room.usda", "room.xml", "room.json", "room.html"])
             dt = time.time() - t0
             steps = [t["step"] for t in snap.values()]
@@ -261,13 +300,14 @@ def main():
             lag = [(t_snap * 1e6 - t["t_us"]) / 1e6 for t in snap.values() if t["t_us"]]
             w_obs = float((field["w"] > 0).mean())
             status = {"sequence": seq, "createdUtc": stamp, "frame": os.path.relpath(frame_dir, out).replace("\\", "/"),
-                      "exportSeconds": round(dt, 3), "nodes": len(snap), "messages": tiles.rx, "badMessages": tiles.errors,
+                      "exportSeconds": round(dt, 3), "exportMode": "subprocess" if a.subprocess else "in-process",
+                      "nodes": len(snap), "messages": tiles.rx, "badMessages": tiles.errors,
                       "lastError": tiles.last_error, "grid": [field["nx"], field["ny"], field["h"]],
                       "observedFraction": round(w_obs, 4), "stepRange": [min(steps), max(steps)],
                       "perNode": {str(k): {"step": t["step"], "ageS": round(t_snap - t["recv"], 2),
                                            "region": [t["ix0"], t["iy0"], t["nx"], t["ny"]]} for k, t in sorted(snap.items())}}
             write_json_atomic(os.path.join(latest, "status.json"), status)
-            summary = [l for l in p.stdout.splitlines() if l.startswith(("推定表面:", "衝突判定:", "未観測"))]
+            summary = [l for l in console if l.startswith(("推定表面:", "衝突判定:", "未観測"))]
             print("[#%d %s] ノード %d 台、ステップ %d〜%d、観測済み %.1f%%、時刻印の遅れ %s、書き出し %.2f 秒 | %s"
                   % (seq, stamp, len(snap), min(steps), max(steps), w_obs * 100,
                      ("%.2f〜%.2f 秒" % (min(lag), max(lag))) if lag else "-", dt, " / ".join(summary)), flush=True)
