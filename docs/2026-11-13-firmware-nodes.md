@@ -27,7 +27,7 @@ PC 上の検査(C の計算部分。Rust のワイヤ形式の定義とのバイ
 
 | 項目 | できたこと | 確認の方法 |
 |---|---|---|
-| DevKitC-VE 向けの設定 | 基板の切り替え(build.ps1 -Board)。PSRAM を有効にし、計算部品と WAMR の内部の表・線形メモリは「内部 RAM を先に、足りなければ PSRAM」で確保。Wi-Fi・lwIP のバッファは PSRAM へ。8MB の区画表(アプリ2面 + 計算部品の区画) | ビルド成功(§8) |
+| DevKitC-VE 向けの設定 | 基板の切り替え(build.ps1 -Board)。PSRAM を有効にし、計算部品と WAMR の内部の表・線形メモリは「内部 RAM を先に、足りなければ PSRAM」で確保。Wi-Fi・lwIP のバッファは PSRAM へ。8MB のパーティションテーブル(アプリ2面 + 計算部品の区画) | ビルド成功(§8) |
 | ESPr 向け | 従来どおり(PSRAM なし、4MB)。同じピン割り当て | ビルド成功(§8) |
 | G3 測距 | rjrp44/vl53l5cx 4.0.1(ST の ULD 2.0.0 の移植。BSD-3-Clause の条件で使う)をノードへ。起動時に探し、居れば 8×8・15Hz で測る。フレームを MQTT へ発行し、ワイヤ形式v2 の経路では RANGE_FRAME としてアクターへ渡す | RANGE_FRAME の組み立てを Rust の定義(dyne-wire)が作るバイト列と照合(一致) |
 | 首振り(P11) | LEDC(パルス幅変調の周辺回路)で SG90 を動かす。位置の順・常に角度の小さい側から近づける・動いている間に積分したフレームを捨てる・落ち着いたら PWM を止める・位置ごとに別のセンサID・較正表 | 手順の計算部分を PC で模擬(3巡、順序・捨て方・近づけ方を検査) |
@@ -69,14 +69,14 @@ powershell -ExecutionPolicy Bypass -File node-esp32\build.ps1 -Board espr       
 powershell -ExecutionPolicy Bypass -File node-esp32\build.ps1 -Board xiao-c5      # build-ota-esp32c5\ (従来と同じ)
 ```
 
-| 基板 | 重ねる設定 | フラッシュ・区画表 | PSRAM |
+| 基板 | 重ねる設定 | フラッシュ・パーティションテーブル | PSRAM |
 |---|---|---|---|
 | devkitc-ve | sdkconfig.defaults → sdkconfig.board.devkitc-ve → (sdkconfig.local) | 8MB、partitions_8mb.csv(アプリ 3MB × 2面、計算部品の区画 約1.9MB) | 有効。malloc は 16KB 以上を PSRAM に。Wi-Fi・lwIP のバッファも PSRAM に。チップの改版3以上(WROVER-E は改版3)向けにして PSRAM の古い回避策を外した |
 | espr | sdkconfig.defaults → sdkconfig.board.espr → (sdkconfig.local) | 4MB、partitions_4mb.csv | なし |
 
 - **DevKitC-VE のフラッシュが 4MB だった場合**: 秋月の商品名の「8MB」がフラッシュか PSRAM かは確認できていない
   (Espressif の資料では DevKitC-VE は フラッシュ 8MB・PSRAM 8MB)。最初の USB 書き込みで esptool が
-  `Detected flash size: 4MB` と出したら、`-Flash4MB` を付けて作り直す(区画表が 4MB 用になる。ビルドディレクトリは
+  `Detected flash size: 4MB` と出したら、`-Flash4MB` を付けて作り直す(パーティションテーブルが 4MB 用になる。ビルドディレクトリは
   build-ota-devkitc-ve-4mb\)。
 - **DevKitC-VE 用のビルドを ESPr に書かない**(PSRAM が見つからず起動時に止まる)。
 - Wi-Fi の SSID・パスワード・ブローカーの URI は **node-esp32\sdkconfig.local**(git 管理外)に書く:

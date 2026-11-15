@@ -5,7 +5,7 @@
 #   -Board devkitc-ve : ESP32-DevKitC-VE (ESP32-WROVER-E、PSRAM 8MB、フラッシュ 8MB)。build-ota-devkitc-ve/
 #   -Board xiao-c5    : XIAO ESP32C5 (8MB)。build-ota-esp32c5/ (従来と同じ)
 #   -Target esp32|esp32c5 : 従来の指定 (esp32 = espr、esp32c5 = xiao-c5 と同じ)。-Board があればそちらが優先
-#   -Flash4MB   : フラッシュ 4MB の基板 (区画表 partitions_4mb.csv)。DevKitC-VE が 4MB だった場合に使う
+#   -Flash4MB   : フラッシュ 4MB の基板 (パーティションテーブル partitions_4mb.csv)。DevKitC-VE が 4MB だった場合に使う
 #   -Menuconfig : ビルドの前に menuconfig を開く。ただし Wi-Fi の SSID・パスワード・ブローカーの URI は
 #                 node-esp32\sdkconfig.local (git 管理外) に書くのを勧める (下の自動の作り直しで消えないため)。例:
 #                   CONFIG_DYNE_WIFI_SSID="dyne-exp1"
@@ -68,7 +68,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "ビルドに失敗しました" }
     idf.py @common size
     if ($Flash -ne "") {
-        # 最初の書き込みは区画表・ブートローダ・otadata の初期値を含む全体を書く
+        # 最初の書き込みはパーティションテーブル・ブートローダ・otadata の初期値を含む全体を書く
         idf.py @common -p $Flash flash monitor
     }
 } finally {
