@@ -170,6 +170,24 @@ def truth_segments(sc):
     return np.array(segs)  # (S, 2, 2)
 
 
+def truth_samples(sc, h):
+    """正解の面の線分と、正解表面の標本(h おき)。見える面(片側が空き)だけを覆い率の分母にする。
+    戻り値 (線分 (S,2,2), 標本 (N,2), 見えるか (N,))"""
+    samples, visible = [], []
+    for (ax, ay), (bx, by) in scene_edges(sc):
+        L_ = math.hypot(bx - ax, by - ay)
+        n = max(1, int(L_ / h))
+        ex, ey = (bx - ax) / L_, (by - ay) / L_
+        for k in range(n):
+            t = (k + 0.5) / n
+            x, y = ax + t * (bx - ax), ay + t * (by - ay)
+            f1 = is_free(sc, x - ey * 2 * h, y + ex * 2 * h)
+            f2 = is_free(sc, x + ey * 2 * h, y - ex * 2 * h)
+            samples.append((x, y))
+            visible.append(f1 != f2)
+    return truth_segments(sc), np.array(samples), np.array(visible)
+
+
 def dist_to_segments(pts, segs):
     """点の列 (N,2) から線分の集合 (S,2,2) までの最短距離 (N,)"""
     a = segs[:, 0, :][None]
@@ -515,7 +533,40 @@ def usd_name(s):
 # ---------------------------------------------------------------- 本体
 
 
-def main():
+class ExportCache:
+    """書き出しをまたいで使い回す、形(φ・w)に依らない部分の入れ物(2026-11-15、GitHub issue #3)。
+    常駐版 scripts/twin_live.py が 1 つ持ち、export() に渡す。名前ごとに「鍵」と値を持ち、鍵が同じなら
+    計算し直さない(場面ファイルの変更・格子の範囲・引数の変更は鍵に入れてあるので、そのときは作り直す)。
+    中身: 場面ファイルの読み取り、正解の面の標本、ダミーの温度場とその表示用の要素・USD の配列。
+    出力は使い回さない場合と同じ(同じ入力なら同じバイト列)"""
+
+    def __init__(self):
+        self._d = {}
+        self.hits = 0
+        self.misses = 0
+
+    def get(self, name, key, fn):
+        hit = self._d.get(name)
+        if hit is not None and hit[0] == key:
+            self.hits += 1
+            return hit[1]
+        self.misses += 1
+        v = fn()
+        self._d[name] = (key, v)
+        return v
+
+
+def _file_key(path):
+    st = os.stat(path)
+    return (os.path.abspath(path), st.st_mtime_ns, st.st_size)
+
+
+def main(argv=None):
+    a = build_parser().parse_args(argv)
+    export(a)
+
+
+def build_parser():
     ap = argparse.ArgumentParser()
     ap.add_argument("--scene", default=None,
                     help="場面ファイル(実機では実験4の図面を同じ書式で書いたもの)。省略時は格子の範囲を部屋とみなし、"
@@ -549,20 +600,32 @@ def main():
                     help="未観測(w = 0)の格子点を物とみなす衝突判定 /Room/Collision/Unobserved を足す(RL・物理用。見た目は変えない)")
     ap.add_argument("--unobserved-min-w", type=float, default=0.0, help="この重み以下を未観測とみなす")
     ap.add_argument("--json", action="store_true", help="表示のデータを <out>.json にも書く(常駐版のダッシュボードが読む)")
+    ap.add_argument("--no-html", action="store_true", help="HTML (<out>.html) を書かない(2026-11-15)")
     # 旧版との互換(使わない)
     ap.add_argument("--heat-csv")
     ap.add_argument("--temps")
-    a = ap.parse_args()
+    return ap
+
+
+def export(a, cache=None, quiet=False):
+    """1 回分の書き出し(USD・MJCF・JSON・HTML)。a は build_parser() の解析結果。
+    cache: ExportCache(常駐版が書き出しをまたいで渡す。None なら毎回すべて計算する = 従来の twin_demo.py)。
+    quiet: 途中経過を標準出力に出さない(戻り値の console に同じ行が入る)。
+    戻り値 dict(console = 途中経過の行の列, stats, meta)"""
+    def cached(name, key, fn):
+        return cache.get(name, key, fn) if cache is not None else fn()
 
     g = read_shape(a.shape_csv)
     h = g["h"]
     if a.scene:
-        sc = parse_scene(a.scene)
+        scene_key = _file_key(a.scene)
+        sc = cached("scene", scene_key, lambda: parse_scene(a.scene))
     else:
         # 図面なし: 格子の範囲を部屋とみなす(外壁は格子の端に乗る前提。シミュレータと実機の設定注入の約束)
         gx1_, gy1_ = g["x0"] + (g["nx"] - 1) * h, g["y0"] + (g["ny"] - 1) * h
         sc = {"room": [(g["x0"], g["y0"]), (gx1_, g["y0"]), (gx1_, gy1_), (g["x0"], gy1_)],
               "polys": [], "heights": [], "names": [], "circles": [], "sensors": []}
+        scene_key = ("grid", g["x0"], g["y0"], g["nx"], g["ny"], h)
     scene_name = os.path.basename(a.scene) if a.scene else "(図面なし: 格子の範囲)"
     mu = a.mu or 3 * h
     xs = [p[0] for p in sc["room"]]
@@ -572,7 +635,8 @@ def main():
     console = []
 
     def say(s):
-        print(s)
+        if not quiet:
+            print(s)
         console.append(s)
 
     # --- 推定表面(ゼロ等値線 → 折れ線)
@@ -604,24 +668,9 @@ def main():
         cats.append(cat)
 
     # --- 精度(正解との比較)
-    tsegs = truth_segments(sc)
+    tsegs, samples, visible = cached("truth", (scene_key, h), lambda: truth_samples(sc, h))
     mids = np.array([((p[0] + q[0]) / 2, (p[1] + q[1]) / 2) for (p, q, _, _) in segs]) if segs else np.zeros((0, 2))
     err = dist_to_segments(mids, tsegs) if len(mids) else np.zeros(0)
-    # 正解表面の標本(h おき)。見える面(片側が空き)だけを覆い率の分母にする
-    samples, visible = [], []
-    for (ax, ay), (bx, by) in scene_edges(sc):
-        L_ = math.hypot(bx - ax, by - ay)
-        n = max(1, int(L_ / h))
-        ex, ey = (bx - ax) / L_, (by - ay) / L_
-        for k in range(n):
-            t = (k + 0.5) / n
-            x, y = ax + t * (bx - ax), ay + t * (by - ay)
-            f1 = is_free(sc, x - ey * 2 * h, y + ex * 2 * h)
-            f2 = is_free(sc, x + ey * 2 * h, y - ex * 2 * h)
-            samples.append((x, y))
-            visible.append(f1 != f2)
-    samples = np.array(samples)
-    visible = np.array(visible)
     allpts = np.array([p for (p, q, _, _) in segs] + [q for (p, q, _, _) in segs]) if segs else np.zeros((0, 2))
     if len(allpts):
         dmin = np.sqrt(((samples[:, None, :] - allpts[None]) ** 2).sum(-1)).min(1)
@@ -666,7 +715,10 @@ def main():
     W, H = bounds[2] - bounds[0], bounds[3] - bounds[1]
     heater = ((bounds[0], bounds[1] + 0.8), (bounds[0], bounds[1] + 1.8))         # 西の壁の発熱面
     window = ((bounds[0] + 1.3, bounds[3]), (bounds[0] + 2.9, bounds[3]))        # 北の壁の窓
-    tf = dummy_temperature(sc, bounds, 0.05, heater, window, 30.0, 12.0, 20.0, 1.2)
+    # 温度場は場面(部屋の形と家具)だけで決まり、推定した形に依らないので、常駐版では場面ごとに 1 回だけ解く
+    temp_key = (scene_key, bounds)
+    tf = cached("temperature", temp_key,
+                lambda: dummy_temperature(sc, bounds, 0.05, heater, window, 30.0, 12.0, 20.0, 1.2))
     T = tf["T"]
     tmin, tmax = float(np.floor(T.min())), float(np.ceil(T.max()))
     say("温度場(ダミー): 定常の熱拡散、暖房 30 度・窓 12 度・周囲 20 度、範囲 %.1f〜%.1f 度" % (T.min(), T.max()))
@@ -733,24 +785,30 @@ def main():
                                                          ((bounds[0], bounds[1], -0.002), (bounds[2], bounds[3], -0.002), (bounds[0], bounds[3], -0.002))],
         color=(0.30, 0.31, 0.33), visible=False, label="床")
 
-    # 温度場の床と断面
-    step = tf["step"]
-    tt, tc = [], []
-    for j in range(tf["ny"] - 1):
-        for i in range(tf["nx"] - 1):
-            P = [(i, j), (i + 1, j), (i + 1, j + 1), (i, j + 1)]
-            for tri in ((0, 1, 2), (0, 2, 3)):
-                tt.append(tuple((tf["x0"] + P[v][0] * step, tf["y0"] + P[v][1] * step, 0.003) for v in tri))
-                tc += [color_map(T[P[v][1], P[v][0]], tmin, tmax) for v in tri]
-    tprops = {"種類": "温度場(ダミー)", "注意": "架空の定常熱拡散の解。Dyne の計算ではない",
-              "暖房": "西の壁 y=%.1f〜%.1f m、30 度" % (heater[0][1], heater[1][1]),
-              "窓": "北の壁 x=%.1f〜%.1f m、12 度" % (window[0][0], window[1][0]),
-              "範囲": "%.1f〜%.1f 度" % (T.min(), T.max()), "刻み": "%.2f m" % step}
-    add("/Room/TemperatureField", "Scope", tprops, label="温度場(ダミー)")
-    add("/Room/TemperatureField/Floor", "Mesh", tprops, tris=tt, vcolors=tc, label="床の温度")
-    tt2 = [tuple((p[0], p[1], a.slice_z) for p in t) for t in tt]
-    add("/Room/TemperatureField/Slice", "Mesh", dict(tprops, 高さ="%.2f m(同じ値を表示)" % a.slice_z), tris=tt2, vcolors=tc, alpha=0.45,
-        visible=False, label="水平断面 %.1f m" % a.slice_z)
+    # 温度場の床と断面(表示用の要素。温度場と同じく場面ごとに 1 回だけ作る)
+    def temperature_prims():
+        n0 = len(prims)
+        step = tf["step"]
+        tt, tc = [], []
+        for j in range(tf["ny"] - 1):
+            for i in range(tf["nx"] - 1):
+                P = [(i, j), (i + 1, j), (i + 1, j + 1), (i, j + 1)]
+                for tri in ((0, 1, 2), (0, 2, 3)):
+                    tt.append(tuple((tf["x0"] + P[v][0] * step, tf["y0"] + P[v][1] * step, 0.003) for v in tri))
+                    tc += [color_map(T[P[v][1], P[v][0]], tmin, tmax) for v in tri]
+        tprops = {"種類": "温度場(ダミー)", "注意": "架空の定常熱拡散の解。Dyne の計算ではない",
+                  "暖房": "西の壁 y=%.1f〜%.1f m、30 度" % (heater[0][1], heater[1][1]),
+                  "窓": "北の壁 x=%.1f〜%.1f m、12 度" % (window[0][0], window[1][0]),
+                  "範囲": "%.1f〜%.1f 度" % (T.min(), T.max()), "刻み": "%.2f m" % step}
+        add("/Room/TemperatureField", "Scope", tprops, label="温度場(ダミー)")
+        add("/Room/TemperatureField/Floor", "Mesh", tprops, tris=tt, vcolors=tc, label="床の温度")
+        tt2 = [tuple((p[0], p[1], a.slice_z) for p in t) for t in tt]
+        add("/Room/TemperatureField/Slice", "Mesh", dict(tprops, 高さ="%.2f m(同じ値を表示)" % a.slice_z), tris=tt2, vcolors=tc,
+            alpha=0.45, visible=False, label="水平断面 %.1f m" % a.slice_z)
+        out = prims[n0:]
+        del prims[n0:]
+        return out
+    prims += cached("temperature_prims", (temp_key, a.slice_z), temperature_prims)
 
     # ノードとセンサ
     sens_by_id = {s["id"]: s for s in sc["sensors"]}
@@ -855,8 +913,9 @@ def main():
     meta["groundExtent"] = [float(v) for v in ground_extent]
 
     # --- USD
+    usd_temp = cached("usd_temperature", temp_key, lambda: usd_temperature_arrays(tf, tmin, tmax))
     write_usda(a.out + ".usda", sc, segs, cats, groups, a, bounds, tf, nodes, sens_by_id, g, h, tmin, tmax, err,
-               colliders, meta, ground_extent)
+               colliders, meta, ground_extent, usd_temp=usd_temp)
     say("USD: " + a.out + ".usda")
     if a.truth_usd:
         write_truth_usda(a.out + "_truth.usda", sc, a, meta, ground_extent)
@@ -874,16 +933,20 @@ def main():
             "cmap": [[s, list(c)] for s, c in CMAP],
             "stamp": {"sequence": a.sequence, "createdUtc": meta["createdUtc"]}}
     if a.json:
+        # json.dump(ファイル) は Python で書いた遅い符号化器を使うので、C の json.dumps で文字列にしてから書く
+        # (出力のバイト列は同じ。2026-11-15)
         with open(a.out + ".json", "w", encoding="utf-8", newline="\n") as f:
-            json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
+            f.write(json.dumps(data, ensure_ascii=False, separators=(",", ":")))
         say("JSON: " + a.out + ".json")
-    with open(os.path.join(HERE, "twin_demo_view.html"), encoding="utf-8") as f:
-        tpl = f.read()
-    out = tpl.replace("/*__DATA__*/null", json.dumps(data, ensure_ascii=False, separators=(",", ":")))
-    out = out.replace("__TITLE__", a.title)
-    with open(a.out + ".html", "w", encoding="utf-8", newline="\n") as f:
-        f.write(out)
-    say("HTML: " + a.out + ".html")
+    if not a.no_html:
+        with open(os.path.join(HERE, "twin_demo_view.html"), encoding="utf-8") as f:
+            tpl = f.read()
+        out = tpl.replace("/*__DATA__*/null", json.dumps(data, ensure_ascii=False, separators=(",", ":")))
+        out = out.replace("__TITLE__", a.title)
+        with open(a.out + ".html", "w", encoding="utf-8", newline="\n") as f:
+            f.write(out)
+        say("HTML: " + a.out + ".html")
+    return {"console": console, "stats": stats, "meta": meta}
 
 
 def visual_soup(tris):
@@ -899,9 +962,27 @@ def visual_soup(tris):
     return V, F
 
 
+def usd_temperature_arrays(tf, tmin, tmax):
+    """温度場の床の USD のメッシュの配列(頂点・頂点の色・温度・四角形の頂点番号)"""
+    nx, ny, step = tf["nx"], tf["ny"], tf["step"]
+    pts, cols, temps, idx = [], [], [], []
+    for j in range(ny):
+        for i in range(nx):
+            pts.append((tf["x0"] + i * step, tf["y0"] + j * step, 0.003))
+            t = float(tf["T"][j, i])
+            temps.append(t)
+            cols.append(color_map(t, tmin, tmax))
+    for j in range(ny - 1):
+        for i in range(nx - 1):
+            q = j * nx + i
+            idx += [q, q + 1, q + 1 + nx, q + nx]
+    return pts, cols, temps, idx
+
+
 def write_usda(path, sc, segs, cats, groups, a, bounds, tf, nodes, sens_by_id, g, h, tmin, tmax, err,
-               colliders, meta, ground_extent):
-    """USD(物理のスキーマつき)を書く。構成は twin_physics.py の冒頭を参照"""
+               colliders, meta, ground_extent, usd_temp=None):
+    """USD(物理のスキーマつき)を書く。構成は twin_physics.py の冒頭を参照。
+    usd_temp: usd_temperature_arrays() の結果(常駐版が使い回す。None ならここで作る)"""
     doc = ("Dyne 部屋のデジタルツイン(デモ)。Visual は格子型アクターの符号つき距離場のゼロ等値線を押し出したもの、"
            "Collision は同じ表面から物の側へ立てた閉じた板(静的な衝突判定)。"
            "測距は理想化した模擬入力、TemperatureField はダミー(架空の定常熱拡散)。")
@@ -937,18 +1018,8 @@ def write_usda(path, sc, segs, cats, groups, a, bounds, tf, nodes, sens_by_id, g
         V, F = twin_physics.closed_prism(list(p), 0.0, sc["heights"][k] or a.furniture_height)
         W.mesh("/Room/Reference/GroundTruth/Furniture_%d" % k, V, F, color=(0.55, 0.75, 0.95), opacity=0.35)
     # 温度場の床(格子の頂点を共有する四角形のメッシュ。床の衝突判定の上面 z=0 と重ならないよう 3 mm 上げる)
-    nx, ny, step = tf["nx"], tf["ny"], tf["step"]
-    pts, cols, temps, idx = [], [], [], []
-    for j in range(ny):
-        for i in range(nx):
-            pts.append((tf["x0"] + i * step, tf["y0"] + j * step, 0.003))
-            t = float(tf["T"][j, i])
-            temps.append(t)
-            cols.append(color_map(t, tmin, tmax))
-    for j in range(ny - 1):
-        for i in range(nx - 1):
-            q = j * nx + i
-            idx += [q, q + 1, q + 1 + nx, q + nx]
+    nx, ny = tf["nx"], tf["ny"]
+    pts, cols, temps, idx = usd_temp if usd_temp is not None else usd_temperature_arrays(tf, tmin, tmax)
     W.UsdGeom.Scope.Define(W.stage, "/Room/TemperatureField")
     W.mesh("/Room/TemperatureField/Floor", pts, idx, counts=[4] * ((nx - 1) * (ny - 1)), vcolors=cols,
            primvars={"temperature": (temps, W.UsdGeom.Tokens.vertex)},
