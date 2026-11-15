@@ -12,6 +12,11 @@
 //! - 同期プロトコル: dyne-sim と同じ (ステップ同期、直近2ステップの送信控え、
 //!   過去ステップの重複受信には控えを再送、タイムアウト再送の最小間隔)。
 //!   隣が最大4方向になり、1回の配送の中身がメッセージの列になった点だけが違う。
+//!   2026-11-15 追加 (GitHub issue #26): 同じステップの重複受信にも控えを再送で応える
+//!   (間隔は再送の最小間隔以上)。2×2 以上の分割では隣どうしが輪になり、輪の各ノードが
+//!   「隣の1つからだけ受け取れていない」状態で同じステップに止まると、過去分の応答だけでは
+//!   誰も控えを送らず止まる (1次元の鎖では輪がないので起きない)。
+//!   さらに、進まないまま仮想時刻が長く過ぎたら、待ちの状態を示して止める (安全網)。
 //! - 界面IDはクラスタ全体で一意: 縦の界面 (bx|bx+1, 行 by) = by·(px−1) + bx、
 //!   横の界面 (by|by+1, 列 bx) = (px−1)·py + by·px + bx。
 //! - 検証: 同じWASMを1インスタンスで全域に対して解いた単一ノード解と、全格子点の
@@ -772,6 +777,8 @@ struct Node {
     pending: HashMap<(usize, u64), Msg>,
     sent: HashMap<(usize, u64), Msg>,
     last_resend_us: u64,
+    /// 界面ごとの、同じステップの重複受信への最後の応答の時刻 (ステップの開始で None に戻す。issue #26)
+    last_echo_us: Vec<Option<u64>>,
     stat_sent: u64,
     stat_lost: u64,
     stat_resend: u64,
@@ -806,7 +813,14 @@ struct Sim {
     /// CRC32 の照合の結果 (ノード, ステップ, 出力の行) と、食い違いの数
     rchecks: Vec<(usize, u64, String)>,
     rcheck_bad: usize,
+    /// 最後にどれかのノードが計算を始めた仮想時刻 (進まないことの検出。issue #26)
+    last_progress_us: u64,
 }
+
+/// 進まないことの検出の猶予 (仮想時刻)。最後の計算の開始と、最後の一時停止・分断の終わりの
+/// どちらからもこれだけ過ぎて誰も計算を始めなければ、止まっているとみなす (issue #26)。
+/// 損失が極端でも、再送の機会 (既定 100 ms ごと) が数万回ある長さにしてある
+const STALL_LIMIT_US: u64 = 3_600_000_000;
 
 impl Sim {
     /// センサ (場面のセンサ一覧の添字 si) がステップ step で測るか (pan N D の首振りの模擬)
@@ -934,6 +948,7 @@ impl Sim {
         n.cur_step = step;
         n.phase = Phase::Waiting { step };
         n.got = vec![false; n.ifaces.len()];
+        n.last_echo_us = vec![None; n.ifaces.len()];
         n.wait_since = now;
         n.last_resend_us = now;
         if n.ifaces.is_empty() {
@@ -972,6 +987,7 @@ impl Sim {
 
     fn begin_compute(&mut self, node: usize) {
         let now = self.now_us;
+        self.last_progress_us = now;
         let n = &mut self.nodes[node];
         n.wait_us += now - n.wait_since;
         // 実機の再生: IMU の標本を計算の直前に渡す (ファームの feed_imu と同じ位置)
@@ -1044,6 +1060,19 @@ impl Sim {
                     if self.nodes[node].got.iter().all(|&g| g) {
                         self.begin_compute(node);
                     }
+                } else {
+                    // 同じステップの重複 (issue #26): 隣はまだこのステップにいて、こちらの値を受け取れて
+                    // いない (隣の再送)。控えを再送で応える。隣が先へ進んでいた場合 (過去分の応答の重複) の
+                    // 往復を続けないよう、応答の間隔を再送の最小間隔以上にする
+                    let now = self.now_us;
+                    let due = self.nodes[node].last_echo_us[k].is_none_or(|t| now - t >= self.cfg.resend_min_us);
+                    if due {
+                        if let Some(m) = self.nodes[node].sent.get(&(msg.iface, step)).cloned() {
+                            self.nodes[node].last_echo_us[k] = Some(now);
+                            self.nodes[node].stat_replay += 1;
+                            self.transmit(node, m, false);
+                        }
+                    }
                 }
             }
             _ if msg.step > self.nodes[node].cur_step
@@ -1096,8 +1125,20 @@ impl Sim {
         for node in 0..self.nodes.len() {
             self.start_step(node, 0);
         }
+        // 一時停止・分断の最後の終わり (その間は進まなくても止まったとはみなさない)
+        let disrupt_end = self
+            .cfg
+            .pauses
+            .iter()
+            .map(|&(_, _, b)| b)
+            .chain(self.cfg.partitions.iter().map(|&(_, _, _, e)| e))
+            .max()
+            .unwrap_or(0);
         while let Some((t, ev)) = self.queue.pop() {
             self.now_us = t;
+            if t > self.last_progress_us.max(disrupt_end) + STALL_LIMIT_US {
+                self.report_stall();
+            }
             let target = match &ev {
                 Ev::Deliver { node, .. } | Ev::Wake { node } | Ev::StepDone { node } => *node,
             };
@@ -1114,6 +1155,30 @@ impl Sim {
                 break;
             }
         }
+    }
+
+    /// 進まないまま STALL_LIMIT_US が過ぎた: 待ちの状態を示して止める (issue #26。結果は出さない)
+    fn report_stall(&self) -> ! {
+        eprintln!(
+            "STALL: no node started a step for {} s of virtual time (now {} us, last progress {} us); \
+             the synchronization did not make progress. Node states:",
+            STALL_LIMIT_US / 1_000_000,
+            self.now_us,
+            self.last_progress_us
+        );
+        for (i, n) in self.nodes.iter().enumerate() {
+            let state = match n.phase {
+                Phase::Waiting { step } => {
+                    let missing: Vec<usize> =
+                        (0..n.ifaces.len()).filter(|&k| !n.got[k]).map(|k| n.ifaces[k]).collect();
+                    format!("waiting at step {step}, missing interfaces {missing:?}")
+                }
+                Phase::Computing => format!("computing step {}", n.cur_step),
+                Phase::Done => "done".to_string(),
+            };
+            eprintln!("  node {i}: {state} (sent {} lost {} resend {} replay {})", n.stat_sent, n.stat_lost, n.stat_resend, n.stat_replay);
+        }
+        std::process::exit(2);
     }
 }
 
@@ -1517,6 +1582,7 @@ fn main() {
             pending: HashMap::new(),
             sent: HashMap::new(),
             last_resend_us: 0,
+            last_echo_us: Vec::new(),
             stat_sent: 0,
             stat_lost: 0,
             stat_resend: 0,
@@ -1550,6 +1616,7 @@ fn main() {
         rcount: vec![replay::Counts::default(); n_nodes],
         rchecks: Vec::new(),
         rcheck_bad: 0,
+        last_progress_us: 0,
     };
     sim.run();
     if let Some(w) = &sim.rec {
