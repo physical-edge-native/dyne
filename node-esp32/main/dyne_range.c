@@ -190,11 +190,15 @@ static void publish_state(void)
     dyne_mqtt_pub(sub, json, 0, false, true);
 }
 
-static void publish_frame(const char *topic, const dyne_range_frame_t *f, long long step)
+/* 2026-11-15: 組み立ての領域を呼び手ごとに分けた。range (測距のタスク) と range_fed (ワイヤ形式v2 の経路の
+ * node_task) が同じ静的な領域を同時に書くと、再生の記録 (range_fed) が壊れうるため */
+static char *s_js_range, *s_js_fed;
+
+static void publish_frame(char **buf, const char *topic, const dyne_range_frame_t *f, long long step)
 {
-    static char *json; /* 測距のタスクだけが使う。初回に確保 (静的 RAM を増やさない) */
     enum { JSZ = 1400 };
-    if (!json && !(json = malloc(JSZ))) return;
+    if (!*buf && !(*buf = malloc(JSZ))) return; /* 初回に確保 (静的 RAM を増やさない) */
+    char *json = *buf;
     char sub[40];
     snprintf(sub, sizeof(sub), "node/%d/%s", dyne_node_id(), topic);
     int n = snprintf(json, JSZ,
@@ -214,7 +218,7 @@ static void publish_frame(const char *topic, const dyne_range_frame_t *f, long l
 /* node_v2.c から: アクターへ渡したフレームを記録 (PC がシミュレータで同じ入力を再生できるように) */
 void dyne_range_publish_fed(const dyne_range_frame_t *f, uint64_t step)
 {
-    publish_frame("range_fed", f, (long long)step);
+    publish_frame(&s_js_fed, "range_fed", f, (long long)step);
 }
 
 /* ==== センサ ==== */
@@ -324,7 +328,7 @@ static void handle_frame(int64_t t_ready)
     portENTER_CRITICAL(&s_fmux);
     s_latest = f;
     portEXIT_CRITICAL(&s_fmux);
-    if (s_cfg.pub_every > 0 && f.seq % (uint32_t)s_cfg.pub_every == 0) publish_frame("range", &f, -1);
+    if (s_cfg.pub_every > 0 && f.seq % (uint32_t)s_cfg.pub_every == 0) publish_frame(&s_js_range, "range", &f, -1);
 }
 
 static void range_task(void *arg)
