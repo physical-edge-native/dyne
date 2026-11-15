@@ -339,6 +339,35 @@ dyne/node/# を見られること。
      `Found 8MB SPI RAM`(または 4MB として使う旨)を確かめる。
 3. 以後は OTA(docs/2026-11-11-timesync-ota.md の scripts/dyne_ota.py)。
 
+#### 9.0.1 何台も続けて書く道具(scripts/first_flash.py、2026-11-15 追記。GitHub issue #1)
+
+上の 2. を 15 台ぶん手で繰り返す代わりに使う。同じ像を基板ごとに作り直さずに書き、確かめた結果と
+MAC(基板ごとに工場で書き込まれた通信の番地)とノード番号の対応を 1 台 1 行で CSV に残す。
+**実機では未確認**(作った時点で基板は未着。ログの読み取りは合成したログで検査した)。
+
+1. 先にビルドだけしておく: `powershell -ExecutionPolicy Bypass -File node-esp32\build.ps1 -Board devkitc-ve`
+2. `powershell -ExecutionPolicy Bypass -File scripts\first_flash.ps1`
+   (中身は `.venv\Scripts\python.exe scripts\first_flash.py`。ESP-IDF の初期化は要らない。esptool は ESP-IDF の Python 環境のものを自動で使う)
+3. 基板を 1 台 USB でつなぐと、新しい COM ポート(変換 IC が CP2102N のもの)を見つけて次を自動で行う:
+   - esptool で MAC と実際のフラッシュの大きさを読む。ビルドの想定(8MB)と違えば**書かずに止める**(4MB なら §3.1)。
+   - ブートローダ・パーティションテーブル・otadata・アプリを書く(build-ota-devkitc-ve\flasher_args.json のとおり。`-Flash` と同じ内容)。
+   - 基板をリセットして起動のログを最長 15 秒読み、確かめる: PSRAM(ESP-IDF 5.5 では `Found 8MB PSRAM device`。
+     上の 2. の `Found 8MB SPI RAM` は古い版の文言)と `SPI SRAM memory test OK`、`wire v2 envelope selftest: PASS`、
+     `[dyne] heap(after-wasm)` の largest(記録する)、起動の見出しのノード番号、書いた像と動いている像の一致、
+     異常終了や再起動の繰り返しが無いこと。
+   - 結果(PASS / FAIL と理由)とノード番号を大きく表示する。番号を基板のラベルに書き、基板を外すと次を待つ。終わりは Ctrl+C。
+4. 書き込みが始まらないときは BOOT ボタンを押したまま待つ(道具が 3 回までやり直す)。
+5. 記録: `first_flash_out\first_flash.csv`(MAC・ノード番号・フラッシュの大きさ・PSRAM・結果・時刻など)と
+   `first_flash_out\logs\`(1 台ごとの esptool と起動のログの全文)。**git 管理外**(残すなら measured\ へ写す)。
+
+- ノード番号は MAC の末尾 1 バイト(main.c の dyne_node_id。menuconfig の番号を -1 のままにした場合)。
+  道具は起動のログの番号を正とし、MAC から計算した番号と照らす。**番号が別の基板と重なることがある**
+  (末尾 1 バイトがでたらめなら、15 台で約 34%。同じ時期の基板は MAC が続き番号のことが多く、実際はもっと低いかもしれない)。
+  CSV に同じ番号の別の MAC があれば FAIL(理由 dup_id)にして知らせる。重なったときの直し方は未決(§11)。
+- 1 台だけ: `... first_flash.ps1 --port COM5`。書かずに MAC と番号だけ記録し直す: `--skip-flash --port COM5`。
+  保存したログを確かめ直す(基板不要): `--parse-log first_flash_out\logs\XXXX.log`。その他のオプションは `--help`。
+- 検査: `.venv\Scripts\python.exe -m unittest scripts/tests/test_first_flash.py -v`(合成したログ。scripts\tests\fixtures\first_flash\)。
+
 ### 9.1 各部分の確認(1台、USB 給電のまま)
 
 | # | 確かめること | やり方 | 合格 |
@@ -394,6 +423,11 @@ dyne/node/# を見られること。
 4. **首振りの1位置のフレーム数**(既定3)と一巡の時間(約4秒): 実験6の「箱の追従」の速さと、覆いの密度のどちらを取るか。
 5. **形の縮小版が 2 ページ(128KB)になった件**: ESPr で使わないなら問題なし。ESPr でも使うなら、形の速さの作業(別の作業者)に
    1 ページへ戻せるか確認が要る。
+6. **ノード番号が MAC の末尾 1 バイトで重なった場合の直し方**(2026-11-15 追記、§9.0.1): (a) 重なった基板だけ
+   menuconfig で番号を固定してビルドし直す(同じ像を全台に書く方針から外れる。OTA で全台に配るときも別の像が要る)、
+   (b) 番号を NVS(フラッシュの設定の保存領域)に置き、ctl 命令や最初の書き込みの道具で書き込めるようにする(ファームの変更が要る)、
+   (c) MAC の末尾 2 バイトなど重なりにくい決め方に変える(番号が 255 を超え、PC 側の道具とトピックの扱いの確認が要る)。
+   推奨は (b)(像は 1 つのまま、基板のラベルと番号を人が決められる)。15 台が届いて重なりが無ければ当面は不要。
 
 ---
 

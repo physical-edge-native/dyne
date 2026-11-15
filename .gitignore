@@ -132,3 +132,5 @@ node-esp32/build-c5/
 node-esp32/build-ota-*/
 # node-esp32/build.ps1 が重ねる手元の設定 (Wi-Fi の SSID・パスワード・ブローカーの URI。2026-11-13)
 node-esp32/sdkconfig.local
+# 最初の USB 書き込みの記録 (scripts/first_flash.py。first_flash.csv = MAC とノード番号の対応、logs/ = 起動のログ。2026-11-15)
+first_flash_out/
