@@ -7,8 +7,9 @@
 #       損失・遅延・一時停止・分断の組み合わせ)
 #   [3] 決定論 … 同じ引数の2回実行で標準出力がバイト一致 (fc「相違点は検出されませんでした」)
 #   [4] 2次精度 … 解析解との最大誤差が刻み半分で約1/4 (nx=21/41/81 で 6.975e-4 / 1.741e-4 / 4.350e-5)
-#   [5] 格子型アクター … 8シナリオすべて "PASS (bit-exact)" (空の部屋・雑多な部屋、分割の形、
-#       損失・遅延・一時停止・分断、対象なしを刻む設定、距離の定義)。決定論 (fc 相違なし)
+#   [5] 格子型アクター … 10シナリオすべて "PASS (bit-exact)" (空の部屋・雑多な部屋、分割の形、
+#       損失・遅延・一時停止・分断、対象なしを刻む設定、距離の定義、2026-11-13 追加: 箱を動かす場面
+#       (room6_move・room6_carry) を推奨の忘れる仕組み + 損失・遅延で)。決定論 (fc 相違なし)
 #   [6] 対照実験 … 統合の遅れを足りなくした (3×3で L=1) 実行が "FAIL" になる (遅着を検出できること)
 # 既存の1次元回帰の無変化は scripts\check-baseline12.ps1 で別に確かめる。
 
@@ -66,7 +67,12 @@ $ws = Join-Path $root "crates\sdf2d-grid-actor\target\wasm32-unknown-unknown\rel
 $em = Join-Path $root "crates\dyne-sim2d\scenes\empty.txt"
 $cl = Join-Path $root "crates\dyne-sim2d\scenes\cluttered.txt"
 
-Write-Host "== [5] 格子型アクター (8行とも PASS のこと) =="
+$mv = Join-Path $root "crates\dyne-sim2d\scenes\room6_move.txt"
+$ca = Join-Path $root "crates\dyne-sim2d\scenes\room6_carry.txt"
+# 推奨の忘れる仕組み (docs/2026-11-11-dynamic-shape.md) と、速くする工夫の設定 (docs/2026-11-11-shape-speedup.md)
+$forget = @("--step-ms","66.667","--noise-m","0.008","--disagree","0.1","--decay","0.9","--w-forget","0.3")
+
+Write-Host "== [5] 格子型アクター (10行とも PASS のこと) =="
 $shape = [ordered]@{
     "empty_loss20"   = @("--scene",$em,"--steps","300","--loss","0.2","--lat-ms","10","--lat-jitter-ms","30")
     "empty_pause"    = @("--scene",$em,"--steps","300","--loss","0.1","--pause","1@2000:6000","--partition","0-2@5000:9000")
@@ -76,6 +82,10 @@ $shape = [ordered]@{
     "clutter_3x2"    = @("--scene",$cl,"--px","3","--py","2","--steps","400","--loss","0.2","--lat-ms","5","--lat-jitter-ms","20","--pause","4@3000:7000")
     "clutter_carve"  = @("--scene",$cl,"--steps","400","--carve")
     "clutter_perp"   = @("--scene",$cl,"--steps","400","--range-def","perpendicular")
+    # 2026-11-13 追加: 箱を動かす場面 (移動は 300 ステップ目)。4×4 分割・損失・遅延の下で、箱の移動の前後を通して
+    # 分割解と単一ノード解がビット一致すること
+    "move_4x4"       = @("--scene",$mv,"--px","4","--py","4","--steps","400","--loss","0.1","--lat-ms","5","--lat-jitter-ms","10") + $forget
+    "carry_4x4_view" = @("--scene",$ca,"--px","4","--py","4","--steps","400","--loss","0.1","--lat-ms","5","--lat-jitter-ms","10","--sweep-every","2","--decay-in-view") + $forget
 }
 foreach ($k in $shape.Keys) {
     $line = & $exe --wasm $ws --quiet @($shape[$k]) | Select-String -Pattern "PASS|FAIL"

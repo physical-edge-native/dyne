@@ -1,0 +1,10 @@
+{
+  "alpha": 1.0,
+  "blocks": [
+    {"type": "fd", "points": 22},
+    {"type": "learned", "points": 22},
+    {"type": "fd", "points": 21}
+  ],
+  "boundary": {"left": "dirichlet", "right": "dirichlet"},
+  "r": 0.45
+}

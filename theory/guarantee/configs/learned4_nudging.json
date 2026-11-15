@@ -1,0 +1,13 @@
+{
+  "alpha": 1.0,
+  "blocks": [
+    {"type": "learned", "points": 17},
+    {"type": "learned", "points": 16},
+    {"type": "learned", "points": 16},
+    {"type": "learned", "points": 16}
+  ],
+  "boundary": {"left": "zero_grad", "right": "transparent"},
+  "transparent": {"mode": "semi", "tmax": 0.2},
+  "nudging": {"gamma": 1.5, "obs": "center"},
+  "r": 0.6
+}

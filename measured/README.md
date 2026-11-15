@@ -25,3 +25,10 @@
   ts≈0 で入っている。そのrunの記録として扱うのは号令以降の行
 - 主なファイル: status.csv(状態・online/offline)、sensor.csv(温度・湿度)、
   innov.csv(イノベーション=実測−モデル予測)、rt.csv(ステップ時間)、rssi.csv(受信強度)
+
+## 2026-10-11-vl53l5cx/ — 距離センサVL53L5CXの評価(ESPr32×1、USB給電)
+
+当日の記録: docs\2026-10-11-vl53l5cx-eval-log.md。評価計画: docs\2026-10-10-vl53l5cx-eval-plan.md。
+記録ツール scripts\vl53_log.py が1条件=1つのCSV(1行=1フレーム)と同名の .meta.txt
+(ファームの起動情報・送った設定・メモ)を書く。ファイル名の先頭は評価項目の番号(E0〜E9)。
+CSVの列の意味は scripts\vl53_log.py の冒頭。

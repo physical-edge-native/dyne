@@ -13,7 +13,7 @@
   python scripts/mqtt_config.py --broker ... --nodes 4 --points 65 \
       --absent 0,3 --bc transparent "--peers=-,192.168.137.10,192.168.137.11,-"
 
-必要パッケージ: paho-mqtt (pip install paho-mqtt)
+必要パッケージ: paho-mqtt (リポジトリの .venv に入れてある: .venv/Scripts/python.exe -m pip install -r scripts/requirements-pc.txt)
 """
 import argparse
 import json

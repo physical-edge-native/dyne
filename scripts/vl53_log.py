@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""VL53L5CX 評価の記録ツール (2026-10-10)。
+r"""VL53L5CX 評価の記録ツール (2026-10-10)。
 
 評価計画: docs/2026-10-10-vl53l5cx-eval-plan.md。相手のファーム: vl53-eval/。
 USBシリアルで設定コマンドを送り、Nフレーム測って1条件=1つのCSVに保存する。
@@ -7,10 +7,11 @@ USBシリアルで設定コマンドを送り、Nフレーム測って1条件=1�
 最後に中央4区画の平均・標準偏差と有効率を表示する(その場の確認用)。
 
 使い方(例: E1 白壁1.0m、8x8・10Hzで300フレーム):
-  python scripts/vl53_log.py --port COM7 --out measured/2026-10-xx-vl53l5cx ^
+  .venv\Scripts\python.exe scripts\vl53_log.py --port COM7 --out measured\2026-10-xx-vl53l5cx ^
       --label E1_white_1000mm --frames 300 --set "res 8" --set "hz 10" ^
       --note "白壁に正対、メジャー1000mm(センサ前面から)"
-必要パッケージ: pyserial (pip install pyserial)
+必要パッケージ: pyserial。リポジトリ直下の仮想環境 .venv に入れる
+  (python -m venv .venv → .venv\Scripts\python.exe -m pip install pyserial)
 
 CSVの列: pc_time(PCの時刻、秒), t_ms(ESP32起動からのms), idx, nz, temp_c(センサ内部温度),
   d0..(距離mm), st0..(状態値。5と9が有効), sg0..(ばらつき推定mm),

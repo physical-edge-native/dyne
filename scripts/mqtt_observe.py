@@ -7,7 +7,7 @@ CSVへ追記する (温度場・センサ・RSSI・リアルタイム率・界�
 
 使い方:
   python scripts/mqtt_observe.py --broker localhost [--out mqtt_log]
-必要パッケージ: paho-mqtt (pip install paho-mqtt)
+必要パッケージ: paho-mqtt (リポジトリの .venv に入れてある: .venv/Scripts/python.exe -m pip install -r scripts/requirements-pc.txt)
 """
 import argparse
 import csv

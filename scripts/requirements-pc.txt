@@ -1,0 +1,17 @@
+# PC tools for Dyne (install into the repo .venv only, never globally):
+#   .venv\Scripts\python.exe -m pip install -r scripts\requirements-pc.txt
+# torch: CPU build, install separately first if missing:
+#   .venv\Scripts\python.exe -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+# Versions are the ones verified on 2026-11-13 (Python 3.14.6).
+numpy>=2.5
+matplotlib>=3.11
+usd-core>=26.11
+mujoco>=4.0
+paho-mqtt>=2.2
+pyserial>=3.5
+gymnasium>=1.4
+stable-baselines3>=2.9
+onnx>=1.23
+onnxruntime>=1.31
+wasmtime>=50
+ziglang>=0.17

@@ -1,0 +1,17 @@
+label: E0_rate_8x8_15hz
+started: 2026-10-11 00:32:14
+port: COM3
+frames_requested: 450
+frames_saved: 450
+set: ['res 8', 'hz 15']
+note: E0 測定の速さ。1m程度先の壁 (距離は未計測)
+--- firmware ---
+#INFO fw=vl53-eval v1 uld=VL53L5CX_2.0.0 i2c_hz=400000 sda=21 scl=22 init_ms=2343 heap_free_before=288036 heap_free_after=288036 heap_min=283992 largest=155648 sizeof_dev=2780 sizeof_res=1360
+#CFG nz=64 hz=10 mode=auto it_ms=10 sharp=14 order=strongest
+#OK res 8
+#CFG nz=64 hz=10 mode=auto it_ms=10 sharp=14 order=strongest
+#OK hz 15
+#CFG nz=64 hz=15 mode=auto it_ms=10 sharp=14 order=strongest
+#CFG nz=64 hz=15 mode=auto it_ms=10 sharp=14 order=strongest
+#OK start 450
+#DONE frames=450
