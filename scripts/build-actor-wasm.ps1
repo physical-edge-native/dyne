@@ -10,6 +10,9 @@
 # 管理方法: 同一クレート+featureフラグ (数値経路は配列サイズ以外同一)。
 # 縮小版の正しさは、シミュレータで縮小版を指定した回帰がフル版と全出力
 # バイト一致することで確認する (本スクリプト実行後に scripts\check-f1.ps1 等)。
+#
+# 後から 2次元の波動方程式 [3][4]、形の格子型アクター [5]-[8]、IMU の融合 [9] を追加した。
+# 最後に全出力のパスとバイト数を一覧で表示する。
 
 $ErrorActionPreference = "Stop"
 
@@ -70,3 +73,30 @@ try {
 Write-Host "== [8] sdf2d フル版 f32 (単一ノード解の照合用) =="
 cargo build --release --target wasm32-unknown-unknown --features f32 --target-dir target-f32
 Pop-Location
+
+# ---- IMU の読みを近傍だけで融合するアクター (2026-11-15 追加、docs/2026-11-13-imu-fusion.md) ----
+# 状態が小さいので実機用とシミュレータ用を分けず1種類だけ (線形メモリ1ページ=64KB)。
+# スタック8KB は crates\imu-fusion-actor\.cargo\config.toml で指定するので RUSTFLAGS は設定しない
+Push-Location crates\imu-fusion-actor
+Write-Host "== [9] imu-fusion (1種類のみ) =="
+cargo build --release --target wasm32-unknown-unknown
+Pop-Location
+
+# ---- 出力の一覧 (パスとバイト数) ----
+Write-Host "== 出力の一覧 =="
+$outputs = @(
+    "crates\heat1d-actor\target\wasm32-unknown-unknown\release\heat1d_actor.wasm",
+    "crates\heat1d-actor\target-small\wasm32-unknown-unknown\release\heat1d_actor.wasm",
+    "node-esp32\main\heat1d_actor_small.wasm",
+    "crates\wave2d-actor\target\wasm32-unknown-unknown\release\wave2d_actor.wasm",
+    "crates\wave2d-actor\target-small\wasm32-unknown-unknown\release\wave2d_actor.wasm",
+    "crates\sdf2d-grid-actor\target-small\wasm32-unknown-unknown\release\sdf2d_grid_actor.wasm",
+    "crates\sdf2d-grid-actor\target-small-std\wasm32-unknown-unknown\release\sdf2d_grid_actor.wasm",
+    "crates\sdf2d-grid-actor\target-small-f32std\wasm32-unknown-unknown\release\sdf2d_grid_actor.wasm",
+    "crates\sdf2d-grid-actor\target-f32\wasm32-unknown-unknown\release\sdf2d_grid_actor.wasm",
+    "crates\imu-fusion-actor\target\wasm32-unknown-unknown\release\imu_fusion_actor.wasm"
+)
+foreach ($p in $outputs) {
+    $f = Get-Item $p
+    Write-Host ("{0,8} bytes  {1}" -f $f.Length, $p)
+}

@@ -170,6 +170,7 @@ per_point = 8: [自分の隣の数, x[0..7]]。隣の数はメトロポリスの
 5. **wasm の置き場所**: `cd crates\imu-fusion-actor && cargo build --release --target wasm32-unknown-unknown` →
    target\wasm32-unknown-unknown\release\imu_fusion_actor.wasm(スタック 8KB は crates/imu-fusion-actor/.cargo/config.toml
    で指定。縮小版を分けない)。scripts/build-actor-wasm.ps1 への追加は他の作業との衝突を避けて行っていない(§9 の U5)。
+   → 2026-11-15 追記: scripts/build-actor-wasm.ps1 に追加した(1 種類のみ。GitHub issue #5)。
 
 ## 4. シミュレーション(scripts/imu_sim.py、scripts/imu_fusion_ref.py)
 
@@ -409,7 +410,7 @@ summary.json、run_all.log、logs/ の合成記録と analysis/)。再現: `.ven
 | U2 | 合意の始め方の既定 | **動的合意平均(既定にした)**: ゼロ点のずれの食い違いが消える。代わりに隣の値が1回でも届かないと和の誤差が残り続ける(BSP で届くことは保証されるが、再初期化以外に回復の手段が無い)。置き直しは誤差が区間をまたがないが、収束が遅いつながり方で各ノードにずれが残る |
 | U3 | ファームへの依頼 2 件 | (1) 区間ごとに imu_fused を発行(§3.5 の 4)、(2) ステップ0を t0 まで待ち、step_period_ms = dt で進める(§3.5 の 2)。ファームの担当と調整が要る |
 | U4 | つながり方 | 格子 2×4(推奨。板の並びと一致、λ₂^10 = 0.21)/ 環(0.11、最も良いが板の上で端と端をつなぐ)/ 直線(0.59、隣だけの融合が中央より 25% 悪い) |
-| U5 | scripts/build-actor-wasm.ps1 に imu-fusion-actor を足すか | 他の作業と同じファイルを触るので今回は足していない。足すなら 1 ブロック(1 種類のみ) |
+| U5 | scripts/build-actor-wasm.ps1 に imu-fusion-actor を足すか | 他の作業と同じファイルを触るので今回は足していない。足すなら 1 ブロック(1 種類のみ)。**2026-11-15 に追加済み**(GitHub issue #5) |
 | U6 | 合格基準の数値 | §7.3 の「2 倍以上」「+15% 以内」「0.1° 以下」「5 倍以上」は案。シミュレーションの値から余裕を見て決めた |
 
 未解決・注意:
