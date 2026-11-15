@@ -76,9 +76,24 @@ docs/draft/2026-09-26-spec.md(仕様の集約版。正本は docs/2026-08-04-dyn
 - recovered/ … 消失した実測CSVを会話記録から復元したもの(*.csvの例外として追跡。README参照)
 - figs/ … 実測の図の正本(.dat+.gp+.png。スライド作成で再利用)
 - scripts/ … PC側ツール(設定注入・観測・解析・回帰確認・アクターのビルド)
-- slides/ … 発表スライドの構成案と生成スクリプト(pptx本体はGoogleスライド管理で追跡外)
-- README.md … M0当時の内容のまま(現状の説明には使わない)
-- ビルド成果物(target/, target-exp1/, build/等)、観測ログ(mqtt_log*/)、発表スライドの.pptxはgit管理外
+- README.md … 第三者向けの英語の説明(OSS 公開用、2026-11-15)。M0 当時の内容は docs/2026-08-05-m0-readme.md
+- CITATION.cff・CHANGELOG.md・CONTRIBUTING.md・SECURITY.md … OSS 公開用。scripts/ci-check.sh と .github/workflows/ci.yml が機材なしの回帰(CI)
+- slides/ は 2026-11-15 に外した(発表資料は公開しない。下の「公開と非公開」)
+- ビルド成果物(target/, target-exp1/, build/等)、観測ログ(mqtt_log*/)はgit管理外
+- ESP-IDF のパーティションテーブル(node-esp32/partitions_*.csv、bench-c5/partitions_*.csv。フラッシュの使い方の表)は
+  *.csv の除外の例外として追跡する
+
+## 公開と非公開(2026-11-15〜)
+
+- 本リポジトリは OSS として公開する(GitHub の組織 physical-edge-native)。ここに置くものはすべて公開されると考える。
+- **公開しないもの**は、隣の非公開のリポジトリ **../dyne-private** に置く(フォルダの構成は同じ: docs/・reference/・slides/)。
+  対象: 計画・MTG の記録、買い物・支出の記録、発表資料、会社名・個人名・発言を含む文書、実在の MAC アドレスなどを含む作業メモ。
+  命名(docs/YYYY-MM-DD-内容.md)と、更新したら報告する規律は dyne-private にも同じく当てはまる。
+  どちらに置くか判断できないときは、dyne-private に置いてユーザーに確認する。
+- 公開側の文書から dyne-private の文書を参照するときは、パスに dyne-private と明記する。
+- 実測データ・ログ・文書に、実在の機器の MAC アドレス、Wi-Fi の SSID・パスワード、トークンを入れない。
+  MAC アドレスは仮の値(02:00:00:00:…、ローカル管理のアドレス)に置き換えてからコミットする。
+  Wi-Fi の設定は node-esp32/sdkconfig.local(git 管理外)に書く。
 
 ## ビルドと検証(Windowsネイティブ)
 
