@@ -360,13 +360,89 @@ MAC(基板ごとに工場で書き込まれた通信の番地)とノード番号
 5. 記録: `first_flash_out\first_flash.csv`(MAC・ノード番号・フラッシュの大きさ・PSRAM・結果・時刻など)と
    `first_flash_out\logs\`(1 台ごとの esptool と起動のログの全文)。**git 管理外**(残すなら measured\ へ写す)。
 
-- ノード番号は MAC の末尾 1 バイト(main.c の dyne_node_id。menuconfig の番号を -1 のままにした場合)。
-  道具は起動のログの番号を正とし、MAC から計算した番号と照らす。**番号が別の基板と重なることがある**
+- ノード番号は MAC の末尾 1 バイト(dyne_node_id.c の dyne_node_id。menuconfig の番号を -1 のままにし、NVS に番号を
+  書いていない場合。NVS の番号は §9.0.2)。
+  道具は起動のログの番号を正とし、MAC から計算した番号と照らす(NVS の番号で起動した基板は照らさない)。**番号が別の基板と重なることがある**
   (末尾 1 バイトがでたらめなら、15 台で約 34%。同じ時期の基板は MAC が続き番号のことが多く、実際はもっと低いかもしれない)。
-  CSV に同じ番号の別の MAC があれば FAIL(理由 dup_id)にして知らせる。重なったときの直し方は未決(§11)。
+  CSV に同じ番号の別の MAC があれば(MAC ごとに最新の行で比べる)FAIL(理由 dup_id)にして知らせ、直し方の命令の例を表示する。
+  直し方は §9.0.2(2026-11-15 追記。§11 の 6. の (b))。
 - 1 台だけ: `... first_flash.ps1 --port COM5`。書かずに MAC と番号だけ記録し直す: `--skip-flash --port COM5`。
   保存したログを確かめ直す(基板不要): `--parse-log first_flash_out\logs\XXXX.log`。その他のオプションは `--help`。
 - 検査: `.venv\Scripts\python.exe -m unittest scripts/tests/test_first_flash.py -v`(合成したログ。scripts\tests\fixtures\first_flash\)。
+
+#### 9.0.2 ノード番号を NVS に置く(2026-11-15 追記。GitHub issue #19)
+
+全台に同じ像を書いたまま、MAC の末尾 1 バイトで番号が重なった基板にだけ別の番号を与えるため、番号を NVS
+(フラッシュの設定の保存領域。ESP-IDF の nvs_flash。名前空間 dyne、キー node_id、int32)に置けるようにした(§11 の 6. の (b))。
+**実機では未確認**(ビルドと PC 上の検査まで)。
+
+**番号の決まり方**(起動時に1回。node-esp32/main/dyne_node_id_core.c の dyne_node_id_select):
+
+| 順 | 条件 | 番号 | status の id_src |
+|---|---|---|---|
+| 1 | menuconfig の CONFIG_DYNE_NODE_ID が 0 以上 | その値(ビルドで固定。従来どおり。NVS より優先) | config |
+| 2 | NVS に番号があり、0〜255 の範囲 | NVS の番号 | nvs |
+| 3 | それ以外(既定) | Wi-Fi の MAC の末尾 1 バイト(従来の -1 の動き) | mac |
+
+- 範囲を 0〜255 にしたのは、MAC の末尾 1 バイトと同じ範囲にして、PC 側の道具の前提を変えないため。範囲外の値が NVS に
+  あれば無視して MAC の番号にする(起動のログに警告)。
+- 起動のログ: `[dyne] node id 38 source=nvs (nvs=38, mac last byte=37)` と、従来の見出し `==== Dyne node-esp32 (node id 38) ====`。
+  見出しは NVS を読んだ後に出すため、`[dyne] heap(boot)` と `[dyne] boot #…` の行の後に移した。
+- online の status(dyne/node/<id>/status)に `"id_src":"mac"|"nvs"|"config"` を足した。NVS を書き換えて次の起動で
+  番号が変わる場合は `"id_next":N` も載る(再起動を忘れていることが分かる)。
+- USB の書き込み(build.ps1 -Flash、first_flash.py)と OTA は NVS の区画を書かないので、NVS の番号は書き直しても残る。
+  消えるのは、フラッシュ全体の消去(first_flash.py --erase、idf.py erase-flash)と、パーティションテーブルの変更などで
+  NVS を作り直したとき(dyne_ops.c の dyne_ops_boot_early)。
+
+**ctl 命令 node_id**(dyne/ctl/<id> または dyne/ctl/all。返事は dyne/node/<今の番号>/id/ack、QoS1、retain なし):
+
+| 命令 | 動き |
+|---|---|
+| `{"cmd":"node_id"}` | 今の番号・決め方・NVS の値・次の起動の番号を返す。dyne/ctl/all に送ると全台が返事をする(番号と MAC の一覧になる) |
+| `{"cmd":"node_id","mac":"02:00:00:00:02:25","id":38}` | この MAC の基板の NVS に 38 を書く。ほかの基板は黙って無視する |
+| `{"cmd":"node_id","mac":"02:00:00:00:02:25","id":-1}` | NVS の番号を消す(次の起動から MAC の番号に戻る) |
+| 上の2つに `"reboot":true` を足す | 番号が変わる場合は、返事の後にすぐ再起動する |
+
+- **mac は設定・消去では必須**。番号の重なった 2 台は同じ dyne/ctl/<id> を購読しているので、mac が無いと両方が同じ番号に
+  書き換わる。mac の書き方は `02:00:00:00:02:25`・`02-00-00-00-02-25`・`020000000225`(大文字小文字は問わない)。
+  mac が無い設定の命令は `"err":"mac required"` で断る。
+- id は 0〜255 の整数か -1(消す)。計算の実行中(BSP の最中)は `"err":"running"` で断る(フラッシュへの書き込みの間は
+  フラッシュ上のコードが止まり、刻みの時間を乱すため)。
+- 返事の例: `{"ok":true,"op":"set","mac":"02:00:00:00:02:25","id":37,"src":"mac","stored":38,"next":38,"next_src":"nvs","reboot":false}`
+  (id・src は今動いている番号、next・next_src は次の起動の番号)。menuconfig で番号を固定した像では、NVS に書いても
+  next は config の番号のまま(next_src = config)。
+
+**新しい番号が効くのは次の起動から**(既定では再起動しない)。番号は MQTT の購読(dyne/cfg/<id>・dyne/ctl/<id>)、
+接続時に登録する遺言(LWT。切断時にブローカーが dyne/node/<id>/status へ offline を貼る)、貼り置きの status、
+ワイヤ形式v2 の送信元、IMU の標本のトピックに使われている。走っている途中で変えると古い番号の購読・遺言・貼り置きが
+残り、計算の途中なら送信元が変わる。再起動すれば全部が新しい番号でそろう。`"reboot":true` か、ctl 命令 reboot で再起動する。
+
+**手順**(番号の重なった基板 B に 38 を与える。B の MAC は first_flash.py の CSV か、`{"cmd":"node_id"}` の返事で分かる):
+
+1. 全台を Wi-Fi とブローカーにつないだ状態で(Git Bash の例。PowerShell 5.1 では -m の中の `"` を `\"` にする):
+   `mosquitto_sub -h <ブローカー> -t 'dyne/node/+/id/ack' -v` を別の窓で開いておき、
+   `mosquitto_pub -h <ブローカー> -t dyne/ctl/37 -m '{"cmd":"node_id","mac":"02:00:00:00:02:25","id":38,"reboot":true}'`
+2. 返事が `"ok":true,"next":38` で、B が再起動して dyne/node/38/status に `"id_src":"nvs"` の online が出れば完了。
+   もう 1 台(A)は 37 のまま(返事もしない)。
+3. 記録を直す: B を USB につないで `... first_flash.ps1 --skip-flash --port COM5`(CSV に 38 の行が足される。dup_id の判定は
+   MAC ごとに最新の行で比べるので、B の古い 37 の行は数えない)。基板のラベルも書き直す。
+
+- dyne/ctl は retain 禁止の規約どおり、貼り置いた命令は無視される(-r を付けない)。
+- 検査(基板不要): `node-esp32/host_test/node_id_test.c`(決め方の順、範囲外の NVS の値、MAC の文字列、命令の解釈、
+  MAC の番号が重なった 2 台に別の番号を与える流れ)。ビルドと実行は同ファイルの先頭。`scripts/ci-check.sh` の [6] でも動く
+  (C コンパイラが無ければ飛ばす)。
+
+| ファイル | 内容 |
+|---|---|
+| node-esp32/main/dyne_node_id_core.c/.h(新規) | 決め方と命令の解釈(ESP-IDF に依存しない) |
+| node-esp32/main/dyne_node_id.c/.h(新規) | dyne_node_id()(main.c から移した)、NVS の読み書き、ctl 命令 node_id、status の項目 |
+| node-esp32/main/main.c | 命令の受け口。起動の見出しを NVS の初期化の後へ |
+| node-esp32/main/dyne_mqtt.c | online の status に id_src・id_next |
+| node-esp32/main/Kconfig.projbuild | DYNE_NODE_ID の説明(-1 = NVS、無ければ MAC) |
+| node-esp32/main/CMakeLists.txt | 新しいソース |
+| node-esp32/host_test/node_id_test.c(新規) | PC 上の検査 |
+| scripts/first_flash.py, scripts/tests/test_first_flash.py | 起動のログの決め方の行を読む。NVS の番号は MAC と照らさない。重なりの判定を MAC ごとの最新の行で。dup_id のときに命令の例を表示 |
+| scripts/ci-check.sh | [6] 上の検査を C コンパイラでビルドして動かす |
 
 ### 9.1 各部分の確認(1台、USB 給電のまま)
 
@@ -428,6 +504,8 @@ MAC(基板ごとに工場で書き込まれた通信の番地)とノード番号
    (b) 番号を NVS(フラッシュの設定の保存領域)に置き、ctl 命令や最初の書き込みの道具で書き込めるようにする(ファームの変更が要る)、
    (c) MAC の末尾 2 バイトなど重なりにくい決め方に変える(番号が 255 を超え、PC 側の道具とトピックの扱いの確認が要る)。
    推奨は (b)(像は 1 つのまま、基板のラベルと番号を人が決められる)。15 台が届いて重なりが無ければ当面は不要。
+   → **(b) に決定**(ユーザー、GitHub issue #19)。作ったものは §9.0.2(2026-11-15)。最初の書き込みの道具からは書かず、
+   ctl 命令 node_id(Wi-Fi・ブローカーが要る)で書く。シリアルから書く方法(Wi-Fi なしで書ける)は作っていない。
 
 ---
 

@@ -46,6 +46,7 @@
 #include "dyne_ops.h"      /* 2026-11-11: OTA・計算部品のパーティション・自己確認・稼働時間の報告 */
 #include "dyne_timesync.h" /* 2026-11-11: 時刻同期 */
 #include "dyne_sense.h"    /* 2026-11-13: 測距・首振り・IMU */
+#include "dyne_node_id.h"  /* 2026-11-15: ノード番号を NVS に置く (issue #19) */
 
 static const char *TAG = "dyne-node";
 
@@ -79,21 +80,7 @@ static void log_heap(const char *when)
            (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 }
 
-int dyne_node_id(void)
-{
-#if CONFIG_DYNE_NODE_ID >= 0
-    return CONFIG_DYNE_NODE_ID;
-#else
-    /* 未設定ならMAC末尾バイト (仮ID)。本運用では menuconfig で明示すること */
-    static int id = -1;
-    if (id < 0) {
-        uint8_t mac[6];
-        esp_read_mac(mac, ESP_MAC_WIFI_STA);
-        id = mac[5];
-    }
-    return id;
-#endif
-}
+/* dyne_node_id() は dyne_node_id.c (2026-11-15、issue #19: menuconfig → NVS → MAC の末尾1バイトの順で決める) */
 
 /* ==== ワイヤ形式 (dyne-wire と同一・40バイト) ==== */
 uint32_t dyne_crc32(const uint8_t *d, size_t len)
@@ -398,6 +385,8 @@ void dyne_on_ctl(const char *payload, int len)
             /* 2026-11-11: timesync / ota_fw / ota_actor / actor_rollback / health (dyne_ops.c) */
         } else if (dyne_range_on_ctl(s, root) || dyne_imu_on_ctl(s, root)) {
             /* 2026-11-13: range / pan (dyne_range.c)、imu (dyne_imu.c) */
+        } else if (dyne_node_id_on_ctl(s, root)) {
+            /* 2026-11-15: node_id (dyne_node_id.c。NVS の番号の設定・消去・報告) */
         } else if (strcmp(s, "start") == 0) {
             if (!s_actor_ok) {
                 dyne_mqtt_pub_status(DYNE_ST_ERR, "\"err\":\"no actor loaded\"");
@@ -934,7 +923,6 @@ static void run_bsp(void)
 
 static void *node_task(void *arg)
 {
-    printf("\n==== Dyne node-esp32 (node id %d) ====\n", dyne_node_id());
     /* WASMの初期化 (線形メモリ128KBの連続確保) を**Wi-Fiより先**に行う
      * (2026-09-18 実機不具合対応: Wi-Fi・MQTT起動後の断片化したヒープでは
      * 128KBの連続ブロックが取れずESPr32 (PSRAMなし) で instantiate が失敗した。
@@ -942,6 +930,10 @@ static void *node_task(void *arg)
     log_heap("boot");
     /* 2026-11-11: NVS の初期化・再起動の理由・起動回数 (dyne_ops.c) */
     dyne_ops_boot_early();
+    /* 2026-11-15: ノード番号は NVS を読んでから決める (issue #19)。そのため起動の見出しはここで出す
+     * (以前は関数の先頭。scripts/first_flash.py は見出しの位置に依らず読む) */
+    dyne_node_id_init();
+    printf("\n==== Dyne node-esp32 (node id %d) ====\n", dyne_node_id());
     /* 2026-11-08: 外箱の C 実装と照合用バイト列 (Rust のテストと共有) の一致 */
     bool env_ok = dyne_env_selftest();
     printf("[dyne] wire v2 envelope selftest: %s\n", env_ok ? "PASS" : "FAIL");

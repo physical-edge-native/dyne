@@ -14,11 +14,16 @@
   5. CSV に1行追記し、ノード番号を大きく表示する (基板のラベル書き用)。
   6. 基板が外されるのを待ち、次の基板を待つ。Ctrl+C で終わる。
 
-ノード番号の決まり方 (node-esp32\\main\\main.c の dyne_node_id): menuconfig の CONFIG_DYNE_NODE_ID が -1 (既定) なら
-Wi-Fi の MAC (ESP_MAC_WIFI_STA。ESP32 では esptool が表示する MAC と同じ) の末尾1バイト (0〜255)。
-このツールは起動のログの番号を正とし、esptool の MAC から計算した番号と食い違えば不合格にする。
+ノード番号の決まり方 (node-esp32\\main\\dyne_node_id.c の dyne_node_id。2026-11-15、issue #19 で NVS を追加):
+menuconfig の CONFIG_DYNE_NODE_ID が 0 以上ならその値。-1 (既定) なら、NVS (フラッシュの設定の保存領域) に
+ctl 命令 node_id で書いた番号があればそれ、無ければ Wi-Fi の MAC (ESP_MAC_WIFI_STA。ESP32 では esptool が表示する
+MAC と同じ) の末尾1バイト (0〜255)。起動のログの行 "[dyne] node id N source=nvs|mac|config" で決め方が分かる。
+このツールは起動のログの番号を正とし、MAC から決まったはずの番号が esptool の MAC から計算した番号と食い違えば
+不合格にする (NVS の番号のときは照らさない)。書き込み (write_flash) は NVS の区画を消さないので、NVS の番号は
+書き直しても残る (--erase で消える)。
 末尾1バイトなので、別の基板と番号が重なることがある (15台なら3割ほどの確率)。CSV に同じ番号で別の MAC が
-あれば不合格 (dup_id) にして知らせる。
+あれば (MAC ごとに最新の行で比べる) 不合格 (dup_id) にして知らせ、NVS に番号を書く ctl 命令の例を表示する
+(docs/2026-11-13-firmware-nodes.md §9.0.2)。
 
 出力 (既定は first_flash_out\\。git 管理外): first_flash.csv (1台1行) と logs\\<時刻>_<MAC>.log (esptool と起動のログ全文)。
 CSV の列: timestamp, port, usb_serial, mac, node_id, id_from_mac, chip, flash_detected, psram_mb, psram_memtest,
@@ -94,7 +99,8 @@ PROBLEM_TEXT = {
     "fw_mismatch": "動いている像の ELF の SHA-256 が、書いた像と違う",
     "panic": "異常終了 (Guru Meditation・abort・ブラウンアウトなど)",
     "reboot": "起動を繰り返した",
-    "dup_id": "同じノード番号の別の基板が CSV に既にある (番号の重なり。運用前に解消が要る)",
+    "dup_id": "同じノード番号の別の基板が CSV に既にある (番号の重なり。運用前に解消が要る。"
+              "ctl 命令 node_id で NVS に別の番号を書く: docs/2026-11-13-firmware-nodes.md §9.0.2)",
 }
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
@@ -161,6 +167,7 @@ def parse_boot_log(text):
         "reset_reasons": [m.group(2) for m, _ in boots],
         "download_mode": False,
         "node_id": None,
+        "node_id_src": None,
         "psram_mb": None,
         "psram_memtest": None,
         "psram_error": None,
@@ -180,6 +187,10 @@ def parse_boot_log(text):
     m = re.search(r"==== Dyne node-esp32 \(node id (-?\d+)\) ====", first)
     if m:
         r["node_id"] = int(m.group(1))
+    # 2026-11-15 (issue #19): 番号の決め方。この行が無いのは NVS 対応より前のファーム (MAC か menuconfig)
+    m = re.search(r"\[dyne\] node id (-?\d+) source=(\w+)", first)
+    if m:
+        r["node_id_src"] = m.group(2)
     # ESP-IDF 5.x は "Found 8MB PSRAM device"、4.x は "Found 8MB SPI RAM device"
     m = re.search(r"Found (\d+)MB (?:PSRAM device|SPI RAM device)", first)
     if m:
@@ -264,6 +275,9 @@ def evaluate(esp, boot, expect):
         probs.append("largest_small")
     if boot["node_id"] is None:
         probs.append("no_node_id")
+    elif boot.get("node_id_src") == "nvs":
+        # NVS に書いた番号 (ctl 命令 node_id)。MAC からは計算できないので照らさない
+        notes.append(f"ノード番号 {boot['node_id']} は NVS に保存した番号 (MAC の末尾からではない)")
     else:
         want = expect.get("fixed_id")
         mac = esp.get("mac") or boot["wifi_mac"]
@@ -290,14 +304,18 @@ def evaluate(esp, boot, expect):
 
 
 def find_duplicate_ids(rows, mac, node_id):
-    """CSV の既存の行のうち、同じノード番号で MAC が違うものの MAC の一覧 (同じ基板の書き直しは数えない)"""
+    """CSV の既存の行のうち、同じノード番号で MAC が違うものの MAC の一覧 (同じ基板の書き直しは数えない)。
+    基板ごとに最新の行だけで比べる (NVS に番号を書いて直した基板の古い行を、重なりと数えないため)"""
     if node_id is None or not mac:
         return []
-    out = []
+    latest = {}
     for row in rows:
-        if str(row.get("node_id", "")) == str(node_id) and row.get("mac") and row["mac"].lower() != mac.lower():
-            if row["mac"].lower() not in out:
-                out.append(row["mac"].lower())
+        if row.get("mac"):
+            latest[row["mac"].lower()] = row
+    out = []
+    for m, row in latest.items():
+        if m != mac.lower() and str(row.get("node_id", "")) == str(node_id):
+            out.append(m)
     return out
 
 
@@ -506,6 +524,12 @@ def report(result, probs, notes, boot, esp, dups):
         extra = ""
         if p == "dup_id":
             extra = f" ({', '.join(dups)})"
+            nid = boot.get("node_id") if boot else None
+            mac = esp.get("mac") or (boot or {}).get("wifi_mac")
+            if nid is not None and mac:
+                extra += ("\n    直し方の例 (この基板に NNN を与える。Wi-Fi・ブローカーにつながった状態で):\n"
+                          f"    mosquitto_pub -h <ブローカー> -t dyne/ctl/{nid} "
+                          f"-m '{{\"cmd\":\"node_id\",\"mac\":\"{mac.upper()}\",\"id\":NNN,\"reboot\":true}}'")
         elif p == "flash_size":
             extra = f" (検出 {esp.get('flash_detected')})"
         elif p == "psram" and boot:

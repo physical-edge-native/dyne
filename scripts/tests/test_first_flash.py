@@ -161,6 +161,23 @@ class BootLog(unittest.TestCase):
         self.assertEqual(ff.evaluate(e, b, dict(EXPECT, fixed_id=42))[0], "PASS")
         self.assertEqual(ff.evaluate(e, b, dict(EXPECT, fixed_id=7))[1], ["id_mismatch"])
 
+    def test_nvs_id(self):
+        # issue #19: NVS に書いた番号で起動した基板は、MAC から計算した番号と照らさない
+        e = ff.parse_esptool(fx("esptool_write_ok.txt"))
+        t = fx("boot_ok.log").replace("==== Dyne node-esp32 (node id 42) ====",
+                                      "[dyne] node id 7 source=nvs (nvs=7, mac last byte=42)\n"
+                                      "==== Dyne node-esp32 (node id 7) ====")
+        b = ff.parse_boot_log(t)
+        self.assertEqual((b["node_id"], b["node_id_src"]), (7, "nvs"))
+        res, probs, notes = ff.evaluate(e, b, EXPECT)
+        self.assertEqual((res, probs), ("PASS", []))
+        self.assertEqual(len(notes), 1)
+        # 決め方が mac なのに番号が MAC と違えば、従来どおり不合格
+        t2 = t.replace("source=nvs", "source=mac")
+        self.assertEqual(ff.evaluate(e, ff.parse_boot_log(t2), EXPECT)[1], ["id_mismatch"])
+        # NVS 対応より前のファーム (決め方の行が無い) は従来どおり
+        self.assertIsNone(ff.parse_boot_log(fx("boot_ok.log"))["node_id_src"])
+
     def test_fw_mismatch(self):
         e = ff.parse_esptool(fx("esptool_write_ok.txt"))
         b = ff.parse_boot_log(fx("boot_ok.log"))
@@ -197,6 +214,10 @@ class Helpers(unittest.TestCase):
         self.assertEqual(ff.find_duplicate_ids(rows, "02:00:00:00:00:2a", 42), ["02:00:00:00:01:2a"])
         self.assertEqual(ff.find_duplicate_ids(rows, "02:00:00:00:00:08", 8), [])
         self.assertEqual(ff.find_duplicate_ids(rows, "02:00:00:00:00:07", 7), [])  # 同じ基板の書き直し
+        # issue #19: 重なった基板に NVS で 43 を与えて記録し直したら、その基板の古い行 (42) は数えない
+        rows.append({"mac": "02:00:00:00:01:2a", "node_id": "43"})
+        self.assertEqual(ff.find_duplicate_ids(rows, "02:00:00:00:00:2a", 42), [])
+        self.assertEqual(ff.find_duplicate_ids(rows, "02:00:00:00:00:99", 43), ["02:00:00:00:01:2a"])
 
     def test_flash_plan(self):
         fa = {"write_flash_args": ["--flash_mode", "dio", "--flash_size", "8MB", "--flash_freq", "40m"],
