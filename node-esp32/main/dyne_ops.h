@@ -10,7 +10,7 @@
 #include "cJSON.h"
 #include "dyne_actor_slot.h"
 
-/* 起動直後 (Wi-Fi より前) に1回: NVS の初期化 (区画表の変更後は消去して作り直す)、
+/* 起動直後 (Wi-Fi より前) に1回: NVS の初期化 (パーティションテーブルの変更後は消去して作り直す)、
  * 再起動の理由・起動回数・前回の稼働時間の記録 */
 void dyne_ops_boot_early(void);
 

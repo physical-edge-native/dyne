@@ -29,7 +29,7 @@
 |---|---|---|
 | G1 時刻同期 | SNTP + 独自の往復の交換(最小の往復時間の標本を採り、直近32標本に直線を当てはめてずれとドリフトを推定)。推定の質(往復時間・推定との差・ドリフト)を MQTT で報告。センサ・RSSI・ワイヤ形式v2 の時刻印の欄に同期した時刻を付ける。試験モード(整数秒でピンを切り替え、同期あり/SNTP のみ/同期なしの3条件) | C の計算部分を PC で模擬(揺らぎ小で最大誤差 14µs、ドリフト誤差 0.06ppm)。PC の時刻サーバと C・Python の問い合わせ側で実際に UDP の往復 |
 | G1 PC 側 | 標準ライブラリだけの NTP サーバ(scripts/dyne_ntp_server.py)、設定と記録(scripts/dyne_timesync.py)、ロジックアナライザの記録の解析(scripts/pps_analyze.py) | 合成した記録で解析の正しさを確認 |
-| G2 OTA | 区画表を アプリ2面 + otadata + 計算部品の区画 に変更(4MB と 8MB の2種)。ファームの OTA(HTTP、像の SHA-256 の照合、自己確認に失敗したら元に戻す)。計算部品の OTA(2枠、SHA-256 と長さを照合、前の計算部品を残す、壊れていれば前の枠 → 埋め込みの順に戻る) | ESP32・ESP32-C5 の両方でビルド成功。壊した像を esptool で独立に検査。ノードのふりをするプログラムで PC 側ツールを通しで確認(6通りすべて期待どおり) |
+| G2 OTA | パーティションテーブルを アプリ2面 + otadata + 計算部品の区画 に変更(4MB と 8MB の2種)。ファームの OTA(HTTP、像の SHA-256 の照合、自己確認に失敗したら元に戻す)。計算部品の OTA(2枠、SHA-256 と長さを照合、前の計算部品を残す、壊れていれば前の枠 → 埋め込みの順に戻る) | ESP32・ESP32-C5 の両方でビルド成功。壊した像を esptool で独立に検査。ノードのふりをするプログラムで PC 側ツールを通しで確認(6通りすべて期待どおり) |
 | G2 PC 側 | 一斉配布ツール(scripts/dyne_ota.py): HTTP で配り、MQTT で N 台へ指示し、結果と所要時間を CSV に。わざと壊したファーム・計算部品を作って配れる | 同上 |
 | G11 | 起動時に再起動の理由(電圧低下 brownout を含む)・起動回数・**前回の稼働時間**を online の status で、稼働時間などを 10 秒ごとに health で報告 | ビルドのみ |
 | 物理シミュレーション環境 | 作っていない(指示どおり)。§10 にモデル化の方針だけを書いた | — |
@@ -51,8 +51,8 @@
 | node-esp32/main/sensors.c, rssi.c | JSON に ts_us(同期した時刻)を追加。t_ms は従来どおり |
 | node-esp32/main/Kconfig.projbuild | 時刻サーバ・ポート・周期・試験モードのピン・自己確認の期限・health の周期 |
 | node-esp32/main/CMakeLists.txt | 新しいソースと依存コンポーネント |
-| node-esp32/partitions_4mb.csv, partitions_8mb.csv(新規) | 区画表(§4.1) |
-| node-esp32/sdkconfig.defaults | 区画表を独自のものに、ロールバック有効、平文 HTTP の OTA を許可、SNTP の間隔 15 秒 |
+| node-esp32/partitions_4mb.csv, partitions_8mb.csv(新規) | パーティションテーブル(§4.1) |
+| node-esp32/sdkconfig.defaults | パーティションテーブルを独自のものに、ロールバック有効、平文 HTTP の OTA を許可、SNTP の間隔 15 秒 |
 | node-esp32/sdkconfig.defaults.esp32c5(新規) | C5 は 8MB フラッシュと partitions_8mb.csv |
 | node-esp32/build.ps1(新規) | OTA 対応版のビルド(ターゲットごとに build-ota-esp32/・build-ota-esp32c5/) |
 | node-esp32/host_test/timesync_test.c, actor_slot_test.c(新規) | C の計算部分の PC 上の検査 |
@@ -64,7 +64,7 @@
 | scripts/check-timesync-ota.ps1(新規) | 実機なしでできる確認の一括実行 |
 | .gitignore | node-esp32/build-ota-*/ を追加 |
 
-Rust は変更していない。既存の build/・build-c5/ は従来どおり「アプリ1個」の区画表のままビルドできる(§11.1)。
+Rust は変更していない。既存の build/・build-c5/ は従来どおり「アプリ1個」のパーティションテーブルのままビルドできる(§11.1)。
 
 ---
 
@@ -146,7 +146,7 @@ PC 側の Python の受信の遅れ、ノード側のタスクの起床の遅れ
 
 ## 4. OTA(G2)
 
-### 4.1 区画表
+### 4.1 パーティションテーブル
 
 | 区画 | 4MB(ESPr、partitions_4mb.csv) | 8MB(XIAO ESP32C5、partitions_8mb.csv) |
 |---|---|---|
@@ -161,7 +161,7 @@ PC 側の Python の受信の遅れ、ノード側のタスクの起床の遅れ
 
 **XIAO ESP32C5 のフラッシュは 8MB と想定した**(Seeed の製品説明の記憶による。届いたら `idf.py -p COMx flash_id`
 の "Detected flash size" で確かめる)。4MB だった場合は、menuconfig でフラッシュの大きさを 4MB、
-区画表を partitions_4mb.csv にするか、sdkconfig.defaults.esp32c5 の2行を消してビルドし直す。
+パーティションテーブルを partitions_4mb.csv にするか、sdkconfig.defaults.esp32c5 の2行を消してビルドし直す。
 
 ### 4.2 ファームの OTA
 
@@ -257,7 +257,7 @@ SHA-256 の照合は「壊れていない・取り違えていない」ことの
 6. 計算部品の目録(長さ・SHA-256)は MQTT の命令の中に入れた(ノードが別に目録ファイルを取りに行かない)。
 7. 計算部品を積めなくても Wi-Fi・MQTT は上げるようにした(**従来は止まっていた**)。OTA で直せるようにするため。
    この場合 start は "no actor loaded" で断る。
-8. 区画表の変更後に NVS の中身が合わない場合は**消して作り直す**(NVS に置いているのは Wi-Fi の較正値と本機能の記録のみ)。
+8. パーティションテーブルの変更後に NVS の中身が合わない場合は**消して作り直す**(NVS に置いているのは Wi-Fi の較正値と本機能の記録のみ)。
 9. ファームの OTA は **ESP-IDF の esp_https_ota を平文 HTTP で**使う(CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP)。
 10. 壊れたファームの試験は、**別のファームをビルドせず**、PC 側で目印を書き換えて SHA-256 を付け直す方法にした。
     esptool の image_info で、書き換えた像が正しい像として通ること・反転した像が通らないことを確認した。
@@ -279,7 +279,7 @@ SHA-256 の照合は「壊れていない・取り違えていない」ことの
    ```
    menuconfig の「Dyne Node」で Wi-Fi SSID・パスワード・MQTT broker URI(`mqtt://192.168.10.2:1883`)を設定する。
    ノード ID は -1(MAC の末尾)のままでよい(全台同一のファームのため)。ESPr は `-Target esp32`。
-3. 書き込み(区画表・ブートローダ・otadata の初期値を含めて全体を書く。**区画表が変わるので、
+3. 書き込み(パーティションテーブル・ブートローダ・otadata の初期値を含めて全体を書く。**パーティションテーブルが変わるので、
    以前のファームの入った基板も一度は USB で書き直す必要がある**):
    ```
    powershell -ExecutionPolicy Bypass -File node-esp32\build.ps1 -Target esp32c5 -Flash COM5
@@ -372,7 +372,7 @@ P6 により、同じ仕組みを将来の物理シミュレーション環境(G
 
 すべて警告なしでビルド成功(ESP-IDF 5.5.5、2026-11-11)。`idf.py build` の表示から:
 
-| ビルド | 区画表 | アプリ(.bin) | アプリの区画 | 空き | ブートローダ |
+| ビルド | パーティションテーブル | アプリ(.bin) | アプリの区画 | 空き | ブートローダ |
 |---|---|---|---|---|---|
 | **OTA 版 ESP32**(build-ota-esp32/) | partitions_4mb.csv | 0x127320 = 1,209,120 B | 0x1A0000 = 1,703,936 B | **29%** | 0x6660(空き 9%、ロールバック込み) |
 | **OTA 版 ESP32-C5**(build-ota-esp32c5/) | partitions_8mb.csv | 0x161C90 = 1,449,104 B | 0x300000 = 3,145,728 B | **54%** | 0x56F0(空き 9%) |
@@ -381,9 +381,9 @@ P6 により、同じ仕組みを将来の物理シミュレーション環境(G
 
 - 2026-11-08 の値(ESP32 1,140,208 B、C5 1,366,528 B)からの増分は ESP32 +69KB、C5 +83KB
   (esp_https_ota・HTTP クライアント・SNTP・本機能)。ESP32 の静的 RAM(DRAM)は 63,744 → 65,128 B(+1.4KB)。
-- C5 を 4MB の区画表で使う場合の空きは 1,449,104 / 1,703,936 = 15%(計算値。ビルドはしていない)。
+- C5 を 4MB のパーティションテーブルで使う場合の空きは 1,449,104 / 1,703,936 = 15%(計算値。ビルドはしていない)。
 - 従来の build-c5/(アプリ1個、1.5MB)は空きが 6% まで減った。C5 は OTA 版(8MB)へ移ることを勧める。
-- 既存の sdkconfig(build/・build-c5/)は値を保つため、従来のビルドは「アプリ1個」の区画表のまま。この場合
+- 既存の sdkconfig(build/・build-c5/)は値を保つため、従来のビルドは「アプリ1個」のパーティションテーブルのまま。この場合
   OTA の命令は "no ota partition" / "no actors partition" で失敗し、計算部品は従来どおり埋め込みを使う。
 
 ### 11.2 PC 上の検査

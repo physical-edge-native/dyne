@@ -186,7 +186,7 @@ void dyne_ops_boot_early(void)
 {
     esp_err_t e = nvs_flash_init();
     if (e == ESP_ERR_NVS_NO_FREE_PAGES || e == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        /* 区画表を変えた直後などで NVS の区画の中身が合わない。消して作り直す
+        /* パーティションテーブルを変えた直後などで NVS の区画の中身が合わない。消して作り直す
          * (NVS に置くのは Wi-Fi の較正値と本ファイルの記録だけで、失っても困らない) */
         ESP_LOGW(TAG, "nvs: %s -> erase", esp_err_to_name(e));
         nvs_flash_erase();
