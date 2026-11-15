@@ -52,8 +52,10 @@ int dyne_range_sensors(uint32_t *id, double *x, double *y, double *yaw, int max)
 int dyne_range_actor_zone_row(void);
 /* センサが動いているか */
 bool dyne_range_active(void);
-/* アクターへ渡したフレームを dyne/node/<id>/range_fed に発行する (PC で同じ入力を再生するため) */
-void dyne_range_publish_fed(const dyne_range_frame_t *f, uint64_t step);
+/* アクターへ渡したフレームを dyne/node/<id>/range_fed に QoS 1 で発行する (PC で同じ入力を再生するため。
+ * 2026-11-15: 実行の設定の replay.log のときだけ使う)。MQTT のアウトボックスが max_outbox バイトを超えていたら
+ * 送らない。戻り値 0 = 積んだ、負 = 送らなかった (呼び手が数える) */
+int dyne_range_publish_fed(const dyne_range_frame_t *f, uint64_t step, int max_outbox);
 
 /* ==== IMU (dyne_imu.c) ==== */
 

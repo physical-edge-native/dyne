@@ -8,6 +8,8 @@
 #   4. 2D: several partitions with packet loss / latency / pauses must match bit for bit
 #   5. determinism: two runs with the same arguments produce identical output
 #   6. firmware host test: the node id selection of node-esp32, built with the host C compiler
+#   7. hardware-input replay: synthetic records (range frames, IMU samples) replay bit for bit;
+#      a one-bit change in an input is detected (needs Python 3.8+, standard library only)
 #
 # Usage (from the repository root):  bash scripts/ci-check.sh
 set -euo pipefail
@@ -71,6 +73,44 @@ else
   printf '%-16s %s\n' "node_id" "$line"
   [ "$line" = "PASS" ] || fail=1
   rm -rf "$tdir"
+fi
+
+echo "== [7] hardware-input replay on synthetic records (issue #2) =="
+# A recorded run (range frames + node hashes, same format the firmware publishes over MQTT) must replay
+# bit for bit even with a different seed and network loss; flipping one bit of one input must fail.
+# Same for the IMU fusion actor with a synthetic IMU record.
+PY="${PYTHON:-}"
+if [ -z "$PY" ]; then
+  for c in .venv/Scripts/python.exe .venv/bin/python python3 python; do
+    if "$c" -c "import sys; sys.exit(sys.version_info < (3, 8))" > /dev/null 2>&1; then PY="$c"; break; fi
+  done
+fi
+if [ -z "$PY" ]; then echo "no Python 3.8+ found (set PYTHON=...): FAIL"; fail=1; else
+  (cd crates/sdf2d-grid-actor && cargo build --release --target wasm32-unknown-unknown)
+  (cd crates/imu-fusion-actor && cargo build --release --target wasm32-unknown-unknown)
+  WS="crates/sdf2d-grid-actor/target/wasm32-unknown-unknown/release/sdf2d_grid_actor.wasm"
+  WI="crates/imu-fusion-actor/target/wasm32-unknown-unknown/release/imu_fusion_actor.wasm"
+  RT="target/ci-replay"
+  rm -rf "$RT"; mkdir -p "$RT"
+  expect_code() { # name, expected exit code, regex the output must contain, command...
+    local name="$1" want="$2" pat="$3"; shift 3
+    local got=0
+    "$@" > "$RT/$name.log" 2>&1 || got=$?
+    if [ "$got" -eq "$want" ] && grep -qE "$pat" "$RT/$name.log"; then printf '%-16s OK (exit %s)\n' "$name" "$got"
+    else printf '%-16s FAIL (exit %s, expected %s and /%s/; see %s)\n' "$name" "$got" "$want" "$pat" "$RT/$name.log"; fail=1; fi
+  }
+  SHAPE=(--scene crates/dyne-sim2d/scenes/empty.txt --px 2 --py 2 --steps 120 --quiet)
+  expect_code "range-record" 0 "^PASS \(bit-exact\)" "$SIM2" --wasm "$WS" "${SHAPE[@]}" --loss 0.1 --replay-record "$RT/range.jsonl" --replay-hash-every 10
+  expect_code "range-replay" 0 "^ALL PASS" "$PY" scripts/hw_replay.py check "$RT/range.jsonl" --wasm "$WS" --sim "$SIM2" --out "$RT/r1" -- "${SHAPE[@]}" --seed 7 --loss 0.2 --lat-ms 5
+  "$PY" scripts/hw_replay.py corrupt "$RT/range.jsonl" "$RT/range_bad.jsonl" --node 1 --kind range --step 30 > /dev/null
+  expect_code "range-1bit" 1 "^FAIL[[:space:]]*$" "$PY" scripts/hw_replay.py check "$RT/range_bad.jsonl" --wasm "$WS" --sim "$SIM2" --out "$RT/r2" -- "${SHAPE[@]}"
+  IMU=(--px 2 --py 2 --nx 6 --ny 6 --dt 0.02 --steps 120 --quiet)
+  "$PY" scripts/hw_replay.py synth-imu "$RT/imu_synth.jsonl" --nodes 4 --steps 120 --dt 0.02 > /dev/null
+  "$PY" scripts/hw_replay.py convert "$RT/imu_synth.jsonl" --out "$RT/imu_synth.txt" --steps 120 > /dev/null
+  expect_code "imu-record" 0 "^REPLAY: no node hashes" "$SIM2" --wasm "$WI" "${IMU[@]}" --replay "$RT/imu_synth.txt" --replay-record "$RT/imu.jsonl" --replay-hash-every 10
+  expect_code "imu-replay" 0 "^ALL PASS" "$PY" scripts/hw_replay.py check "$RT/imu.jsonl" --wasm "$WI" --sim "$SIM2" --out "$RT/i1" -- "${IMU[@]}" --seed 7 --loss 0.2
+  "$PY" scripts/hw_replay.py corrupt "$RT/imu.jsonl" "$RT/imu_bad.jsonl" --node 2 --kind imu --step 30 > /dev/null
+  expect_code "imu-1bit" 1 "^FAIL[[:space:]]*$" "$PY" scripts/hw_replay.py check "$RT/imu_bad.jsonl" --wasm "$WI" --sim "$SIM2" --out "$RT/i2" -- "${IMU[@]}"
 fi
 
 if [ "$fail" -ne 0 ]; then echo "CI CHECK FAILED"; exit 1; fi

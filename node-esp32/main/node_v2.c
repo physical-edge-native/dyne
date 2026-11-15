@@ -35,12 +35,17 @@
  *   time_mode・offset_us + offset_per_idx_us × node.idx は CFG_TIME_MODE・CFG_TS_OFFSET_US に入れる (わざと同期を崩す)。
  *   融合のアクター (dyne_imu_push を持つ) なら、区間の番号 (dyne_get(0)) が変わるたびに
  *   dyne/node/<id>/imu_fused へ {"step":s,"v":[dyne_get(0..)]} を発行する。
+ *   2026-11-15 追加 (実機の入力の再生の記録。GitHub issue #2、docs/2026-11-15-hw-replay.md):
+ *     "replay":{"log":true}   ← 任意。既定 false。実行ごとに PC が決める (同じファームで記録する・しないを選べる)
+ *   true のとき、actor_setup・range_fed・imu_fed を QoS 1 で発行する (下の「再生の記録」)。
+ *   false のときは range_fed も発行しない (2026-11-15 から。以前は feed.range なら常に QoS 0 で発行していた)。
  *
  * 2026-11-13 (docs/2026-11-13-firmware-nodes.md):
  *  - feed.range: 測距 (dyne_range.c) の最新のフレームを、各ステップの送信の後・受信待ちの前に
  *    RANGE_FRAME (src = センサID) として受信メールボックスへ入れる (dyne-sim2d と同じ位置)。
  *    1ステップに渡すのは最新の1枚 (それより前の未渡しのフレームは飛ばして数える)。
- *    渡したフレームは dyne/node/<id>/range_fed に発行する (PC で同じ入力を再生できるように)。
+ *    渡したフレームは dyne/node/<id>/range_fed に発行する (PC で同じ入力を再生できるように。
+ *    2026-11-15 から replay.log のときだけ)。
  *    初期化では、PC の field2d.cfg の後に、形のアクターの CFG_ZONE_ROW (行を取り出して送るなら 0) と
  *    センサの一覧 (CFG_SENSOR_SEL/X/Y/YAW。首振りなら位置ごとに別のID) を注入する。
  *  - feed.imu: IMU (dyne_imu.c) の標本を dyne_step の前に dyne_imu_push で入れる
@@ -51,6 +56,7 @@
  * 構造上この上限に収まる (docs/2026-11-13-firmware-nodes.md §G10)。
  */
 #include <stdio.h>
+#include <stdarg.h>
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
@@ -199,6 +205,7 @@ typedef struct {
     int imu_time_mode;        /* -1 = 注入しない */
     bool imu_off_given;
     double imu_off_us;
+    bool replay_log;          /* 2026-11-15: 再生の記録 (replay.log) */
 } v2cfg_t;
 static v2cfg_t *s_cp;
 #define s_c (*s_cp)
@@ -325,6 +332,9 @@ static bool parse_cfg_v2(const char *payload, int len, uint32_t *gen, int *idx,
         }
         if (s_c.feed_range && !f_cfg) { snprintf(err, errlen, "feed.range needs dyne_cfg"); break; }
         if (s_c.feed_imu && !f_imu_push) { snprintf(err, errlen, "feed.imu needs dyne_imu_push"); break; }
+        /* 2026-11-15: 再生の記録を実行ごとに切り替える (GitHub issue #2) */
+        const cJSON *rp = cJSON_GetObjectItem(root, "replay");
+        s_c.replay_log = rp && cJSON_IsTrue(cJSON_GetObjectItem(rp, "log"));
         /* 2026-11-13: IMU の融合の実行 (開始の時刻・実時間に合わせた進み方・わざとずらす設定) */
         s_c.imu_time_mode = -1;
         s_c.imu_start_delay_ms = 3000;
@@ -607,12 +617,115 @@ static void publish_fused(uint64_t step, double *last_epoch)
     st_fused_sent++;
 }
 
+/* 2026-11-15: 再生の記録 (実行の設定の "replay":{"log":true} のときだけ。既定 off。GitHub issue #2、
+ * docs/2026-11-15-hw-replay.md)。PC が記録して dyne-sim2d で同じ入力を再生し、ノードの報告した CRC とビット一致を
+ * 確かめるため。menuconfig ではなく実行ごとに切り替える (同じファームで記録する・しないを選べる。コードは小さい)。
+ *  - dyne/node/<id>/actor_setup: 実行の始めに1回。アクターへの dyne_cfg の全呼び出し (順に [キー, 値])・面・初期化の値
+ *    {"idx":i,"id":id,"cfg":[[k,v],...],"faces":[[kind,param],...],"init":{"nx":..,"ny":..,"ix0":..,"iy0":..,
+ *     "h":..,"alpha":..,"dt":..},"trunc":false}  (値は %.17g = f64 を正確に戻せる桁。faces は面 W, E, S, N の順)
+ *  - dyne/node/<id>/imu_fed: dyne_imu_push に渡した標本 (戻り値によらず全て)。ステップごと (多ければ分ける)
+ *    {"step":s,"i0":そのステップの中での最初の標本の番号,"s":[[t_us,ax,ay,az,gx,gy,gz],...]}
+ *  - dyne/node/<id>/range_fed: 受信メールボックスへ渡した測距フレーム (dyne_range.c の dyne_range_publish_fed)
+ * どれも QoS 1 で送る (MQTT の取りこぼしで偽の FAIL にしないため)。他の発行 (field2d・rt・shape・imu_fused) は QoS 0 のまま。
+ * MQTT のアウトボックスが V2_RL_MAX_OUTBOX を超えていたら送らずに数え (done の replay_skip)、PC は記録を
+ * 不完全として扱う (scripts/hw_replay.py)。実行は止めない */
+#define RL_SETUP_SZ 4096
+#define RL_IMU_SZ   1536
+#define V2_RL_MAX_OUTBOX 32768
+static char *s_rl_setup, *s_rl_imu;
+static int s_rl_setup_n, s_rl_ncfg, s_rl_imu_n;
+static bool s_rl_trunc;
+static uint32_t s_rl_imu_cnt, s_rl_imu_i0;
+static uint64_t st_rl_skip; /* 送らなかった再生の記録の数 */
+
+static void rl_pub(const char *kind, const char *json)
+{
+    char sub[40];
+    snprintf(sub, sizeof(sub), "node/%d/%s", dyne_node_id(), kind);
+    if (dyne_mqtt_pub_bin(sub, json, (int)strlen(json), 1, V2_RL_MAX_OUTBOX) != 0) st_rl_skip++;
+}
+
+static void rl_put(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static void rl_put(const char *fmt, ...)
+{
+    if (!s_rl_setup || s_rl_trunc) return;
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(s_rl_setup + s_rl_setup_n, RL_SETUP_SZ - s_rl_setup_n, fmt, ap);
+    va_end(ap);
+    if (n < 0 || s_rl_setup_n + n >= RL_SETUP_SZ - 32) s_rl_trunc = true; /* 末尾の閉じ括弧の余地を残す */
+    else s_rl_setup_n += n;
+}
+
+static void rl_setup_begin(void)
+{
+    free(s_rl_setup);
+    s_rl_setup = NULL;
+    st_rl_skip = 0;
+    if (!s_c.replay_log) return;
+    s_rl_setup = malloc(RL_SETUP_SZ);
+    if (!s_rl_setup) { st_rl_skip++; return; }
+    s_rl_setup_n = s_rl_ncfg = 0;
+    s_rl_trunc = false;
+    rl_put("{\"idx\":%d,\"id\":%d,\"cfg\":[", g_cfg.idx, dyne_node_id());
+}
+
+static void rl_cfg(uint32_t key, double val)
+{
+    rl_put("%s[%u,%.17g]", s_rl_ncfg++ ? "," : "", (unsigned)key, val);
+}
+
+static void rl_setup_end(bool publish)
+{
+    if (!s_rl_setup) return;
+    if (publish) {
+        rl_put("],\"faces\":[");
+        for (int f = 0; f < 4; f++)
+            rl_put("%s[%d,%llu]", f ? "," : "", s_c.face_kind[f], (unsigned long long)s_c.face_param[f]);
+        rl_put("],\"init\":{\"nx\":%u,\"ny\":%u,\"ix0\":%u,\"iy0\":%u,\"h\":%.17g,\"alpha\":%.17g,\"dt\":%.17g}",
+               (unsigned)s_c.nx, (unsigned)s_c.ny, (unsigned)s_c.ix0, (unsigned)s_c.iy0, s_c.h, s_c.alpha, s_c.dt);
+        if (s_rl_trunc) /* 入りきらなかった: 再生に使えないことだけを伝える */
+            s_rl_setup_n = snprintf(s_rl_setup, RL_SETUP_SZ, "{\"idx\":%d,\"id\":%d,\"trunc\":true}", g_cfg.idx,
+                                    dyne_node_id());
+        else
+            snprintf(s_rl_setup + s_rl_setup_n, RL_SETUP_SZ - s_rl_setup_n, ",\"trunc\":false}");
+        rl_pub("actor_setup", s_rl_setup);
+    }
+    free(s_rl_setup);
+    s_rl_setup = NULL;
+}
+
+static void rl_imu_flush(void)
+{
+    if (!s_rl_imu || s_rl_imu_n == 0) return;
+    snprintf(s_rl_imu + s_rl_imu_n, RL_IMU_SZ - s_rl_imu_n, "]}");
+    rl_pub("imu_fed", s_rl_imu);
+    s_rl_imu_n = 0;
+    s_rl_imu_i0 = s_rl_imu_cnt;
+}
+
+static void rl_imu_add(uint64_t step, const dyne_imu_sample_t *s)
+{
+    if (!s_rl_imu) return;
+    if (s_rl_imu_n == 0)
+        s_rl_imu_n = snprintf(s_rl_imu, RL_IMU_SZ, "{\"step\":%llu,\"i0\":%u,\"s\":[", (unsigned long long)step,
+                              (unsigned)s_rl_imu_i0);
+    else
+        s_rl_imu[s_rl_imu_n++] = ',';
+    s_rl_imu_n += snprintf(s_rl_imu + s_rl_imu_n, RL_IMU_SZ - s_rl_imu_n,
+                           "[%lld,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g]", (long long)s->t_sync_us, s->a[0], s->a[1],
+                           s->a[2], s->g[0], s->g[1], s->g[2]);
+    s_rl_imu_cnt++;
+    if (s_rl_imu_n > RL_IMU_SZ - 200) rl_imu_flush(); /* 1標本は最大約 180 文字 */
+}
+
 static void cfg_call(uint32_t key, double val)
 {
     wasm_val_t a[2];
     a[0].kind = WASM_I32; a[0].of.i32 = (int32_t)key;
     a[1].kind = WASM_F64; a[1].of.f64 = val;
     wasm_runtime_call_wasm_a(s_env, f_cfg, 0, NULL, 2, a);
+    rl_cfg(key, val);
 }
 
 /* 2026-11-13: 測距の最新のフレームを RANGE_FRAME として受信メールボックスへ */
@@ -628,11 +741,12 @@ static void feed_range(uint32_t app, uint32_t cap, uint64_t step, uint32_t *last
     if (n < 0) { st_rf_rej++; return; }
     if (deliver(app, cap, buf, (size_t)n) != F2_INBOX_OK) st_rf_rej++;
     else st_rf_fed++;
-    dyne_range_publish_fed(&f, step);
+    /* 2026-11-15: 再生の記録 (replay.log のときだけ。QoS 1) */
+    if (s_c.replay_log && dyne_range_publish_fed(&f, step, V2_RL_MAX_OUTBOX) != 0) st_rl_skip++;
 }
 
 /* 2026-11-13: IMU の標本を dyne_imu_push で入れる (アクターが示した時刻までは待つ) */
-static void feed_imu(uint64_t *rd)
+static void feed_imu(uint64_t *rd, uint64_t step)
 {
     if (f_imu_need) {
         wasm_val_t r[1];
@@ -659,6 +773,7 @@ static void feed_imu(uint64_t *rd)
                 a[4 + k].kind = WASM_F64; a[4 + k].of.f64 = s[i].g[k];
             }
             wasm_runtime_call_wasm_a(s_env, f_imu_push, 1, r, 7, a);
+            rl_imu_add(step, &s[i]); /* 2026-11-15: 再生の記録 (replay.log のときだけ領域がある) */
             int rc = r[0].of.i32;
             if (rc == 0) st_imu_pushed++;
             else if (rc == 1) st_imu_late++;
@@ -666,6 +781,8 @@ static void feed_imu(uint64_t *rd)
         }
         if (n < V2_IMU_BATCH) break;
     }
+    rl_imu_flush(); /* そのステップの分を送る (次のステップの番号と混ぜない) */
+    s_rl_imu_cnt = s_rl_imu_i0 = 0;
 }
 
 void dyne_v2_run_bsp(void)
@@ -686,18 +803,16 @@ void dyne_v2_run_bsp(void)
     }
 
     /* アクター初期化 (dyne_cfg → 面の設定 → dyne_init2d。dyne-sim2d と同じ順序) */
-    for (int j = 0; j < s_c.n_cfg; j++) {
-        wasm_val_t a[2];
-        a[0].kind = WASM_I32; a[0].of.i32 = (int32_t)s_c.cfg_key[j];
-        a[1].kind = WASM_F64; a[1].of.f64 = s_c.cfg_val[j];
-        wasm_runtime_call_wasm_a(s_env, f_cfg, 0, NULL, 2, a);
-    }
+    rl_setup_begin(); /* 2026-11-15: 再生の記録 (replay.log のときだけ) */
+    /* 2026-11-15: 同じ呼び出しを cfg_call に寄せた (再生の記録に載せるため。呼び出しの中身は同じ) */
+    for (int j = 0; j < s_c.n_cfg; j++) cfg_call(s_c.cfg_key[j], s_c.cfg_val[j]);
     /* 2026-11-13: IMU の融合の実行: 開始の時刻 t0 と、わざとずらす設定 (PC の設定の後に注入して上書き) */
     s_imu_t0_run = 0;
     s_imu_late_start_ms = 0;
     if (s_c.feed_imu) {
         if (!dyne_time_synced()) {
             dyne_mqtt_pub_status(DYNE_ST_ERR, "\"err\":\"imu run needs time sync (not synced yet)\"");
+            rl_setup_end(false);
             free(links); free(rb);
             return;
         }
@@ -747,11 +862,19 @@ void dyne_v2_run_bsp(void)
         a[6].kind = WASM_F64; a[6].of.f64 = s_c.dt;
         if (!wasm_runtime_call_wasm_a(s_env, f_init2d, 1, r, 7, a) || r[0].of.i32 != 0) {
             snprintf(json, sizeof(json), "\"err\":\"dyne_init2d failed rc=%d\"", (int)r[0].of.i32);
+            rl_setup_end(false);
             dyne_mqtt_pub_status(DYNE_ST_ERR, json);
             free(links); free(rb);
             return;
         }
     }
+    rl_setup_end(true); /* 2026-11-15: dyne/node/<id>/actor_setup (replay.log のときだけ) */
+    if (s_c.replay_log && s_c.feed_imu && !s_rl_imu) { /* 実行の間だけ */
+        s_rl_imu = malloc(RL_IMU_SZ);
+        if (!s_rl_imu) st_rl_skip++; /* 記録できない (PC は imu_fed の数の食い違いでも気づく) */
+    }
+    s_rl_imu_n = 0;
+    s_rl_imu_cnt = s_rl_imu_i0 = 0;
     uint32_t app = call_u32(f_msg_buf), cap = call_u32(f_msg_cap);
 
     int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
@@ -868,7 +991,7 @@ void dyne_v2_run_bsp(void)
         if (aborted || fail) break;
         int64_t t1 = esp_timer_get_time();
         /* 3b) IMU の標本 (計算の直前) */
-        if (s_c.feed_imu) feed_imu(&imu_rd);
+        if (s_c.feed_imu) feed_imu(&imu_rd, step);
         /* 4) 計算 */
         wasm_val_t r[1];
         wasm_runtime_call_wasm_a(s_env, f_step, 1, r, 0, NULL);
@@ -920,6 +1043,8 @@ void dyne_v2_run_bsp(void)
     close(sock);
     free(links);
     free(rb);
+    free(s_rl_imu);
+    s_rl_imu = NULL;
 
     if (fail) {
         snprintf(json, sizeof(json), "\"err\":\"v2: %s\"", fail);
@@ -960,6 +1085,8 @@ void dyne_v2_run_bsp(void)
                        (unsigned long long)st_imu_pushed, (unsigned long long)st_imu_late,
                        (unsigned long long)st_imu_early, (unsigned long long)st_imu_lost,
                        (unsigned long long)st_imu_wait_to);
+    if (s_c.replay_log) /* 2026-11-15: 送らなかった再生の記録 (0 でなければ記録は不完全) */
+        en += snprintf(extra + en, sizeof(extra) - en, ",\"replay_skip\":%llu", (unsigned long long)st_rl_skip);
     (void)en;
     dyne_mqtt_pub_status(DYNE_ST_DONE, extra);
     ESP_LOGI(TAG, "BSP(v2) done: crc=0x%08X", (unsigned)crc);

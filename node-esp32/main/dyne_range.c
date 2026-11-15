@@ -194,10 +194,13 @@ static void publish_state(void)
  * node_task) が同じ静的な領域を同時に書くと、再生の記録 (range_fed) が壊れうるため */
 static char *s_js_range, *s_js_fed;
 
-static void publish_frame(char **buf, const char *topic, const dyne_range_frame_t *f, long long step)
+/* 2026-11-15: max_outbox > 0 なら QoS 付きで、MQTT のアウトボックスが max_outbox バイトを超えていれば送らない
+ * (再生の記録 range_fed 用。GitHub issue #2)。0 なら従来どおり (QoS 0 で積む)。戻り値 0 = 積んだ、負 = 送らなかった */
+static int publish_frame(char **buf, const char *topic, const dyne_range_frame_t *f, long long step, int qos,
+                         int max_outbox)
 {
     enum { JSZ = 1400 };
-    if (!*buf && !(*buf = malloc(JSZ))) return; /* 初回に確保 (静的 RAM を増やさない) */
+    if (!*buf && !(*buf = malloc(JSZ))) return -1; /* 初回に確保 (静的 RAM を増やさない) */
     char *json = *buf;
     char sub[40];
     snprintf(sub, sizeof(sub), "node/%d/%s", dyne_node_id(), topic);
@@ -211,14 +214,19 @@ static void publish_frame(char **buf, const char *topic, const dyne_range_frame_
     n += snprintf(json + n, JSZ - n, "],\"st\":[");
     for (uint32_t i = 0; i < f->count && n < (int)JSZ - 8; i++)
         n += snprintf(json + n, JSZ - n, "%s%u", i ? "," : "", f->st[i]);
-    if (n < (int)JSZ - 3) snprintf(json + n, JSZ - n, "]}");
+    bool whole = n < (int)JSZ - 3;
+    if (whole) snprintf(json + n, JSZ - n, "]}");
+    if (max_outbox > 0) /* 再生の記録は欠けた JSON を送らない (区画は最大 64 なので起きない想定) */
+        return whole ? dyne_mqtt_pub_bin(sub, json, (int)strlen(json), qos, max_outbox) : -1;
     dyne_mqtt_pub(sub, json, 0, false, true);
+    return 0;
 }
 
-/* node_v2.c から: アクターへ渡したフレームを記録 (PC がシミュレータで同じ入力を再生できるように) */
-void dyne_range_publish_fed(const dyne_range_frame_t *f, uint64_t step)
+/* node_v2.c から: アクターへ渡したフレームを記録 (PC がシミュレータで同じ入力を再生できるように)。
+ * 2026-11-15: 実行の設定の replay.log のときだけ呼ばれ、QoS 1 で送る (GitHub issue #2) */
+int dyne_range_publish_fed(const dyne_range_frame_t *f, uint64_t step, int max_outbox)
 {
-    publish_frame(&s_js_fed, "range_fed", f, (long long)step);
+    return publish_frame(&s_js_fed, "range_fed", f, (long long)step, 1, max_outbox);
 }
 
 /* ==== センサ ==== */
@@ -328,7 +336,7 @@ static void handle_frame(int64_t t_ready)
     portENTER_CRITICAL(&s_fmux);
     s_latest = f;
     portEXIT_CRITICAL(&s_fmux);
-    if (s_cfg.pub_every > 0 && f.seq % (uint32_t)s_cfg.pub_every == 0) publish_frame(&s_js_range, "range", &f, -1);
+    if (s_cfg.pub_every > 0 && f.seq % (uint32_t)s_cfg.pub_every == 0) publish_frame(&s_js_range, "range", &f, -1, 0, 0);
 }
 
 static void range_task(void *arg)
