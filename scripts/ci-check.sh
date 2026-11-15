@@ -7,6 +7,7 @@
 #   3. 1D: a 16-node split solution must match the single-node solution bit for bit
 #   4. 2D: several partitions with packet loss / latency / pauses must match bit for bit
 #   5. determinism: two runs with the same arguments produce identical output
+#   6. firmware host test: the node id selection of node-esp32, built with the host C compiler
 #
 # Usage (from the repository root):  bash scripts/ci-check.sh
 set -euo pipefail
@@ -49,6 +50,28 @@ echo "== [5] determinism =="
 a="$("$SIM2" --wasm "$W2" --px 2 --py 2 --steps 500 --loss 0.1 --pause 3@2000:6000 | cksum)"
 b="$("$SIM2" --wasm "$W2" --px 2 --py 2 --steps 500 --loss 0.1 --pause 3@2000:6000 | cksum)"
 if [ "$a" = "$b" ]; then echo "identical output: OK"; else echo "outputs differ: FAIL"; fail=1; fi
+
+# Firmware logic that does not depend on ESP-IDF, compiled with the host C compiler (issue #19).
+# Set CC to choose the compiler (e.g. CC="zig cc"); skipped if no C compiler is found.
+echo "== [6] firmware host test: node id selection =="
+cc_bin="${CC:-}"
+if [ -z "$cc_bin" ]; then
+  for c in cc gcc clang; do
+    if command -v "$c" >/dev/null 2>&1; then cc_bin="$c"; break; fi
+  done
+fi
+if [ -z "$cc_bin" ]; then
+  echo "node_id          SKIP (no C compiler)"
+else
+  tdir="$(mktemp -d)"
+  # shellcheck disable=SC2086 # CC may hold a command with arguments
+  $cc_bin -std=c11 -Wall -Wextra -O2 -Inode-esp32/main \
+    node-esp32/host_test/node_id_test.c node-esp32/main/dyne_node_id_core.c -o "$tdir/node_id_test${EXE}"
+  line="$("$tdir/node_id_test${EXE}" | tail -n 1 || true)"
+  printf '%-16s %s\n' "node_id" "$line"
+  [ "$line" = "PASS" ] || fail=1
+  rm -rf "$tdir"
+fi
 
 if [ "$fail" -ne 0 ]; then echo "CI CHECK FAILED"; exit 1; fi
 echo "ALL CHECKS PASSED"

@@ -21,6 +21,7 @@
 
 #include "dyne_node.h"
 #include "dyne_ops.h"
+#include "dyne_node_id.h"
 
 static const char *TAG = "dyne-mqtt";
 
@@ -76,10 +77,13 @@ void dyne_mqtt_pub_status(dyne_state_t st, const char *extra)
         /* 2026-11-11: 対象チップ・版・起動パーティション・再起動の理由・使っている計算部品 (dyne_ops.c) */
         char ops[480];
         dyne_ops_online_fields(ops, sizeof(ops));
+        /* 2026-11-15: ノード番号の決め方 (id_src = config / nvs / mac。issue #19) */
+        char idf[48];
+        dyne_node_id_fields(idf, sizeof(idf));
         snprintf(json, sizeof(json),
-                 "{\"state\":\"online\",\"mac\":\"%02X:%02X:%02X:%02X:%02X:%02X\","
+                 "{\"state\":\"online\",\"mac\":\"%02X:%02X:%02X:%02X:%02X:%02X\",%s,"
                  "\"ip\":\"" IPSTR "\",\"fw\":\"%s\",\"heap\":%u,\"up_s\":%u,%s%s%s}",
-                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], idf,
                  IP2STR(&ip.ip), DYNE_FW_NAME,
                  (unsigned)esp_get_free_heap_size(), (unsigned)dyne_ops_uptime_s(), ops,
                  extra ? "," : "", extra ? extra : "");

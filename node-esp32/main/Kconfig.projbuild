@@ -1,11 +1,13 @@
 menu "Dyne Node"
 
 config DYNE_NODE_ID
-    int "Node ID (-1 = derive from MAC last byte)"
+    int "Node ID (-1 = NVS, else MAC last byte)"
     default -1
     help
         MQTTトピック dyne/cfg/<id> 等に使うノードID。シミュレータのノード番号と
-        同一の整数。-1 のときはMAC末尾バイトを仮IDにする (本運用では明示推奨)。
+        同一の整数。0 以上ならこの値に固定する (NVS の番号より優先)。
+        -1 (既定) のときは、NVS に保存した番号 (ctl 命令 node_id で書く) があればそれ、
+        無ければ Wi-Fi の MAC の末尾バイト (2026-11-15、issue #19。全台を同じ像にするため -1 を勧める)。
 
 config DYNE_WIFI_SSID
     string "Wi-Fi SSID"
