@@ -29,7 +29,7 @@
 |---|---|---|
 | G1 時刻同期 | SNTP + 独自の往復の交換(最小の往復時間の標本を採り、直近32標本に直線を当てはめてずれとドリフトを推定)。推定の質(往復時間・推定との差・ドリフト)を MQTT で報告。センサ・RSSI・ワイヤ形式v2 の時刻印の欄に同期した時刻を付ける。試験モード(整数秒でピンを切り替え、同期あり/SNTP のみ/同期なしの3条件) | C の計算部分を PC で模擬(揺らぎ小で最大誤差 14µs、ドリフト誤差 0.06ppm)。PC の時刻サーバと C・Python の問い合わせ側で実際に UDP の往復 |
 | G1 PC 側 | 標準ライブラリだけの NTP サーバ(scripts/dyne_ntp_server.py)、設定と記録(scripts/dyne_timesync.py)、ロジックアナライザの記録の解析(scripts/pps_analyze.py) | 合成した記録で解析の正しさを確認 |
-| G2 OTA | パーティションテーブルを アプリ2面 + otadata + 計算部品の区画 に変更(4MB と 8MB の2種)。ファームの OTA(HTTP、像の SHA-256 の照合、自己確認に失敗したら元に戻す)。計算部品の OTA(2枠、SHA-256 と長さを照合、前の計算部品を残す、壊れていれば前の枠 → 埋め込みの順に戻る) | ESP32・ESP32-C5 の両方でビルド成功。壊した像を esptool で独立に検査。ノードのふりをするプログラムで PC 側ツールを通しで確認(6通りすべて期待どおり) |
+| G2 OTA | パーティションテーブルを アプリ2面 + otadata + 計算部品のパーティション に変更(4MB と 8MB の2種)。ファームの OTA(HTTP、像の SHA-256 の照合、自己確認に失敗したら元に戻す)。計算部品の OTA(2枠、SHA-256 と長さを照合、前の計算部品を残す、壊れていれば前の枠 → 埋め込みの順に戻る) | ESP32・ESP32-C5 の両方でビルド成功。壊した像を esptool で独立に検査。ノードのふりをするプログラムで PC 側ツールを通しで確認(6通りすべて期待どおり) |
 | G2 PC 側 | 一斉配布ツール(scripts/dyne_ota.py): HTTP で配り、MQTT で N 台へ指示し、結果と所要時間を CSV に。わざと壊したファーム・計算部品を作って配れる | 同上 |
 | G11 | 起動時に再起動の理由(電圧低下 brownout を含む)・起動回数・**前回の稼働時間**を online の status で、稼働時間などを 10 秒ごとに health で報告 | ビルドのみ |
 | 物理シミュレーション環境 | 作っていない(指示どおり)。§10 にモデル化の方針だけを書いた | — |
@@ -42,10 +42,10 @@
 |---|---|
 | node-esp32/main/dyne_timesync_core.c/.h(新規) | 時刻同期の計算部分(NTP パケット、ずれ・往復時間、外れ標本の除去、直線の当てはめ、次の整数秒)。ESP-IDF に依存しない |
 | node-esp32/main/dyne_timesync.c/.h(新規) | SNTP の起動、往復の交換のタスク、tsync の報告、試験モード(ピンの切り替え) |
-| node-esp32/main/dyne_actor_slot.c/.h(新規) | 計算部品の区画の見出しの形式と、どの枠を使うか・どこへ書くかの規則。ESP-IDF に依存しない |
+| node-esp32/main/dyne_actor_slot.c/.h(新規) | 計算部品のパーティションの見出しの形式と、どの枠を使うか・どこへ書くかの規則。ESP-IDF に依存しない |
 | node-esp32/main/dyne_ops.c/.h(新規) | ファームと計算部品の OTA、計算部品の読み出し、起動後の自己確認と元に戻す処理、再起動の理由・稼働時間の報告、NVS の初期化 |
-| node-esp32/main/main.c | 計算部品を区画から先に試す(無ければ埋め込み)。計算部品が積めなくても Wi-Fi・MQTT は上げる(OTA で直すため)。ctl の新しい命令の受け口。計算中の印(g_busy)。innov に y_ts_us |
-| node-esp32/main/dyne_mqtt.c | online の status に対象チップ・版・起動区画・再起動の理由・計算部品を追加。全 status に up_s |
+| node-esp32/main/main.c | 計算部品をパーティションから先に試す(無ければ埋め込み)。計算部品が積めなくても Wi-Fi・MQTT は上げる(OTA で直すため)。ctl の新しい命令の受け口。計算中の印(g_busy)。innov に y_ts_us |
+| node-esp32/main/dyne_mqtt.c | online の status に対象チップ・版・起動パーティション・再起動の理由・計算部品を追加。全 status に up_s |
 | node-esp32/main/dyne_node.h | g_busy の宣言 |
 | node-esp32/main/node_v2.c | ワイヤ形式v2 の経路で、時刻印の欄が 0 のメッセージに同期した時刻を付ける |
 | node-esp32/main/sensors.c, rssi.c | JSON に ts_us(同期した時刻)を追加。t_ms は従来どおり |
@@ -148,7 +148,7 @@ PC 側の Python の受信の遅れ、ノード側のタスクの起床の遅れ
 
 ### 4.1 パーティションテーブル
 
-| 区画 | 4MB(ESPr、partitions_4mb.csv) | 8MB(XIAO ESP32C5、partitions_8mb.csv) |
+| パーティション | 4MB(ESPr、partitions_4mb.csv) | 8MB(XIAO ESP32C5、partitions_8mb.csv) |
 |---|---|---|
 | nvs | 0x9000, 16KB | 同左 |
 | otadata(OTA の起動先の記録) | 0xD000, 8KB | 同左 |
@@ -157,7 +157,7 @@ PC 側の Python の受信の遅れ、ノード側のタスクの起床の遅れ
 | ota_1 | 0x1B0000, 1,664KB | 0x310000, 3MB |
 | actors(計算部品、2枠) | 0x350000, 704KB(1枠 352KB) | 0x610000, 1,984KB(1枠 992KB) |
 
-アプリの大きさと区画の空き: §11.1。
+アプリの大きさとパーティションの空き: §11.1。
 
 **XIAO ESP32C5 のフラッシュは 8MB と想定した**(Seeed の製品説明の記憶による。届いたら `idf.py -p COMx flash_id`
 の "Detected flash size" で確かめる)。4MB だった場合は、menuconfig でフラッシュの大きさを 4MB、
@@ -169,9 +169,9 @@ ctl 命令(dyne/ctl/<id>。retain の号令は従来どおり無視):
 ```
 {"cmd":"ota_fw","job":"J","url":"http://PC:8070/x.bin","size":N,"img_sha256":"64桁の16進","reboot":true}
 ```
-流れ: 計算中なら busy で断る → ESP-IDF の esp_https_ota で次の区画へ書く(像の検査和・付属の SHA-256・チップの種類は
+流れ: 計算中なら busy で断る → ESP-IDF の esp_https_ota で次のパーティションへ書く(像の検査和・付属の SHA-256・チップの種類は
 ESP-IDF が検査)→ 長さと `img_sha256`(.bin の末尾32バイト = ESP-IDF が像に付ける SHA-256)を照合 →
-合わなければ起動先を戻して rejected → 合えば NVS にジョブ名と書いた区画を記録して再起動。
+合わなければ起動先を戻して rejected → 合えば NVS にジョブ名と書いたパーティションを記録して再起動。
 
 新しいファームの最初の起動は「確認待ち」(ESP-IDF の PENDING_VERIFY)。自己確認のタスクが、
 CONFIG_DYNE_OTA_VALIDATE_TIMEOUT_S(既定 120 秒)以内に **MQTT 接続(= Wi-Fi も上がった)・ワイヤ形式v2 の外箱の
@@ -180,8 +180,8 @@ selftest_fail を報告して(MQTT が使えれば)前のファームに戻し�
 異常終了した場合は、ブートローダが次の起動で前のファームに戻す。
 
 結果は dyne/node/<id>/ota に `{"job","kind":"fw","phase",...}` で出る。phase:
-accepted → downloaded(ms・bytes つき)→ 再起動 → **ok**(書いた区画で起動して有効になった)/
-**rolled_back**(前の区画で起動している)。途中の失敗は **rejected**(像や照合の不一致)/ **fail** / **busy**。
+accepted → downloaded(ms・bytes つき)→ 再起動 → **ok**(書いたパーティションで起動して有効になった)/
+**rolled_back**(前のパーティションで起動している)。途中の失敗は **rejected**(像や照合の不一致)/ **fail** / **busy**。
 
 ### 4.3 計算部品の OTA
 
@@ -189,7 +189,7 @@ accepted → downloaded(ms・bytes つき)→ 再起動 → **ok**(書いた区�
 {"cmd":"ota_actor","job":"J","name":"heat1d_actor_small",
  "wasm":{"url":..,"size":N,"sha256":"64桁"}, "aot":{"url":..,"size":N,"sha256":".."}, "reboot":true}
 ```
-- 区画 actors を2枠に分け、**いま使っていない方の枠**に書く(使っている計算部品を残す)。
+- パーティション actors を2枠に分け、**いま使っていない方の枠**に書く(使っている計算部品を残す)。
   枠の見出し(128バイト、通し番号・長さ・SHA-256・名前・CRC32)は**照合が済んでから最後に**書く。
   途中で電源が落ちても、見出しの無い枠は空として扱われる。
 - 切り替えは**再起動で行う**(計算中は busy で断る。計算部品は Wi-Fi より先、断片化していない
@@ -204,7 +204,7 @@ accepted → downloaded(ms・bytes つき)→ 再起動 → **ok**(書いた区�
 
 ### 4.4 PC 側の一斉配布ツール(scripts/dyne_ota.py)
 
-- `status`: ノードの一覧(対象チップ・起動区画・版・計算部品・再起動の理由・起動回数)。
+- `status`: ノードの一覧(対象チップ・起動パーティション・版・計算部品・再起動の理由・起動回数)。
 - `fw` / `actor` / `actor-rollback`: ファイルを一時ディレクトリに置いて HTTP で配り(既定 8070 番)、
   MQTT で全台(`--nodes all` = online のノード)または指定のノードへ命令を送り、結果を待って表と CSV にする。
   CSV の列: job, kind, variant, node, target, result, expect, match, t_total_s(命令から最終結果まで), t_download_ms
@@ -235,7 +235,7 @@ SHA-256 の照合は「壊れていない・取り違えていない」ことの
 
 - 起動時(online の status、retained): `reset`(poweron / sw / panic / task_wdt / int_wdt / **brownout** ほか)、
   `boot`(起動回数、NVS)、`prev_up_s`(**前回の稼働時間**。60 秒ごとに NVS に書き、次の起動で報告)、
-  `target`・`ver`・`elf`(ELF の SHA-256 の先頭16桁)・`part`(起動区画)・`ota_state`・`actor`。
+  `target`・`ver`・`elf`(ELF の SHA-256 の先頭16桁)・`part`(起動パーティション)・`ota_state`・`actor`。
 - 定期(dyne/node/<id>/health、10 秒ごと): `up_s`・`reset`・`heap`・`heap_min`・`largest`(最大連続ブロック)・
   `ap_rssi`・`busy`・`ts_us`・時刻同期の要約。
 - 全 status に `up_s` を追加。
@@ -372,7 +372,7 @@ P6 により、同じ仕組みを将来の物理シミュレーション環境(G
 
 すべて警告なしでビルド成功(ESP-IDF 5.5.5、2026-11-11)。`idf.py build` の表示から:
 
-| ビルド | パーティションテーブル | アプリ(.bin) | アプリの区画 | 空き | ブートローダ |
+| ビルド | パーティションテーブル | アプリ(.bin) | アプリのパーティション | 空き | ブートローダ |
 |---|---|---|---|---|---|
 | **OTA 版 ESP32**(build-ota-esp32/) | partitions_4mb.csv | 0x127320 = 1,209,120 B | 0x1A0000 = 1,703,936 B | **29%** | 0x6660(空き 9%、ロールバック込み) |
 | **OTA 版 ESP32-C5**(build-ota-esp32c5/) | partitions_8mb.csv | 0x161C90 = 1,449,104 B | 0x300000 = 3,145,728 B | **54%** | 0x56F0(空き 9%) |
@@ -427,10 +427,10 @@ Rust は変更していないので、scripts\check-baseline12.ps1 と scripts\c
 ## 12. 既知の限界・実機で未確認のこと
 
 - **すべて実機未確認**: Wi-Fi 上の往復時間と同期の精度、試験モードの切り替えの遅れ、SNTP と独自推定の差、
-  esp_https_ota の平文 HTTP での動作、ロールバック(確認待ち → 有効、失敗 → 元に戻る)、計算部品の区画からの積み込み
+  esp_https_ota の平文 HTTP での動作、ロールバック(確認待ち → 有効、失敗 → 元に戻る)、計算部品のパーティションからの積み込み
   (特に .aot の実行可能メモリの確保)、16台同時の HTTP 取得、NVS の作り直し、再起動の理由の報告。
-- 計算部品の区画からの .aot の積み込みは、bench-c5 で確認済みの AOT の積み込みと同じ API だが、
-  区画から malloc した領域へ読む経路は未確認。ESPr(PSRAM なし)では大きな .aot は内部 RAM に載らない可能性がある。
+- 計算部品のパーティションからの .aot の積み込みは、bench-c5 で確認済みの AOT の積み込みと同じ API だが、
+  パーティションから malloc した領域へ読む経路は未確認。ESPr(PSRAM なし)では大きな .aot は内部 RAM に載らない可能性がある。
 - 時刻同期の基準は PC の Python。PC の負荷(他のプログラム)で応答が遅れると往復時間が伸びる
   (最小の往復時間の標本を採る方法で多くは除けるが、PC 側の受信時刻の遅れの非対称は除けない)。
 - 試験モードは 1コアの C5 で毎秒約2ms CPU を占有する。計算の実験と同時には使わない。

@@ -1,5 +1,5 @@
 /*
- * 計算部品の保存区画の形式と選び方 (main/dyne_actor_slot.c) を PC 上で確かめる検査 (2026-11-11)。
+ * 計算部品のパーティションの形式と選び方 (main/dyne_actor_slot.c) を PC 上で確かめる検査 (2026-11-11)。
  *
  * ビルドと実行の例 (リポジトリのルートで):
  *   .venv\Scripts\python.exe -m ziglang cc -std=c11 -Wall -Wextra -O2 -Inode-esp32\main ^

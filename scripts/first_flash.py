@@ -46,7 +46,7 @@ CSV の列: timestamp, port, usb_serial, mac, node_id, id_from_mac, chip, flash_
     --boot-seconds S    起動のログを読む最長の秒数 (既定 15)
     --any-port          USB シリアルの変換 IC を CP2102N (VID 10C4 / PID EA60) に限らない
     --include-present   起動時に既につながっているポートも対象にする
-    --erase             書く前にフラッシュ全体を消す (使い回しの基板。NVS・計算部品の保存区画も消える)
+    --erase             書く前にフラッシュ全体を消す (使い回しの基板。NVS・計算部品のパーティションも消える)
     --out DIR           出力の置き場所 (既定 first_flash_out)
 
 書き込みが始まらない (Connecting....___ が続く) ときは、BOOT ボタンを押したまま待つ。ツールは数回やり直す。

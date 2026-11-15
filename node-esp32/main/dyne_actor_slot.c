@@ -1,5 +1,5 @@
 /*
- * 計算部品の保存区画の形式と選び方 (2026-11-11)。宣言と説明は dyne_actor_slot.h。
+ * 計算部品のパーティションの形式と選び方 (2026-11-11)。宣言と説明は dyne_actor_slot.h。
  * ESP-IDF に依存しない (host_test/actor_slot_test.c で PC 上でも検査する)。
  *
  * 見出し 128 バイトの並び (リトルエンディアン):
@@ -85,7 +85,7 @@ int dyne_act_hdr_decode(const uint8_t in[DYNE_ACT_HDR_LEN], uint32_t slot_size, 
     memcpy(h->name, in + 84, DYNE_ACT_NAME_LEN);
     h->name[DYNE_ACT_NAME_LEN - 1] = 0;
     if (h->wasm_size == 0 && h->aot_size == 0) return -5;
-    /* 桁あふれを避けて比べる (長さは高々区画の大きさ) */
+    /* 桁あふれを避けて比べる (長さは高々パーティションの大きさ) */
     if (h->wasm_size > slot_size || h->aot_size > slot_size) return -4;
     if ((uint64_t)dyne_act_span(h->wasm_size, h->aot_size) > slot_size) return -4;
     return 0;

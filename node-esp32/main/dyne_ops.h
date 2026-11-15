@@ -1,5 +1,5 @@
 /*
- * 運用の仕組み (2026-11-11): OTA (無線経由の書き換え)、計算部品の保存区画、
+ * 運用の仕組み (2026-11-11): OTA (無線経由の書き換え)、計算部品のパーティション、
  * 起動後の自己確認と元に戻す処理、再起動の理由と稼働時間の報告。
  * 説明: docs/2026-11-11-timesync-ota.md
  */
@@ -14,7 +14,7 @@
  * 再起動の理由・起動回数・前回の稼働時間の記録 */
 void dyne_ops_boot_early(void);
 
-/* ==== 計算部品の候補 (保存区画) ==== */
+/* ==== 計算部品の候補 (パーティション) ==== */
 typedef struct {
     int slot;          /* 0 / 1 */
     bool aot;          /* true = 事前コンパイル済み (.aot) */
@@ -22,7 +22,7 @@ typedef struct {
     char name[DYNE_ACT_NAME_LEN];
 } dyne_actor_cand_t;
 
-/* 試す順の候補 (新しい枠の .aot → .wasm → 古い枠の …)。区画が無い・空なら 0 個 */
+/* 試す順の候補 (新しい枠の .aot → .wasm → 古い枠の …)。パーティションが無い・空なら 0 個 */
 int dyne_actor_candidates(dyne_actor_cand_t *out, int max);
 /* 候補を読み出し、SHA-256 と長さを確かめて malloc した領域で返す。失敗は NULL */
 uint8_t *dyne_actor_read(const dyne_actor_cand_t *c, uint32_t *len);
