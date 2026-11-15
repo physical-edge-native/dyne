@@ -1,0 +1,115 @@
+# first_flash.py 2026-11-15T10:00:00 port=COM7 usb_serial=0001
+=== esptool ===
+esptool.py v4.12.0
+Serial port COM7
+Connecting.....
+Chip is ESP32-D0WD-V3 (revision v3.1)
+Features: WiFi, BT, Dual Core, 240MHz, VRef calibration in efuse, Coding Scheme None
+Crystal is 40MHz
+MAC: 02:00:00:00:00:2a
+Uploading stub...
+Running stub...
+Stub running...
+Changing baud rate to 460800
+Changed.
+Manufacturer: c8
+Device: 4017
+Detected flash size: 8MB
+Hard resetting via RTS pin...
+esptool.py v4.12.0
+Serial port COM7
+Connecting....
+Chip is ESP32-D0WD-V3 (revision v3.1)
+Features: WiFi, BT, Dual Core, 240MHz, VRef calibration in efuse, Coding Scheme None
+Crystal is 40MHz
+MAC: 02:00:00:00:00:2a
+Uploading stub...
+Running stub...
+Stub running...
+Changing baud rate to 460800
+Changed.
+Configuring flash size...
+Flash will be erased from 0x00001000 to 0x00007fff...
+Flash will be erased from 0x00008000 to 0x00008fff...
+Flash will be erased from 0x0000d000 to 0x0000efff...
+Flash will be erased from 0x00010000 to 0x00157fff...
+SHA digest in image updated
+Compressed 26752 bytes to 16862...
+Writing at 0x00001000... (50 %)
+Writing at 0x0000759d... (100 %)
+Wrote 26752 bytes (16862 compressed) at 0x00001000 in 0.8 seconds (effective 264.3 kbit/s)...
+Hash of data verified.
+Compressed 3072 bytes to 156...
+Writing at 0x00008000... (100 %)
+Wrote 3072 bytes (156 compressed) at 0x00008000 in 0.1 seconds (effective 409.6 kbit/s)...
+Hash of data verified.
+Compressed 8192 bytes to 31...
+Writing at 0x0000d000... (100 %)
+Wrote 8192 bytes (31 compressed) at 0x0000d000 in 0.1 seconds (effective 615.2 kbit/s)...
+Hash of data verified.
+Compressed 1346835 bytes to 842113...
+Writing at 0x00010000... (1 %)
+Writing at 0x00150000... (100 %)
+Wrote 1346835 bytes (842113 compressed) at 0x00010000 in 20.1 seconds (effective 536.0 kbit/s)...
+Hash of data verified.
+
+Leaving...
+Hard resetting via RTS pin...
+
+=== boot log ===
+I (912) dyne: connecting to 'dyne-exp1'...
+ets Jul 29 2019 12:21:46
+
+rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)
+configsip: 0, SPIWP:0xee
+clk_drv:0x00,q_drv:0x00,d_drv:0x00,cs0_drv:0x00,hd_drv:0x00,wp_drv:0x00
+mode:DIO, clock div:2
+load:0x3fff0030,len:6276
+load:0x40078000,len:15748
+load:0x40080400,len:4
+ho 8 tail 4 room 4
+load:0x40080404,len:3860
+entry 0x4008063c
+I (31) boot: ESP-IDF v5.5.5 2nd stage bootloader
+I (31) boot: compile time Nov 13 2026 10:00:00
+I (31) boot: Multicore bootloader
+I (35) boot: chip revision: v3.1
+I (38) boot.esp32: SPI Speed      : 40MHz
+I (42) boot.esp32: SPI Mode       : DIO
+I (46) boot.esp32: SPI Flash Size : 8MB
+I (49) boot: Enabling RNG early entropy source...
+I (54) boot: Partition Table:
+I (120) boot: Loaded app from partition at offset 0x10000
+I (120) boot: Disabling RNG early entropy source...
+I (132) quad_psram: This chip is ESP32-D0WD
+I (137) esp_psram: Found 8MB PSRAM device
+I (137) esp_psram: Speed: 40MHz
+I (138) esp_psram: PSRAM initialized, cache is in low/high (2-core) mode.
+W (145) esp_psram: Virtual address not enough for PSRAM, map as much as we can. 4MB is mapped
+I (152) cpu_start: Multicore app
+I (1050) esp_psram: SPI SRAM memory test OK
+I (1059) cpu_start: Pro cpu start user code
+I (1059) cpu_start: cpu freq: 160000000 Hz
+I (1059) app_init: Application information:
+I (1059) app_init: Project name:     dyne_node
+I (1064) app_init: App version:      58cb7b4-dirty
+I (1069) app_init: Compile time:     Nov 13 2026 10:00:00
+I (1074) app_init: ELF file SHA256:  1a2b3c4d...
+I (1079) app_init: ESP-IDF:          v5.5.5
+I (1180) esp_psram: Adding pool of 4096K of PSRAM memory to heap allocator
+I (1190) spi_flash: detected chip: gd
+I (1193) spi_flash: flash io: dio
+I (1210) esp_psram: Reserving pool of 32K of internal memory for DMA/internal allocations
+I (1210) main_task: Started on CPU0
+I (1220) main_task: Calling app_main()
+
+==== Dyne node-esp32 (node id 42) ====
+[dyne] heap(boot): free=262144 largest=114688 (internal 8bit)
+[dyne] boot #1 reset=poweron prev_uptime=0s part=ota_0 ota_state=undefined
+[dyne] wire v2 envelope selftest: PASS
+[dyne] heap(after-wasm): free=180224 largest=98304 (internal 8bit)
+I (1500) wifi:wifi driver task: 3ffc1234, prio:23, stack:6656, core=0
+I (1520) wifi:wifi firmware version: 0123456
+I (1600) wifi:mode : sta (02:00:00:00:00:2a)
+I (1600) wifi:enable tsf
+I (1610) dyne: connecting to 'dyne-exp1'...
