@@ -26,6 +26,7 @@ jobs:
           workspaces: |
             .
             crates/heat1d-actor
+            crates/heat1d-pinn-actor
             crates/heat2d-actor
             crates/sdf2d-grid-actor
             crates/imu-fusion-actor

@@ -3,13 +3,15 @@
 # Runs without any hardware: everything goes through the deterministic simulators.
 #
 #   1. unit tests of the native workspace
-#   2. build the WebAssembly actors (heat1d, heat2d)
+#   2. build the WebAssembly actors (heat1d, heat1d-pinn, heat2d)
 #   3. 1D: a 16-node split solution must match the single-node solution bit for bit
 #   4. 2D: several partitions with packet loss / latency / pauses must match bit for bit
 #   5. determinism: two runs with the same arguments produce identical output
 #   6. firmware host test: the node id selection of node-esp32, built with the host C compiler
 #   7. hardware-input replay: synthetic records (range frames, IMU samples) replay bit for bit;
 #      a one-bit change in an input is detected (needs Python 3.8+, standard library only)
+#   8. 1D baseline: all outputs of the 12 regression scenarios match the stored hashes of the
+#      reference build byte for byte (scripts/check-baseline12.sh, scripts/baseline12.sha256)
 #
 # Usage (from the repository root):  bash scripts/ci-check.sh
 set -euo pipefail
@@ -22,6 +24,7 @@ cargo test --release --workspace
 
 echo "== [2] build WebAssembly actors =="
 (cd crates/heat1d-actor && cargo build --release --target wasm32-unknown-unknown)
+(cd crates/heat1d-pinn-actor && cargo build --release --target wasm32-unknown-unknown)
 (cd crates/heat2d-actor && cargo build --release --target wasm32-unknown-unknown)
 cargo build --release -p dyne-sim -p dyne-sim2d
 
@@ -112,6 +115,9 @@ if [ -z "$PY" ]; then echo "no Python 3.8+ found (set PYTHON=...): FAIL"; fail=1
   "$PY" scripts/hw_replay.py corrupt "$RT/imu.jsonl" "$RT/imu_bad.jsonl" --node 2 --kind imu --step 30 > /dev/null
   expect_code "imu-1bit" 1 "^FAIL[[:space:]]*$" "$PY" scripts/hw_replay.py check "$RT/imu_bad.jsonl" --wasm "$WI" --sim "$SIM2" --out "$RT/i2" -- "${IMU[@]}"
 fi
+
+echo "== [8] 1D baseline: 12 scenarios vs stored hashes of the reference build (issue #25) =="
+bash scripts/check-baseline12.sh || fail=1
 
 if [ "$fail" -ne 0 ]; then echo "CI CHECK FAILED"; exit 1; fi
 echo "ALL CHECKS PASSED"
