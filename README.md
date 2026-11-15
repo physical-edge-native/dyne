@@ -1,5 +1,7 @@
 # Dyne
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24241009.svg)](https://doi.org/10.5281/zenodo.24241009)
+
 **Dyne runs a physical model split across many microcontrollers.** Each small
 device computes the physics of its own patch of space, exchanges only the values
 at the borders with its neighbours, and the patches together form one simulation
