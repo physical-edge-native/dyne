@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "Dyne: physical models split across cooperating microcontrollers"
+type: software
+authors:
+  - family-names: "Koyabu"
+    given-names: "TODO"
+repository-code: "https://github.com/physical-edge-native/dyne"
+version: "0.1.0"
+date-released: "2026-11-15"
+license: "TODO"
+keywords:
+  - edge computing
+  - microcontrollers
+  - WebAssembly
+  - domain decomposition
+  - digital twin
+  - physics-informed neural networks
