@@ -189,6 +189,12 @@ MTGで見せることを最優先とし、既存の残課題は「後で取り�
 - GitHub issue #2(実機の入力の再生によるビット一致): dyne-sim2d --replay / --replay-record、scripts/hw_replay.py、
   ファームの記録(実行の設定の "replay":{"log":true}、QoS 1)を実装(コミット前)。合成の記録で再生が一致し、
   1ビットの改変を検出することを確認(scripts/ci-check.sh の [7])。実機での確認は未。docs/2026-11-15-hw-replay.md
+- GitHub issue #25(1次元の回帰12シナリオの基準の付け替え): 基準のコミット a435bf6 は書き換えで 2f7bdcf
+  (「記号の衝突解消」、コードは同一)になり、公開の履歴に a435bf6 は無い。古いコミットをビルドする代わりに、
+  2f7bdcf のビルドで出した全30ファイルの SHA-256 を scripts/baseline12.sha256 に置き、scripts/check-baseline12.sh
+  (Linux/macOS/Windows。check-baseline12.ps1 は Git for Windows の bash でこれを呼ぶ)で照合する。
+  scripts/ci-check.sh の [8] で CI でも走る。出力は target/baseline12/ に出す(%TEMP% の固定ディレクトリは使わない)。
+  確認(コミット前): 2f7bdcf の新しいビルド・手元の書き換え前の a435bf6 のビルド・現行のビルドの3つで ALL 12 SCENARIOS MATCH
 
 ### 前回の「今ここ」(2026-11-13): 実機の到着待ち — ソフトはひと通り実装済み(すべて実機未確認)
 
@@ -259,6 +265,7 @@ MTGで見せることを最優先とし、既存の残課題は「後で取り�
     UDP1通を超える(実機では分割が要る)。sdf2d-grid-actor の容量上限とセンサ番号の上限(0〜63)を拡大
     (既存8シナリオの出力はメモリのページ数の行以外バイト一致)。旧来の部屋は twin_demo.ps1 -Preset cluttered。
   - 注意: check-baseline12.ps1 と check-sim2d.ps1 は %TEMP% の固定ディレクトリを使うので並行実行で衝突する。
+    (2026-11-15 追記: check-baseline12 は issue #25 で target/baseline12/ に出すよう変えた。check-sim2d.ps1 は従来どおり)
 
 ### 前回の「今ここ」(2026-10-10): 実験3へ — 発注10系の設計とVL53L5CXの評価
 
