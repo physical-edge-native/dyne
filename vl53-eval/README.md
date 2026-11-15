@@ -39,8 +39,9 @@ idf.py -p COM7 build flash
 ## 記録
 
 ```
-pip install pyserial
-python scripts\vl53_log.py --port COM7 --out measured\2026-10-xx-vl53l5cx --label E1_white_1000mm --frames 300 --set "res 8" --set "hz 10" --note "白壁に正対、センサ前面から1000mm"
+python -m venv .venv                               # 初回のみ (リポジトリ直下。git管理外)
+.venv\Scripts\python.exe -m pip install pyserial   # 初回のみ (グローバル環境には入れない)
+.venv\Scripts\python.exe scripts\vl53_log.py --port COM7 --out measured\2026-10-xx-vl53l5cx --label E1_white_1000mm --frames 300 --set "res 8" --set "hz 10" --note "白壁に正対、センサ前面から1000mm"
 ```
 
 - 出力: `<label>.csv`(1行=1フレーム)と `<label>.meta.txt`(起動情報・設定・メモ)。

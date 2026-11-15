@@ -1,0 +1,7 @@
+# ESP32 (node-esp32 と同じ素の ESP32、PSRAM なし) 向けの追加設定
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# 2次元の再生の記録 (.rec) を埋め込むため、アプリの領域を 3.9MB にする (4MB フラッシュ。2026-11-13 に 3MB から拡大、
+# docs/2026-11-11-shape-speedup.md)。partitions_esp32.csv。2026-11-11、docs/2026-11-11-esp32-interp-bench.md
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_esp32.csv"

@@ -82,8 +82,11 @@ extern dyne_cfg_t g_cfg;
 extern volatile bool g_start_req;  /* ctl: start 受信 */
 extern volatile bool g_stop_req;   /* ctl: stop 受信 */
 extern volatile bool g_report_req; /* ctl: report 受信 */
+extern volatile bool g_busy;       /* 2026-11-11: 計算の実行中 (OTA を受け付けない) */
 
 int dyne_node_id(void);
+/* main.c: 内部RAMを先に使い、足りなければ PSRAM を使う確保 (2026-11-13。free() で解放できる) */
+void *dyne_malloc_int_first(size_t size);
 
 /* main.c: MQTT層からのコールバック (制御面→ノードの入口) */
 void dyne_on_cfg(const char *payload, int len);
@@ -97,6 +100,8 @@ bool dyne_mqtt_connected(void);
 void dyne_mqtt_pub(const char *subtopic, const char *json, int qos, bool retain,
                    bool enqueue);
 void dyne_mqtt_pub_status(dyne_state_t st, const char *extra_json_fields);
+/* 2026-11-13: バイナリの発行 (アウトボックスへ積む)。0 = 積んだ / -1 = 未接続・失敗 / -2 = アウトボックスが一杯 */
+int dyne_mqtt_pub_bin(const char *subtopic, const void *data, int len, int qos, int max_outbox);
 
 /* sensors.c: DHT20 / BME280 (I2C)。読取はタスクが周期実行し sensor トピックへ発行 */
 void dyne_sensors_start(void);

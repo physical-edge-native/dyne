@@ -1,3 +1,6 @@
 dependencies:
   idf: ">=5.1"
   espressif/wasm-micro-runtime: "^2.4.0"
+  # 2026-11-13: 測距センサ VL53L5CX のドライバ (ST の ULD 2.0.0 の移植。BSD-3-Clause の条件で使う)。
+  # vl53-eval/ で評価したものと同じ版に固定する
+  rjrp44/vl53l5cx: "==4.0.1"

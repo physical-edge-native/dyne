@@ -53,4 +53,89 @@ config DYNE_RSSI_SNIFF
         (近傍ノードの相互RSSI)。受信コールバックのCPUコストが問題になる場合は
         無効化する (AP RSSIのみ発行される)。
 
+config DYNE_TIME_SERVER
+    string "Time server host (empty = same host as the MQTT broker)"
+    default ""
+    help
+        2026-11-11: 時刻同期の相手 (PC の scripts/dyne_ntp_server.py)。空ならブローカーの
+        URI のホスト部を使う。SNTP (ESP-IDF 標準) と独自の往復の時刻印の交換の両方の相手。
+
+config DYNE_TIME_PORT
+    int "Time server UDP port for the two-way timestamp exchange"
+    default 123
+    help
+        独自の往復の交換のポート (ctl の timesync 命令で変えられる)。SNTP は 123 固定。
+
+config DYNE_TIME_PERIOD_MS
+    int "Two-way timestamp exchange period [ms]"
+    default 2000
+
+config DYNE_PPS_GPIO
+    int "Test mode: GPIO toggled at each whole synced second (-1 = set via ctl)"
+    default 26 if DYNE_BOARD_ESPR || DYNE_BOARD_DEVKITC_VE
+    default -1
+    help
+        試験モード (ロジックアナライザでノード間のずれを測る) で切り替えるピン。
+        -1 のときは ctl の timesync 命令の pps_gpio で指定する。
+
+config DYNE_OTA_VALIDATE_TIMEOUT_S
+    int "OTA: seconds allowed for the self-check after an update before rolling back"
+    default 120
+    help
+        OTA で書き換えた直後の起動で、この秒数のうちに Wi-Fi・MQTT・自己検査がそろわなければ
+        前のファームに戻して再起動する。
+
+config DYNE_HEALTH_PERIOD_S
+    int "Health report (uptime etc.) period [s]"
+    default 10
+
+# ---- 2026-11-13: 基板の種類・測距・サーボ・IMU (docs/2026-11-13-firmware-nodes.md) ----
+
+choice DYNE_BOARD
+    prompt "Board (sets default pins)"
+    default DYNE_BOARD_ESPR if IDF_TARGET_ESP32
+    default DYNE_BOARD_OTHER
+    help
+        ピンの既定値を決める。node-esp32/build.ps1 -Board で選ぶ (sdkconfig.board.<名前>)。
+        ESPr Developer 32 (WROOM-32E、4MB、PSRAM なし) と ESP32-DevKitC-VE (WROVER-E、PSRAM 8MB) は
+        同じピン割り当て: I2C SDA=21 SCL=22、サーボ=25、試験モードのピン=26
+        (WROVER の GPIO16/17 は PSRAM が使うので避けた。起動時の状態を決めるピン 0/2/5/12/15 も避けた)。
+
+    config DYNE_BOARD_ESPR
+        bool "ESPr Developer 32 (ESP32-WROOM-32E, 4MB flash, no PSRAM)"
+    config DYNE_BOARD_DEVKITC_VE
+        bool "ESP32-DevKitC-VE (ESP32-WROVER-E, PSRAM 8MB)"
+    config DYNE_BOARD_OTHER
+        bool "Other (e.g. XIAO ESP32C5): set pins by hand"
+endchoice
+
+config DYNE_SERVO_GPIO
+    int "Servo PWM GPIO (-1 = none; can be set by ctl pan.gpio)"
+    default 25 if DYNE_BOARD_ESPR || DYNE_BOARD_DEVKITC_VE
+    default -1
+    help
+        SG90 の信号線 (橙)。LEDC の 50Hz のパルス。サーボの電源は別の電池 (GND は共通)。
+
+config DYNE_RANGE_AUTO
+    bool "Ranging: probe VL53L5CX (I2C 0x29) at boot and start ranging if present"
+    default y
+
+config DYNE_RANGE_ROW
+    int "Ranging: zone row sent to the actor (-1 = all rows)"
+    default 3
+    range -1 7
+    help
+        8x8 のうちアクターへ送る1行 (0始まり)。-1 なら全区画を送り、アクターの CFG_ZONE_ROW は PC が決める。
+        ctl の range の row で変えられる。
+
+config DYNE_RANGE_I2C_HZ
+    int "Ranging: I2C clock for VL53L5CX [Hz]"
+    default 400000
+    help
+        起動時のセンサへのファーム書き込み (約80KB、400kHz で約2.3秒) の時間に効く。評価ファームと同じ既定。
+
+config DYNE_IMU_AUTO
+    bool "IMU: probe LSM6DSOX (I2C 0x6A/0x6B) at boot and start sampling if present"
+    default y
+
 endmenu

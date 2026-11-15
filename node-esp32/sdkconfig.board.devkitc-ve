@@ -1,0 +1,23 @@
+# ESP32-DevKitC-VE (ESP32-WROVER-E、PSRAM 8MB) (2026-11-13)
+# node-esp32/build.ps1 -Board devkitc-ve が sdkconfig.defaults の後に重ねる。
+# 説明: docs/2026-11-13-firmware-nodes.md
+CONFIG_DYNE_BOARD_DEVKITC_VE=y
+
+# フラッシュ 8MB (秋月の商品名の「8MB」。Espressif の資料では DevKitC-VE = WROVER-E のフラッシュ 8MB)。
+# 最初の USB 書き込みのときに esptool の表示 (Detected flash size) で確かめる。4MB だったら
+# build.ps1 に -Flash4MB を付けて作り直す (sdkconfig.flash4mb を重ねる)
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_8mb.csv"
+
+# WROVER-E のチップは ESP32 の改版3 (ECO V3) なので、それ未満向けの PSRAM の回避策 (遅くなる) を外す
+CONFIG_ESP32_REV_MIN_3=y
+
+# PSRAM (外付けの RAM)。ESP32 が直接使えるのは 8MB のうち 4MB
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_USE_MALLOC=y
+# 16KB 未満の確保は内部RAMから (既定と同じ。明示)
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
+# Wi-Fi と lwIP のバッファを PSRAM に置いて内部RAMを空ける (計算部品の線形メモリを内部RAMに置くため)
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+# 注意: PSRAM の無い基板 (ESPr など) にこのビルドを書くと起動時に止まる (PSRAM が見つからない)。
+# CONFIG_SPIRAM_IGNORE_NOTFOUND を入れると上の Wi-Fi・lwIP の PSRAM への配置が無効になるので入れていない

@@ -1,0 +1,29 @@
+menu "bench-c5 (WASMアクターの速度・メモリ計測)"
+
+    config BENCH_USE_AOT
+        bool "AOT (wamrc で事前コンパイルした .aot を埋め込む)"
+        default n
+        help
+            有効にすると assets/*.aot を埋め込み、WAMR の AOT 実行で計測する。
+            .aot は tools/make_aot.ps1 で作る (wamrc が必要)。
+            RISC-V の ESP32 系では、実行可能なヒープを得るために
+            ESP_SYSTEM_PMP_IDRAM_SPLIT (IRAM/DRAM 分割の保護) を無効にする必要がある
+            (sdkconfig.aot に記載済み)。
+
+    config BENCH_RUN_LEGACY
+        bool "mlp と heat1d の計測も行う (2次元の再生の後)"
+        default y
+
+    config BENCH_MLP_BATCH_REPS
+        int "mlp: 64組まとめた推論の繰り返し回数"
+        default 50
+
+    config BENCH_MLP_SINGLE_CALLS
+        int "mlp: 1組ずつの推論の呼び出し回数"
+        default 1000
+
+    config BENCH_EXEC_STACK
+        int "WAMR の実行スタック (バイト)"
+        default 16384
+
+endmenu

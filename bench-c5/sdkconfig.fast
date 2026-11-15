@@ -1,0 +1,2 @@
+# WAMR Fast インタプリタ (命令を前処理して速くする代わりにメモリを多く使う)
+CONFIG_WAMR_INTERP_FAST=y

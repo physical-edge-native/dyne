@@ -20,6 +20,7 @@
 #include "mqtt_client.h"
 
 #include "dyne_node.h"
+#include "dyne_ops.h"
 
 static const char *TAG = "dyne-mqtt";
 
@@ -47,11 +48,24 @@ void dyne_mqtt_pub(const char *subtopic, const char *json, int qos, bool retain,
     }
 }
 
+/* 2026-11-13: バイナリの発行 (形の区画のメッセージ。docs/2026-11-13-firmware-nodes.md §12)。
+ * 送信の緩衝 (buffer.out_size = 2048) より大きいメッセージも、ESP-IDF の MQTT はアウトボックスに丸ごと写して
+ * 分けて書く (esp_mqtt_client_enqueue の fragmented の処理) ので、緩衝は大きくしない。
+ * アウトボックスが max_outbox バイトを超えていたら送らずに -2 (ネットワークが遅いときにメモリを食い尽くさない) */
+int dyne_mqtt_pub_bin(const char *subtopic, const void *data, int len, int qos, int max_outbox)
+{
+    if (!s_client || !s_connected) return -1;
+    if (max_outbox > 0 && esp_mqtt_client_get_outbox_size(s_client) > max_outbox) return -2;
+    char topic[96];
+    snprintf(topic, sizeof(topic), "dyne/%s", subtopic);
+    return esp_mqtt_client_enqueue(s_client, topic, (const char *)data, len, qos, false, true) < 0 ? -1 : 0;
+}
+
 /* status の発行 (規約 §2.4)。extra_json_fields は先頭カンマなしの追記分 (NULL可) */
 void dyne_mqtt_pub_status(dyne_state_t st, const char *extra)
 {
     static const char *names[] = { "online", "configured", "running", "done", "err" };
-    char sub[32], json[512];
+    char sub[32], json[1024];
     snprintf(sub, sizeof(sub), "node/%d/status", dyne_node_id());
     if (st == DYNE_ST_ONLINE) {
         uint8_t mac[6];
@@ -59,16 +73,19 @@ void dyne_mqtt_pub_status(dyne_state_t st, const char *extra)
         esp_netif_ip_info_t ip = { 0 };
         esp_netif_t *nif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
         if (nif) esp_netif_get_ip_info(nif, &ip);
+        /* 2026-11-11: 対象チップ・版・起動区画・再起動の理由・使っている計算部品 (dyne_ops.c) */
+        char ops[480];
+        dyne_ops_online_fields(ops, sizeof(ops));
         snprintf(json, sizeof(json),
                  "{\"state\":\"online\",\"mac\":\"%02X:%02X:%02X:%02X:%02X:%02X\","
-                 "\"ip\":\"" IPSTR "\",\"fw\":\"%s\",\"heap\":%u%s%s}",
+                 "\"ip\":\"" IPSTR "\",\"fw\":\"%s\",\"heap\":%u,\"up_s\":%u,%s%s%s}",
                  mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
                  IP2STR(&ip.ip), DYNE_FW_NAME,
-                 (unsigned)esp_get_free_heap_size(),
+                 (unsigned)esp_get_free_heap_size(), (unsigned)dyne_ops_uptime_s(), ops,
                  extra ? "," : "", extra ? extra : "");
     } else {
-        snprintf(json, sizeof(json), "{\"state\":\"%s\",\"idx\":%d%s%s}",
-                 names[st], g_cfg.valid ? g_cfg.idx : -1,
+        snprintf(json, sizeof(json), "{\"state\":\"%s\",\"idx\":%d,\"up_s\":%u%s%s}",
+                 names[st], g_cfg.valid ? g_cfg.idx : -1, (unsigned)dyne_ops_uptime_s(),
                  extra ? "," : "", extra ? extra : "");
     }
     dyne_mqtt_pub(sub, json, 1, true, false);

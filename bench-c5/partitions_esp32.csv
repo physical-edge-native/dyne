@@ -1,0 +1,6 @@
+# bench-c5 (ESP32, 4MB flash): one app partition as large as possible to embed the 2D replay records
+# (2026-11-13: 3MB -> 3.9MB for the shape speed-up option sets, docs/2026-11-11-shape-speedup.md)
+# Name,   Type, SubType, Offset,  Size
+nvs,      data, nvs,     0x9000,  0x6000
+phy_init, data, phy,     0xf000,  0x1000
+factory,  app,  factory, 0x10000, 0x3F0000

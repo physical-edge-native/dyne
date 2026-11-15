@@ -11,7 +11,10 @@ CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 #
 # Partition Table
 #
-CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+# 2026-11-11: OTA (無線経由の書き換え) のためアプリ2面+計算部品の区画。8MB の基板は
+# sdkconfig.defaults.esp32c5 で partitions_8mb.csv に切り替える (docs/2026-11-11-timesync-ota.md)
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_4mb.csv"
 # end of Partition Table
 
 #
@@ -35,5 +38,30 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
 # WASM Micro Runtime
 #
 CONFIG_WAMR_INTERP_CLASSIC=y
+# 2026-11-11: rustc 1.82 以降の wasm32 は既定で reference types を使う (call_indirect の表番号の符号化)。
+# 無効だと新しくビルドした計算部品が "zero byte expected" で読み込めない (ESPr の計測で判明)
+CONFIG_WAMR_ENABLE_REF_TYPES=y
 # end of WASM Micro Runtime
 # end of Component config
+
+#
+# 2026-11-11: OTA と時刻同期
+#
+# 起動後の自己確認に失敗した新しいファームを、前のファームへ戻す (ブートローダの機能。USB で書き込む必要あり)
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+# 閉じた LAN の中で PC から平文の HTTP で配る (署名・暗号化なし。限界は文書に記載)
+CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP=y
+# SNTP の再同期の間隔 (既定 1 時間 → 15 秒。下限 15 秒)
+CONFIG_LWIP_SNTP_UPDATE_DELAY=15000
+
+#
+# 2026-11-13: 測距 (VL53L5CX)・サーボ・IMU (docs/2026-11-13-firmware-nodes.md)
+#
+# ドライバの待ち (VL53L5CX_WaitMs) は vTaskDelay(ms / 1刻み) なので 1ms 刻みにする (評価ファームと同じ)。
+# 既存の処理はどれも pdMS_TO_TICKS で書いているので、刻みが細かくなるだけ
+CONFIG_FREERTOS_HZ=1000
+# 1区画に1物体 (評価と同じ。結果の構造体が小さい)
+CONFIG_VL53L5CX_NB_TARGET_PER_ZONE=1
+# センサを抜いたときに I2C の待ちで測距のタスクが止まり続けないようにする (既定は無期限)
+CONFIG_VL53L5CX_I2C_TIMEOUT=y
+CONFIG_VL53L5CX_I2C_TIMEOUT_VALUE=1000

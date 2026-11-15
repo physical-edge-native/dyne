@@ -17,6 +17,7 @@
 #include "driver/i2c_master.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "dyne_timesync.h" /* 2026-11-11: 取得時刻の同期した時刻 */
 
 #include "dyne_node.h"
 
@@ -201,7 +202,11 @@ static void sensors_task(void *arg)
         }
         char sub[32], json[192];
         snprintf(sub, sizeof(sub), "node/%d/sensor", dyne_node_id());
-        int64_t t_ms = esp_timer_get_time() / 1000;
+        int64_t t_local = esp_timer_get_time();
+        int64_t t_ms = t_local / 1000;
+        /* 2026-11-11: 取得時刻を同期した時刻 (1970年からの µs、PC の時刻サーバが基準) でも付ける。
+         * 未同期は 0。t_ms (起動からの ms) は従来どおり残す */
+        long long ts_us = (long long)dyne_time_at_local(t_local);
         /* 発注11: 校正オフセット。補正後値 temp_c を同化・発行の正とし、
          * 生値 temp_c_raw も併載する (規約 §2.6) */
         double off = g_cfg.valid ? g_cfg.calib_offset : 0.0;
@@ -210,27 +215,27 @@ static void sensors_task(void *arg)
             if (dht20_read(&t, &h)) {
                 latest_store(t + off, t_ms);
                 snprintf(json, sizeof(json),
-                         "{\"t_ms\":%lld,\"kind\":\"dht20\",\"temp_c\":%.2f,"
+                         "{\"t_ms\":%lld,\"ts_us\":%lld,\"kind\":\"dht20\",\"temp_c\":%.2f,"
                          "\"temp_c_raw\":%.2f,\"rh\":%.2f}",
-                         (long long)t_ms, t + off, t, h);
+                         (long long)t_ms, ts_us, t + off, t, h);
             } else {
                 snprintf(json, sizeof(json),
-                         "{\"t_ms\":%lld,\"kind\":\"dht20\",\"err\":\"i2c read\"}",
-                         (long long)t_ms);
+                         "{\"t_ms\":%lld,\"ts_us\":%lld,\"kind\":\"dht20\",\"err\":\"i2c read\"}",
+                         (long long)t_ms, ts_us);
             }
         } else {
             double t, h, p;
             if (s_bme_ok && bme280_read(&t, &h, &p)) {
                 latest_store(t + off, t_ms);
                 snprintf(json, sizeof(json),
-                         "{\"t_ms\":%lld,\"kind\":\"bme280\",\"temp_c\":%.2f,"
+                         "{\"t_ms\":%lld,\"ts_us\":%lld,\"kind\":\"bme280\",\"temp_c\":%.2f,"
                          "\"temp_c_raw\":%.2f,\"rh\":%.2f,\"pres_hpa\":%.2f}",
-                         (long long)t_ms, t + off, t, h, p);
+                         (long long)t_ms, ts_us, t + off, t, h, p);
             } else {
                 if (!s_bme_ok) s_bme_ok = bme280_init(); /* 後差しに追随 */
                 snprintf(json, sizeof(json),
-                         "{\"t_ms\":%lld,\"kind\":\"bme280\",\"err\":\"i2c read\"}",
-                         (long long)t_ms);
+                         "{\"t_ms\":%lld,\"ts_us\":%lld,\"kind\":\"bme280\",\"err\":\"i2c read\"}",
+                         (long long)t_ms, ts_us);
             }
         }
         dyne_mqtt_pub(sub, json, 0, false, true);
@@ -238,8 +243,11 @@ static void sensors_task(void *arg)
     }
 }
 
-void dyne_sensors_start(void)
+/* 2026-11-13: I2C のバスを測距 (dyne_range.c)・IMU (dyne_imu.c) と共有する。最初に呼んだ所で作る
+ * (起動の順は node_task の1本の流れなので排他は要らない) */
+i2c_master_bus_handle_t dyne_i2c_bus(void)
 {
+    if (s_bus) return s_bus;
     i2c_master_bus_config_t bus = {
         .clk_source = I2C_CLK_SRC_DEFAULT,
         .i2c_port = -1,
@@ -250,8 +258,14 @@ void dyne_sensors_start(void)
     };
     if (i2c_new_master_bus(&bus, &s_bus) != ESP_OK) {
         ESP_LOGE(TAG, "i2c bus init failed (sensor disabled)");
-        return;
+        s_bus = NULL;
     }
+    return s_bus;
+}
+
+void dyne_sensors_start(void)
+{
+    if (!dyne_i2c_bus()) return;
     i2c_device_config_t dc = { .dev_addr_length = I2C_ADDR_BIT_LEN_7,
                                .scl_speed_hz = 100000 };
     dc.device_address = DHT20_ADDR;

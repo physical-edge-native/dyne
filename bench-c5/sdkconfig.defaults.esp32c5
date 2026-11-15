@@ -1,0 +1,7 @@
+# ESP32-C5 (XIAO ESP32C5: 8MB PSRAM) 向けの追加設定
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+# PSRAM を有効にする。見つからなくても起動は続ける (PSRAM なしの基板でも動かすため)
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_IGNORE_NOTFOUND=y
+# malloc は内部 RAM のまま (ESP32 と条件を揃える)。PSRAM は heap_caps_malloc で明示したときだけ使う
+CONFIG_SPIRAM_USE_CAPS_ALLOC=y

@@ -1,0 +1,13 @@
+[package]
+name = "recfuel"
+version = "0.1.0"
+edition = "2021"
+
+# bench-c5 の記録 (.rec) を PC の wasmi で再生し、1ステップの「燃料」(wasmi が数える実行命令数の目安)
+# を数える計測補助 (2026-11-11、docs/2026-11-11-shape-speedup.md)。ESP32 の時間の代わりにはならない
+# (f64 のソフトウェア演算の重さを数えない) が、実行する命令の数の比を手元で見るのに使う。
+
+[dependencies]
+wasmi = "0.47"
+
+[workspace]

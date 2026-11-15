@@ -41,6 +41,11 @@
 
 #include "wasm_export.h"
 #include "dyne_node.h"
+#include "dyne_wire2.h" /* 2026-11-08: ワイヤ形式v2の外箱 (起動時自己検査) */
+#include "node_v2.h"    /* 2026-11-08: メールボックス方式のアクター用の経路 */
+#include "dyne_ops.h"      /* 2026-11-11: OTA・計算部品の保存区画・自己確認・稼働時間の報告 */
+#include "dyne_timesync.h" /* 2026-11-11: 時刻同期 */
+#include "dyne_sense.h"    /* 2026-11-13: 測距・首振り・IMU */
 
 static const char *TAG = "dyne-node";
 
@@ -56,6 +61,8 @@ extern const uint8_t wasm_end[]   asm("_binary_heat1d_actor_small_wasm_end");
 /* ==== グローバル ==== */
 dyne_cfg_t g_cfg;
 volatile bool g_start_req, g_stop_req, g_report_req;
+volatile bool g_busy; /* 2026-11-11: 計算の実行中 (OTA の書き換えを受け付けない) */
+static bool s_actor_ok; /* 計算部品を積み込めたか (失敗しても Wi-Fi は上げ、OTA で直せるようにする) */
 
 #define TIMEOUT_US     100000 /* 返事待ちの上限 (M0と同じ100ms) */
 #define RESEND_MIN_US  20000  /* 再送バックオフ (M1知見4) */
@@ -354,6 +361,7 @@ fail:
 
 void dyne_on_cfg(const char *payload, int len)
 {
+    if (dyne_v2_active()) { dyne_v2_on_cfg(payload, len); return; } /* 2026-11-08 */
     char err[96] = "";
     dyne_cfg_t tmp;
     char sub[32], json[160];
@@ -386,8 +394,14 @@ void dyne_on_ctl(const char *payload, int len)
     const cJSON *c = cJSON_GetObjectItem(root, "cmd");
     if (cJSON_IsString(c)) {
         const char *s = c->valuestring;
-        if (strcmp(s, "start") == 0) {
-            if (g_cfg.valid) {
+        if (dyne_ops_on_ctl(s, root)) {
+            /* 2026-11-11: timesync / ota_fw / ota_actor / actor_rollback / health (dyne_ops.c) */
+        } else if (dyne_range_on_ctl(s, root) || dyne_imu_on_ctl(s, root)) {
+            /* 2026-11-13: range / pan (dyne_range.c)、imu (dyne_imu.c) */
+        } else if (strcmp(s, "start") == 0) {
+            if (!s_actor_ok) {
+                dyne_mqtt_pub_status(DYNE_ST_ERR, "\"err\":\"no actor loaded\"");
+            } else if (g_cfg.valid) {
                 /* idle中に受けた古いstopのラッチを打ち消す (2026-09-18 事故究明:
                  * 消費されずに残ったstopフラグが次のstartを最初の受信スライス
                  * (≤20ms) で即中断させていた。startは常に新しい意思の表明なので、
@@ -422,25 +436,95 @@ static wasm_function_inst_t f_init, f_step, f_bval, f_bgrad, f_setn, f_get, f_x,
 static wasm_function_inst_t f_setbcv, f_tcoef; /* F1追加の任意エクスポート */
 static wasm_function_inst_t f_observe;         /* 発注8: 観測点ナッジング */
 
-static bool wasm_up(void)
+static bool wasm_bind(void);
+
+/* 1つの wasm/aot のバイト列を積み込み、差込口を確かめる。失敗したら後始末して false
+ * (wbuf はモジュールが使い続けるので、成功時は解放しない) */
+static bool wasm_try(uint8_t *wbuf, uint32_t wsize, const char *what)
 {
-    RuntimeInitArgs ia;
-    memset(&ia, 0, sizeof(ia));
-    ia.mem_alloc_type = Alloc_With_System_Allocator;
-    if (!wasm_runtime_full_init(&ia)) return false;
-    uint32_t wsize = (uint32_t)(wasm_end - wasm_start);
-    uint8_t *wbuf = malloc(wsize);
-    if (!wbuf) return false;
-    memcpy(wbuf, wasm_start, wsize);
     char err[128];
     wasm_module_t mod = wasm_runtime_load(wbuf, wsize, err, sizeof(err));
-    if (!mod) { ESP_LOGE(TAG, "wasm load: %s", err); return false; }
+    if (!mod) { ESP_LOGE(TAG, "wasm load (%s): %s", what, err); return false; }
     /* 実機不具合対応(c) 併用 (2026-09-18): インスタンスヒープ16→4KB・実行スタック
      * 16→8KB。アクターは no_std 静的確保で wasm 内 malloc を使わず、呼び出しも
      * 浅い (dyne_step は葉関数)。Wi-Fi/MQTT 用の残りヒープを最大化する */
     s_inst = wasm_runtime_instantiate(mod, 4 * 1024, 0, err, sizeof(err));
-    if (!s_inst) { ESP_LOGE(TAG, "wasm inst: %s", err); return false; }
+    if (!s_inst) {
+        ESP_LOGE(TAG, "wasm inst (%s): %s", what, err);
+        wasm_runtime_unload(mod);
+        return false;
+    }
     s_env = wasm_runtime_create_exec_env(s_inst, 8 * 1024);
+    if (!s_env || !wasm_bind()) {
+        ESP_LOGE(TAG, "wasm exports (%s): required functions missing", what);
+        if (s_env) wasm_runtime_destroy_exec_env(s_env);
+        wasm_runtime_deinstantiate(s_inst);
+        wasm_runtime_unload(mod);
+        s_env = NULL;
+        s_inst = NULL;
+        return false;
+    }
+    return true;
+}
+
+/* 2026-11-11: 計算部品の保存区画 (OTA で書いたもの) を新しい順に試し、
+ * どれも使えなければファームに埋め込んだ計算部品を使う (dyne_ops.c) */
+/* 2026-11-13: 内部RAMを先に使い、足りなければ PSRAM (外付けのRAM) を使う確保。
+ * PSRAM の無い基板 (ESPr) では malloc と同じ。PSRAM のある基板 (DevKitC-VE) では、malloc は
+ * 16KB 以上を PSRAM に置く設定 (CONFIG_SPIRAM_USE_MALLOC) なので、計算部品の本体・WAMR の内部の
+ * 表をここで内部RAMへ寄せる (内部RAMの方が速い。線形メモリは WAMR の os_mmap が同じ順で確保する) */
+void *dyne_malloc_int_first(size_t size)
+{
+    return heap_caps_malloc_prefer(size, 2, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT, MALLOC_CAP_8BIT);
+}
+#if CONFIG_SPIRAM
+static void *wamr_malloc(unsigned int size) { return dyne_malloc_int_first(size); }
+static void *wamr_realloc(void *p, unsigned int size)
+{
+    return heap_caps_realloc_prefer(p, size, 2, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT, MALLOC_CAP_8BIT);
+}
+static void wamr_free(void *p) { heap_caps_free(p); }
+#endif
+
+static bool wasm_up(void)
+{
+    RuntimeInitArgs ia;
+    memset(&ia, 0, sizeof(ia));
+#if CONFIG_SPIRAM
+    ia.mem_alloc_type = Alloc_With_Allocator;
+    ia.mem_alloc_option.allocator.malloc_func = (void *)wamr_malloc;
+    ia.mem_alloc_option.allocator.realloc_func = (void *)wamr_realloc;
+    ia.mem_alloc_option.allocator.free_func = (void *)wamr_free;
+#else
+    ia.mem_alloc_type = Alloc_With_System_Allocator;
+#endif
+    if (!wasm_runtime_full_init(&ia)) return false;
+    dyne_actor_cand_t cand[4];
+    int nc = dyne_actor_candidates(cand, 4);
+    for (int i = 0; i < nc; i++) {
+        uint32_t len;
+        uint8_t *buf = dyne_actor_read(&cand[i], &len);
+        if (!buf) continue;
+        char what[48];
+        snprintf(what, sizeof(what), "slot%d.%s seq=%u", cand[i].slot, cand[i].aot ? "aot" : "wasm",
+                 (unsigned)cand[i].seq);
+        if (wasm_try(buf, len, what)) {
+            dyne_actor_set_loaded(&cand[i]);
+            return true;
+        }
+        free(buf);
+    }
+    uint32_t wsize = (uint32_t)(wasm_end - wasm_start);
+    uint8_t *wbuf = dyne_malloc_int_first(wsize);
+    if (!wbuf) return false;
+    memcpy(wbuf, wasm_start, wsize);
+    if (!wasm_try(wbuf, wsize, "embedded")) { free(wbuf); return false; }
+    dyne_actor_set_loaded(NULL);
+    return true;
+}
+
+static bool wasm_bind(void)
+{
     f_init = wasm_runtime_lookup_function(s_inst, "dyne_init");
     f_step = wasm_runtime_lookup_function(s_inst, "dyne_step");
     f_bval = wasm_runtime_lookup_function(s_inst, "dyne_boundary_value");
@@ -452,6 +536,9 @@ static bool wasm_up(void)
     f_setbcv = wasm_runtime_lookup_function(s_inst, "dyne_set_bc_value");
     f_tcoef = wasm_runtime_lookup_function(s_inst, "dyne_transparent_coef");
     f_observe = wasm_runtime_lookup_function(s_inst, "dyne_observe");
+    /* 2026-11-08: メールボックス方式の差込口を持つ wasm ならワイヤ形式v2の経路
+     * (node_v2.c)。持たない wasm (heat1d) は以下の従来の判定のまま */
+    if (dyne_v2_bind(s_inst, s_env)) return true;
     return f_init && f_step && f_bval && f_bgrad && f_setn && f_set && f_get && f_x;
 }
 
@@ -753,9 +840,11 @@ static void run_bsp(void)
                 snprintf(sub, sizeof(sub), "node/%d/innov", c->idx);
                 snprintf(json, sizeof(json),
                          "{\"step\":%llu,\"i\":%d,\"y\":%.17g,\"d\":%.17g,"
-                         "\"holdout\":%s,\"y_t_ms\":%lld}",
+                         "\"holdout\":%s,\"y_t_ms\":%lld,\"y_ts_us\":%lld}",
                          (unsigned long long)step, li, y, r[0].of.f64,
-                         c->holdout ? "true" : "false", (long long)y_ms);
+                         c->holdout ? "true" : "false", (long long)y_ms,
+                         /* 2026-11-11: 取得時刻の同期した時刻 (未同期は 0。精度は y_t_ms と同じ ms) */
+                         (long long)dyne_time_at_local(y_ms * 1000));
                 dyne_mqtt_pub(sub, json, 0, false, true);
             }
         }
@@ -851,25 +940,42 @@ static void *node_task(void *arg)
      * 128KBの連続ブロックが取れずESPr32 (PSRAMなし) で instantiate が失敗した。
      * 起動直後の未断片ヒープで最初に確保すれば以後の割当はその周りで行われる) */
     log_heap("boot");
-    if (!wasm_up()) {
+    /* 2026-11-11: NVS の初期化・再起動の理由・起動回数 (dyne_ops.c) */
+    dyne_ops_boot_early();
+    /* 2026-11-08: 外箱の C 実装と照合用バイト列 (Rust のテストと共有) の一致 */
+    bool env_ok = dyne_env_selftest();
+    printf("[dyne] wire v2 envelope selftest: %s\n", env_ok ? "PASS" : "FAIL");
+    s_actor_ok = wasm_up();
+    if (!s_actor_ok) {
+        /* 2026-11-11: 以前はここで止まっていた。OTA で直せるよう Wi-Fi・MQTT は上げる
+         * (start は "no actor loaded" で断る。OTA 直後のファームなら自己確認の失敗で元に戻る) */
         ESP_LOGE(TAG, "wasm runtime init failed");
         log_heap("wasm-fail");
-        return NULL;
+    } else {
+        log_heap("after-wasm");
     }
-    log_heap("after-wasm");
+    /* 2026-11-11: 起動後の自己確認 (OTA 直後なら期限つき。Wi-Fi が上がらない場合も期限で戻す) */
+    dyne_ops_start_selfcheck(env_ok && s_actor_ok);
     wifi_up();
     log_heap("after-wifi");
+    dyne_timesync_start(); /* 2026-11-11: SNTP と PC との往復の時刻印の交換 */
     dyne_mqtt_start();
     dyne_sensors_start();
+    dyne_range_start(); /* 2026-11-13: 測距 (VL53L5CX) とサーボの首振り。センサが無ければ探すだけ */
+    dyne_imu_start();   /* 2026-11-13: IMU (LSM6DSOX)。センサが無ければ探すだけ */
     dyne_rssi_start();
+    dyne_ops_start_health(); /* 2026-11-11: 稼働時間などの定期報告 */
     log_heap("after-services");
 
     for (;;) {
         if (g_start_req) {
             g_start_req = false;
             if (g_cfg.role == 0) {
+                g_busy = true;
                 dyne_mqtt_pub_status(DYNE_ST_RUNNING, "\"step\":0");
-                run_bsp(); /* 再start可: 再initで場と補助変数はリセットされる */
+                if (dyne_v2_active()) dyne_v2_run_bsp(); /* 2026-11-08 */
+                else run_bsp(); /* 再start可: 再initで場と補助変数はリセットされる */
+                g_busy = false;
             } else {
                 /* observe役: 計算には参加しない (センサ・RSSIは常時タスクが発行) */
                 dyne_mqtt_pub_status(DYNE_ST_RUNNING, "\"note\":\"observe role\"");

@@ -15,6 +15,7 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "dyne_timesync.h" /* 2026-11-11: 同期した時刻 */
 #include "esp_wifi.h"
 
 #include "dyne_node.h"
@@ -87,8 +88,9 @@ static void rssi_task(void *arg)
         if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) ap_rssi = ap.rssi;
 
         char json[640];
-        int off = snprintf(json, sizeof(json), "{\"t_ms\":%lld,\"ap_rssi\":%d,\"peers\":[",
-                           (long long)(esp_timer_get_time() / 1000), ap_rssi);
+        int64_t t_local = esp_timer_get_time();
+        int off = snprintf(json, sizeof(json), "{\"t_ms\":%lld,\"ts_us\":%lld,\"ap_rssi\":%d,\"peers\":[",
+                           (long long)(t_local / 1000), (long long)dyne_time_at_local(t_local), ap_rssi);
         /* 表を読み出してリセット (周期ごとの観測数を n に持たせる) */
         portENTER_CRITICAL(&s_mux);
         int cnt = 0;

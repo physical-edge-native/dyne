@@ -1,0 +1,11 @@
+# Dyne node-esp32 の区画表 (8MB フラッシュ: XIAO ESP32C5 を想定) (2026-11-11)
+# アプリ2面 (ota_0/ota_1) + OTA の起動先の記録 (otadata) + 計算部品の区画 (actors、2枠)
+# フラッシュが 4MB の基板では partitions_4mb.csv を使う (menuconfig で切り替え)
+# 説明: docs/2026-11-11-timesync-ota.md
+# Name,     Type, SubType, Offset,   Size
+nvs,        data, nvs,     0x9000,   0x4000
+otadata,    data, ota,     0xd000,   0x2000
+phy_init,   data, phy,     0xf000,   0x1000
+ota_0,      app,  ota_0,   0x10000,  0x300000
+ota_1,      app,  ota_1,   0x310000, 0x300000
+actors,     data, 0x40,    0x610000, 0x1F0000

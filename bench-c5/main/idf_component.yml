@@ -1,0 +1,4 @@
+dependencies:
+  idf: ">=5.1"
+  # node-esp32 と同じ版 (dependencies.lock では 2.4.0~1)
+  espressif/wasm-micro-runtime: "^2.4.0"

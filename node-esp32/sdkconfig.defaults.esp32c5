@@ -1,0 +1,4 @@
+# ESP32-C5 (XIAO ESP32C5: 8MB フラッシュを想定) 向けの追加設定 (2026-11-11)
+# 基板のフラッシュが 4MB なら、この2行を消すか menuconfig で 4MB と partitions_4mb.csv に戻す
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_8mb.csv"
