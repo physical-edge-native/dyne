@@ -9,7 +9,9 @@ Checks (each prints OK or FAIL):
   cfg-before-ota  a 2D configuration is rejected while the nodes still run the embedded 1D actor
   ota             scripts/dyne_ota.py actor installs the small wave2d actor on all 16 fake nodes
   status          wave2d_cluster.py status lists them with the new actor
+  wait-summary    the exchange-wait statistics of wave2d_cluster.py on fixed values (issue #42)
   2x2-drop30      2x2 with mode.test_drop 0.3: every node's crc32 equals dyne-sim2d (bit-exact)
+  wait-recorded   that run's result.json has the per-step exchange wait of every node (from the rt reports)
   4x2             4x2 (needs the node ip cache: the retained statuses no longer carry the ip)
   4x4             4x4, 16 nodes
   4x2-absorb      4x2 with absorbing outer faces
@@ -21,6 +23,7 @@ Usage (repository root, after building dyne-sim2d and both wave2d actors; see th
 --quick skips 4x4 and 4x2-absorb.
 """
 import argparse
+import json
 import os
 import socket
 import subprocess
@@ -30,6 +33,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import dyne_mqtt_lite  # noqa: E402
+import wave2d_cluster as wc  # noqa: E402
 import wave2d_expected as wx  # noqa: E402
 
 SMALL = os.path.join(wx.ROOT, "crates", "wave2d-actor", "target-small", "wasm32-unknown-unknown", "release",
@@ -42,6 +46,29 @@ def free_port():
     p = s.getsockname()[1]
     s.close()
     return p
+
+
+def check_wait_summary():
+    """wave2d_cluster.wait_summary on fixed values (nearest-rank percentiles; issue #42)."""
+    got = (wc.wait_summary([3.0, 1.0, 2.0, 10.0]), wc.wait_summary([5.5]), wc.wait_summary([]))
+    want = ({"n": 4, "median": 2.0, "p95": 10.0, "max": 10.0}, {"n": 1, "median": 5.5, "p95": 5.5, "max": 5.5}, {})
+    ok = got == want
+    print(f"{'wait-summary':<16} {'OK' if ok else 'FAIL'}" + ("" if ok else f"  got {got}, want {want}"), flush=True)
+    return ok
+
+
+def wait_recorded(out, n_nodes):
+    """The run's result.json has an exchange-wait value for every node (the fake nodes send rt reports)."""
+    rec = [ln.split("record: ", 1)[1].strip() for ln in out.splitlines() if ln.startswith("record: ")]
+    try:
+        with open(os.path.join(rec[-1], "result.json"), encoding="utf-8") as f:
+            rows = json.load(f)["rows"]
+        ok = len(rows) == n_nodes and all(isinstance(r.get("wait_ms_n"), int) and r["wait_ms_n"] >= 1 for r in rows)
+    except (IndexError, OSError, ValueError, KeyError):
+        ok = False
+    print(f"{'wait-recorded':<16} {'OK' if ok else 'FAIL'}"
+          + ("" if ok else "  result.json lacks the exchange wait (wait_ms_*) of some node"), flush=True)
+    return ok
 
 
 def main():
@@ -70,7 +97,7 @@ def main():
     cache = ["--cache", os.path.join(a.out, "nodes.json"), "--out", a.out, "--sim", a.sim, "--wasm", a.wasm]
     if os.path.exists(os.path.join(a.out, "nodes.json")):
         os.remove(os.path.join(a.out, "nodes.json"))
-    procs, fail = [], 0
+    procs, fail = [], 0 if check_wait_summary() else 1
 
     def fakes(ids, *extra):
         log = open(os.path.join(a.out, f"fake_{ids[0]}.log"), "w", encoding="utf-8")
@@ -127,9 +154,11 @@ def main():
               0, ["16/16"])
         check("status", cluster + ["status"] + common + ["--cache", os.path.join(a.out, "nodes.json")],
               0, ["wave2d_actor_small", "dyne-fake-node"])
-        check("2x2-drop30", cluster + ["run"] + common + cache + ["--layout", "2x2", "--nodes", nodes(4),
-                                                                   "--test-drop", "0.3"],
-              0, ["PASS (bit-exact): 4/4"])
+        out = check("2x2-drop30", cluster + ["run"] + common + cache + ["--layout", "2x2", "--nodes", nodes(4),
+                                                                         "--test-drop", "0.3"],
+                    0, ["PASS (bit-exact): 4/4", "exchange wait per step"])
+        if not wait_recorded(out, 4):
+            fail = 1
         check("4x2", cluster + ["run"] + common + cache + ["--layout", "4x2", "--nodes", nodes(8)],
               0, ["PASS (bit-exact): 8/8"])
         if not a.quick:
