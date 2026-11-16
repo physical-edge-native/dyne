@@ -4,6 +4,9 @@
 #
 #   1. unit tests of the native workspace; wave2d-actor (WebAssembly) is built first, because the
 #      dyne-native tests compare the native 2D wave solver with it bit for bit and byte for byte (issue #40)
+#      The dyne-native tests also check the convergence order of the native 2D and 3D wave solvers against
+#      analytic standing waves (every observed order in [1.9, 2.1]; crates/dyne-native/tests/convergence.rs;
+#      run only here, not again as a separate step) (issue #43)
 #   2. build the WebAssembly actors (heat1d, heat1d-pinn, heat2d)
 #   3. 1D: a 16-node split solution must match the single-node solution bit for bit
 #   4. 2D: several partitions with packet loss / latency / pauses must match bit for bit;

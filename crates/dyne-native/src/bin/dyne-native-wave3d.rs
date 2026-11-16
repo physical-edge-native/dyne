@@ -6,6 +6,7 @@
 //! dyne-native-wave3d scaling --mode strong [--grid 256x256x256] [--cores 1,2,4,8] [--steps 20] [--repeat 3]
 //! dyne-native-wave3d scaling --mode weak   [--patch 64x64x64]   [--cores 1,2,4,8] [--steps 20] [--repeat 3]
 //!                            [--halo K] [--spin-us N] [--no-verify]
+//! dyne-native-wave3d convergence
 //! ```
 //!
 //! `check` solves one problem as a single patch and with each split, prints the CRC-32 of each
@@ -24,6 +25,10 @@
 //! exchanged once every `K` steps (default 1: one layer of face values every step;
 //! `dyne_native::halo`). `check` accepts a list and checks every split with every width; a width
 //! larger than a patch along a split axis is an error.
+//!
+//! `convergence` runs the convergence-order check of the solver against an analytic standing wave
+//! (`dyne_native::convergence`): it prints the error table and the observed orders, then
+//! `PASS (order within [1.9, 2.1])` or `FAIL` (exit code 1).
 
 use dyne_native::decomp::Decomposition;
 use dyne_native::field_crc32;
@@ -38,7 +43,8 @@ fn usage() -> ! {
         "usage:\n  dyne-native-wave3d check [--grid NXxNYxNZ] [--steps N] [--splits PXxPYxPZ,...] [--initial gauss|sin|cos] \
          [--outer fixed|zero-gradient|absorbing] [--halo K,...]\n  \
          dyne-native-wave3d scaling --mode strong|weak [--grid NXxNYxNZ] [--patch NXxNYxNZ] [--cores 1,2,...] [--steps N] \
-         [--repeat N] [--halo K] [--spin-us N] [--no-verify]"
+         [--repeat N] [--halo K] [--spin-us N] [--no-verify]\n  \
+         dyne-native-wave3d convergence"
     );
     std::process::exit(2)
 }
@@ -289,6 +295,13 @@ fn scaling(a: &HashMap<String, String>) -> Result<bool, PatchError> {
     Ok(ok)
 }
 
+/// The convergence-order check (see `dyne_native::convergence`); prints its own verdict.
+fn convergence() -> Result<bool, PatchError> {
+    let s = dyne_native::convergence::study_3d()?;
+    print!("dyne-native-wave3d convergence: ");
+    Ok(dyne_native::convergence::print_report(&s))
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(cmd) = args.first() else { usage() };
@@ -296,12 +309,15 @@ fn main() -> ExitCode {
     let r = match cmd.as_str() {
         "check" => check(&a),
         "scaling" => scaling(&a),
+        "convergence" => convergence(),
         _ => usage(),
     };
     match r {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => {
-            println!("FAIL: a split differs from the single-patch solve");
+            if cmd != "convergence" {
+                println!("FAIL: a split differs from the single-patch solve");
+            }
             ExitCode::FAILURE
         }
         Err(e) => {
