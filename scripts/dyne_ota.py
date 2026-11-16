@@ -5,7 +5,8 @@ PC で HTTP サーバを立ててファイルを配り、MQTT の ctl 命令で 
 ノードごとの結果 (成功 / 元に戻った / 拒否 / 失敗 / 実行中で断った / 時間切れ) と所要時間を CSV に記録する。
 説明: docs/2026-11-11-timesync-ota.md (ノード側の命令と結果の形もそこに)
 
-必要パッケージ: paho-mqtt (既存の scripts/mqtt_config.py と同じ)。それ以外は標準ライブラリ。
+必要パッケージ: paho-mqtt (既存の scripts/mqtt_config.py と同じ。2026-11-16 から、無ければ標準ライブラリだけの
+scripts/dyne_mqtt_lite.py を使う)。それ以外は標準ライブラリ。
 
 使い方 (リポジトリのルートで。--broker は PC の LAN 側アドレス):
   ノードの一覧:
@@ -169,7 +170,11 @@ class Fleet:
     """ノードの status と ota の結果を集める"""
 
     def __init__(self, broker, port=1883):
-        import paho.mqtt.client as mqtt  # 必要なときだけ読み込む (info / make-broken は不要)
+        # 必要なときだけ読み込む (info / make-broken は不要)。2026-11-16 (issue #4): paho-mqtt が無ければ
+        # 標準ライブラリだけの scripts/dyne_mqtt_lite.py (CI で偽のノードに対して動かすため)
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import dyne_mqtt_lite
+        mqtt = dyne_mqtt_lite.pick("auto")
         self.mqtt = mqtt
         self.status = {}   # id -> (受信時刻, dict)
         self.events = []   # (受信時刻, id, dict)

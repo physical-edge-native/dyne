@@ -30,6 +30,7 @@ jobs:
             crates/heat2d-actor
             crates/sdf2d-grid-actor
             crates/imu-fusion-actor
+            crates/wave2d-actor
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

@@ -207,6 +207,12 @@ MTGで見せることを最優先とし、既存の残課題は「後で取り�
   1つのステップの待ちが mode.stall_ms(既定 10 秒)を超えたら status に待ちの状態(足りない界面・計数)を出す(再起動はしない)。
   DevKitC-VE 向けのビルドは通った。**実機の確認は未**(11/20 の波動方程式の実験の前に 2×2 で確かめる。手順は
   docs/2026-11-13-firmware-nodes.md §14)。規則の正本は docs/2026-11-15-sim2d-loss-jitter.md「同期の受信の規則」(コミット前)
+- GitHub issue #4(2026-11-16、波動方程式をノード群で解く流れ): 2次元の設定の作成・注入・受理の確認・開始・各ノードの
+  ハッシュの収集・dyne-sim2d との照合を1コマンドにした scripts/wave2d_cluster.py と、実機なしで通す偽のノード
+  scripts/wave2d_fake_nodes.py(ファームと同じ MQTT のトピック・同期の規則、wave2d アクターの Python への移植)、
+  標準ライブラリだけの MQTT(scripts/dyne_mqtt_lite.py)、予行 scripts/wave2d_rehearsal.py(scripts/ci-check.sh の [9])。
+  偽のノードで 2×2(損失 30%)・4×2・4×4・吸収境界が PASS (bit-exact)、止まったノードの報告も確認。**実機は未**
+  (11/17・11/20)。手順書: docs/2026-11-16-wave2d-cluster-runbook.md(コミット前)
 
 ### 前回の「今ここ」(2026-11-13): 実機の到着待ち — ソフトはひと通り実装済み(すべて実機未確認)
 
