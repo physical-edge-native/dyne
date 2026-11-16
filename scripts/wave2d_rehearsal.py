@@ -80,9 +80,20 @@ def main():
         procs.append((p, log))
         return p
 
+    def _show(c):
+        # For the log only: paths under the repository are shown relative to it. On Windows a path on
+        # another drive (e.g. the Python interpreter on C: with the repository on D:) has no relative
+        # form, so it is shown as is.
+        if not os.path.isabs(c):
+            return c
+        try:
+            return os.path.relpath(c, wx.ROOT)
+        except ValueError:
+            return c
+
     def check(name, cmd, want_rc, must=(), timeout=900):
         nonlocal fail
-        print(f"$ {' '.join(os.path.relpath(c, wx.ROOT) if os.path.isabs(c) else c for c in cmd)}", flush=True)
+        print(f"$ {' '.join(_show(c) for c in cmd)}", flush=True)
         t0 = time.time()
         try:
             r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", env=env,
