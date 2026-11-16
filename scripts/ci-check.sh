@@ -8,7 +8,8 @@
 #   4. 2D: several partitions with packet loss / latency / pauses must match bit for bit;
 #      a ring of waiting nodes (2x2, heavy loss) finishes within a time limit (issue #26)
 #   5. determinism: two runs with the same arguments produce identical output
-#   6. firmware host test: the node id selection of node-esp32, built with the host C compiler
+#   6. firmware host tests, built with the host C compiler: the node id selection of node-esp32, and the
+#      step sync replies (a same-step duplicate is answered, so a ring of nodes cannot deadlock; issue #29)
 #   7. hardware-input replay: synthetic records (range frames, IMU samples) replay bit for bit;
 #      a one-bit change in an input is detected (needs Python 3.8+, standard library only)
 #   8. 1D baseline: all outputs of the 12 regression scenarios match the stored hashes of the
@@ -80,25 +81,33 @@ a="$("$SIM2" --wasm "$W2" --px 2 --py 2 --steps 500 --loss 0.1 --pause 3@2000:60
 b="$("$SIM2" --wasm "$W2" --px 2 --py 2 --steps 500 --loss 0.1 --pause 3@2000:6000 | cksum)"
 if [ "$a" = "$b" ]; then echo "identical output: OK"; else echo "outputs differ: FAIL"; fail=1; fi
 
-# Firmware logic that does not depend on ESP-IDF, compiled with the host C compiler (issue #19).
+# Firmware logic that does not depend on ESP-IDF, compiled with the host C compiler (issues #19, #29).
 # Set CC to choose the compiler (e.g. CC="zig cc"); skipped if no C compiler is found.
-echo "== [6] firmware host test: node id selection =="
+#   node_id: node id selection (issue #19)
+#   sync:    how a node answers messages while it waits for a step, including the reply to a same-step duplicate
+#            that keeps a ring of nodes from deadlocking (issue #29; same rule as dyne-sim2d, issue #26)
+echo "== [6] firmware host tests: node id selection, step sync replies =="
 cc_bin="${CC:-}"
 if [ -z "$cc_bin" ]; then
   for c in cc gcc clang; do
     if command -v "$c" >/dev/null 2>&1; then cc_bin="$c"; break; fi
   done
 fi
+host_test() { # name, test source, core source
+  local name="$1" src="$2" core="$3" line
+  # shellcheck disable=SC2086 # CC may hold a command with arguments
+  $cc_bin -std=c11 -Wall -Wextra -O2 -Inode-esp32/main "$src" "$core" -o "$tdir/${name}_test${EXE}"
+  line="$("$tdir/${name}_test${EXE}" | tail -n 1 || true)"
+  printf '%-16s %s\n' "$name" "$line"
+  [ "$line" = "PASS" ] || fail=1
+}
 if [ -z "$cc_bin" ]; then
   echo "node_id          SKIP (no C compiler)"
+  echo "sync             SKIP (no C compiler)"
 else
   tdir="$(mktemp -d)"
-  # shellcheck disable=SC2086 # CC may hold a command with arguments
-  $cc_bin -std=c11 -Wall -Wextra -O2 -Inode-esp32/main \
-    node-esp32/host_test/node_id_test.c node-esp32/main/dyne_node_id_core.c -o "$tdir/node_id_test${EXE}"
-  line="$("$tdir/node_id_test${EXE}" | tail -n 1 || true)"
-  printf '%-16s %s\n' "node_id" "$line"
-  [ "$line" = "PASS" ] || fail=1
+  host_test node_id node-esp32/host_test/node_id_test.c node-esp32/main/dyne_node_id_core.c
+  host_test sync node-esp32/host_test/sync_test.c node-esp32/main/dyne_sync_core.c
   rm -rf "$tdir"
 fi
 

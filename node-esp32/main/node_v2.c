@@ -13,6 +13,13 @@
  * 同期の組み立ては既存の run_bsp と同じ: 送信控え (直近2ステップ)・先着分の取り置き・
  * 過去分を受けたら控えを再送で応答・返事待ちの上限で再送 (バックオフつき)・終了時ドレイン。
  * シミュレータ (crates/dyne-sim2d) の配送規則とも同じ。
+ * 2026-11-15 (GitHub issue #29): 同じステップの重複にも控えを再送で応える (界面ごとに再送の最小間隔以上あけて)。
+ * 2×2 以上の分割では隣どうしが輪になり、損失が重なると全員が隣の1つを待ったまま止まりうるため (dyne-sim2d の issue #26 と
+ * 同じ修正)。受信の扱いの判定は dyne_sync_core.c (PC で検査できる)、規則の正本は docs/2026-11-15-sim2d-loss-jitter.md の
+ * 「同期の受信の規則」。あわせて、1つのステップの待ちが mode.stall_ms (既定 10 秒、0 = しない) を超えたら、
+ * 待っているステップ・足りない界面・計数を status に出す (再起動はしない。docs/2026-11-13-firmware-nodes.md §14)。
+ * 実機の確認のため、mode.test_drop (0〜1 未満、既定 0) で待ちの間に受けたデータグラムをその割合でわざと捨てられる
+ * (dyne-sim2d の --loss に当たる試験用の設定。0 なら何もしない)。
  *
  * 設定注入 (dyne/cfg/<id>、本経路の時のみ。暫定の形。docs/2026-11-08-firmware-wire-v2.md):
  *   { "gen":G, "cluster":{"steps":S,"alpha":a,"dt":dt,"step_period_ms":p},
@@ -65,6 +72,7 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_random.h" /* 2026-11-15: mode.test_drop (試験用のわざとの損失) */
 #include "lwip/sockets.h"
 #include "cJSON.h"
 
@@ -75,6 +83,7 @@
 #include "dyne_timesync.h" /* 2026-11-11: 時刻印 */
 #include "dyne_sense.h"    /* 2026-11-13: 測距・IMU の値をアクターへ */
 #include "dyne_shape_msg.h" /* 2026-11-13: 形の区画のメッセージ (PC の常駐版へ) */
+#include "dyne_sync_core.h" /* 2026-11-15: 同期の受信の判定 (issue #29) */
 
 static const char *TAG = "dyne-v2";
 
@@ -83,6 +92,7 @@ static const char *TAG = "dyne-v2";
 #define V2_RESEND_MIN_US 20000
 #define V2_RECV_SLICE_MS 20
 #define V2_DRAIN_MS    3000
+#define V2_STALL_DEFAULT_MS 10000 /* 2026-11-15: 1つのステップの待ちがこれを超えたら status に出す (mode.stall_ms) */
 
 /* 面ID・面の種類・戻り値 (crates/dyne-wire/src/abi.rs の field2d と同じ値) */
 #define F2_BC_DIRICHLET 0
@@ -206,6 +216,8 @@ typedef struct {
     bool imu_off_given;
     double imu_off_us;
     bool replay_log;          /* 2026-11-15: 再生の記録 (replay.log) */
+    int stall_ms;             /* 2026-11-15: 止まっていることの報告の間隔 (mode.stall_ms。0 = しない。issue #29) */
+    double test_drop;         /* 2026-11-15: 待ちの間に受けたデータグラムをわざと捨てる割合 (mode.test_drop。試験用。既定 0) */
 } v2cfg_t;
 static v2cfg_t *s_cp;
 #define s_c (*s_cp)
@@ -318,6 +330,10 @@ static bool parse_cfg_v2(const char *payload, int len, uint32_t *gen, int *idx,
         if (bad || n_if_faces != s_c.n_ifaces) { snprintf(err, errlen, "iface/face mismatch"); break; }
         s_c.field_every = mo ? num_i(mo, "field_every", 50) : 50;
         s_c.rt_every = mo ? num_i(mo, "rt_every", 100) : 100;
+        s_c.stall_ms = mo ? num_i(mo, "stall_ms", V2_STALL_DEFAULT_MS) : V2_STALL_DEFAULT_MS;
+        if (s_c.stall_ms < 0) s_c.stall_ms = 0;
+        s_c.test_drop = mo ? num_d(mo, "test_drop", 0.0) : 0.0;
+        if (!(s_c.test_drop >= 0.0 && s_c.test_drop < 1.0)) { snprintf(err, errlen, "mode.test_drop: 0 <= p < 1"); break; }
         s_c.shape_every = mo ? num_i(mo, "shape_every", f_get_aux ? V2_SHAPE_DEFAULT_EVERY : 0)
                              : (f_get_aux ? V2_SHAPE_DEFAULT_EVERY : 0);
         if (s_c.shape_every > 0 && !f_get_aux) { snprintf(err, errlen, "shape_every needs dyne_get_aux"); break; }
@@ -413,9 +429,12 @@ typedef struct {
     size_t unit_len;
     bool got;
     int64_t last_send;
+    dyne_sync_echo_t echo; /* 2026-11-15: 同じステップの重複への応答の記録 (issue #29) */
 } v2link_t;
 
 static uint64_t st_sent, st_resend, st_replay, st_bad_env, st_rejected, st_missing;
+static uint64_t st_echo, st_stall; /* 2026-11-15: 同じステップの重複への応答 (replay にも含む)・止まっていることの報告の数 */
+static uint64_t st_test_drop;      /* 2026-11-15: mode.test_drop でわざと捨てた数 */
 /* 2026-11-13: センサの受け渡しの計数 */
 static uint64_t st_shape_sent, st_shape_skip; /* 2026-11-13 */
 static uint64_t st_fused_sent; /* 2026-11-13 */
@@ -547,6 +566,7 @@ static const char *send_step(int sock, v2link_t *links, int nl, uint32_t app, ui
         l->slot[si].step = step;
         l->slot[si].valid = true;
         l->got = false;
+        dyne_sync_echo_reset(&l->echo); /* 2026-11-15: 応答の記録はステップごと (dyne-sim2d の start_step と同じ) */
         send_slot(sock, l, si);
         st_sent++;
         l->last_send = now;
@@ -785,6 +805,27 @@ static void feed_imu(uint64_t *rd, uint64_t step)
     s_rl_imu_cnt = s_rl_imu_i0 = 0;
 }
 
+/* 2026-11-15 (issue #29): 1つのステップの待ちが mode.stall_ms を超えた: 待っているステップ・足りない界面・計数を
+ * status (state は running のまま) に出す。実行は止めない (止めるのは PC の stop か、ユーザーの判断) */
+static void publish_stall(uint64_t step, const v2link_t *links, int nl, int64_t waited_us)
+{
+    char miss[64], st[400];
+    int mn = snprintf(miss, sizeof(miss), "[");
+    for (int i = 0, c = 0; i < nl; i++)
+        if (!links[i].got) mn += snprintf(miss + mn, sizeof(miss) - mn, "%s%u", c++ ? "," : "", (unsigned)links[i].id);
+    snprintf(miss + mn, sizeof(miss) - mn, "]");
+    snprintf(st, sizeof(st),
+             "\"stall\":true,\"step\":%llu,\"wait_ms\":%lld,\"missing\":%s,\"sent\":%llu,\"resend\":%llu,"
+             "\"replay\":%llu,\"echo\":%llu,\"bad_env\":%llu",
+             (unsigned long long)step, (long long)(waited_us / 1000), miss, (unsigned long long)st_sent,
+             (unsigned long long)st_resend, (unsigned long long)st_replay, (unsigned long long)st_echo,
+             (unsigned long long)st_bad_env);
+    dyne_mqtt_pub_status(DYNE_ST_RUNNING, st);
+    ESP_LOGW(TAG, "stall: step %llu waited %lld ms, missing ifaces %s", (unsigned long long)step,
+             (long long)(waited_us / 1000), miss);
+    st_stall++;
+}
+
 void dyne_v2_run_bsp(void)
 {
     char sub[32], json[256];
@@ -887,6 +928,7 @@ void dyne_v2_run_bsp(void)
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
     st_sent = st_resend = st_replay = st_bad_env = st_rejected = st_missing = 0;
+    st_echo = st_stall = st_test_drop = 0;
     st_rf_fed = st_rf_skip = st_rf_rej = st_imu_pushed = st_imu_late = st_imu_early = st_imu_lost = 0;
     st_imu_wait_to = 0;
     st_shape_sent = st_shape_skip = 0;
@@ -941,54 +983,90 @@ void dyne_v2_run_bsp(void)
             }
         }
         /* 3) 全界面が揃うまで受信・再送 */
+        int64_t wait0 = esp_timer_get_time();
+        uint32_t n_stall = 0; /* 2026-11-15: このステップで出した止まっていることの報告の数 */
         while (!fail) {
             bool all = true;
             for (int i = 0; i < nl; i++) all &= links[i].got;
             if (all) break;
             if (g_stop_req) { aborted = true; break; }
+            /* 返事待ちの上限で再送。2026-11-15 (issue #29): 受信が途切れたときだけでなく毎回確かめる
+             * (同じステップの重複への応答で受信が続いても、足りない界面への再送が止まらないように。
+             * 再送の間隔は従来と同じ last_send で決まる。dyne-sim2d の待ちの起床も配送とは独立) */
+            int64_t now = esp_timer_get_time();
+            for (int i = 0; i < nl; i++) {
+                if (!links[i].got && now - links[i].last_send >= V2_TIMEOUT_US) {
+                    send_slot(sock, &links[i], (int)(step & 1));
+                    st_resend++;
+                    links[i].last_send = now + V2_RESEND_MIN_US - V2_TIMEOUT_US;
+                }
+            }
+            if (dyne_sync_stall_due(wait0, now, (int64_t)s_c.stall_ms * 1000, n_stall)) {
+                publish_stall(step, links, nl, now - wait0);
+                n_stall++;
+            }
             struct sockaddr_in src;
             socklen_t sl = sizeof(src);
             /* 上限+1バイトで受け、上限を超えたデータグラムを検出する */
             int rn = recvfrom(sock, rb, DYNE_ENV_MAX_DATAGRAM + 1, 0, (struct sockaddr *)&src, &sl);
-            int64_t now = esp_timer_get_time();
-            if (rn > 0) {
-                dyne_env_hdr_t h;
-                const uint8_t *pl;
-                size_t pn;
-                if (dyne_env_decode(rb, (size_t)rn, &h, &pl, &pn) != 0) { st_bad_env++; continue; }
-                v2link_t *l = NULL;
-                for (int i = 0; i < nl; i++) if (links[i].id == h.iface) l = &links[i];
-                if (!l) continue;
-                if (h.step == step && !l->got) {
-                    if (deliver(app, cap, pl, pn) != F2_INBOX_OK) {
-                        st_rejected++;
-                        fail = "inbox rejected";
-                    }
-                    l->got = true;
-                } else if (h.step > step) {
-                    memcpy(l->pend.buf, pl, pn);
-                    l->pend.len = pn;
-                    l->pend.step = h.step;
-                    l->pend.valid = true;
-                } else if (h.step < step) {
-                    /* 過去分 = 相手はまだ受け取れていない。控えを再送で応答 */
-                    int ri = (int)(h.step & 1);
-                    if (l->slot[ri].valid && l->slot[ri].step == h.step) {
-                        send_slot(sock, l, ri);
-                        st_replay++;
-                    }
+            if (rn <= 0) continue;
+            /* 2026-11-15: 試験用のわざとの損失 (mode.test_drop。既定 0 = 何もしない) */
+            if (s_c.test_drop > 0.0 && esp_random() / 4294967296.0 < s_c.test_drop) { st_test_drop++; continue; }
+            now = esp_timer_get_time();
+            dyne_env_hdr_t h;
+            const uint8_t *pl;
+            size_t pn;
+            if (dyne_env_decode(rb, (size_t)rn, &h, &pl, &pn) != 0) { st_bad_env++; continue; }
+            v2link_t *l = NULL;
+            for (int i = 0; i < nl; i++) if (links[i].id == h.iface) l = &links[i];
+            if (!l) continue;
+            /* 受信の扱い (dyne_sync_core.h。dyne-sim2d の on_deliver と同じ規則) */
+            switch (dyne_sync_classify(step, h.step, l->got, &l->echo, now, V2_RESEND_MIN_US)) {
+            case DYNE_SYNC_ACCEPT:
+                if (deliver(app, cap, pl, pn) != F2_INBOX_OK) {
+                    st_rejected++;
+                    fail = "inbox rejected";
                 }
-            } else {
-                for (int i = 0; i < nl; i++) {
-                    if (!links[i].got && now - links[i].last_send >= V2_TIMEOUT_US) {
-                        send_slot(sock, &links[i], (int)(step & 1));
-                        st_resend++;
-                        links[i].last_send = now + V2_RESEND_MIN_US - V2_TIMEOUT_US;
-                    }
+                l->got = true;
+                break;
+            case DYNE_SYNC_HOLD:
+                memcpy(l->pend.buf, pl, pn);
+                l->pend.len = pn;
+                l->pend.step = h.step;
+                l->pend.valid = true;
+                break;
+            case DYNE_SYNC_REPLY_PAST: {
+                /* 過去分 = 相手はまだ受け取れていない。控えを再送で応答 */
+                int ri = (int)(h.step & 1);
+                if (l->slot[ri].valid && l->slot[ri].step == h.step) {
+                    send_slot(sock, l, ri);
+                    st_replay++;
                 }
+                break;
+            }
+            case DYNE_SYNC_REPLY_SAME: {
+                /* 2026-11-15 (issue #29): 同じステップの重複 = 相手はまだこちらの値を受け取れていない (相手の再送)。
+                 * 今のステップの控えを再送で応える (界面ごとに再送の最小間隔以上あける) */
+                int si = (int)(step & 1);
+                if (l->slot[si].valid && l->slot[si].step == step) {
+                    send_slot(sock, l, si);
+                    dyne_sync_echo_mark(&l->echo, now);
+                    st_replay++;
+                    st_echo++;
+                }
+                break;
+            }
+            case DYNE_SYNC_DROP:
+                break;
             }
         }
         if (aborted || fail) break;
+        if (n_stall > 0) { /* 2026-11-15: 止まっていた後に揃った (retained の status の stall を上書きする) */
+            snprintf(json, sizeof(json), "\"step\":%llu,\"stall_cleared\":true,\"wait_ms\":%lld",
+                     (unsigned long long)step, (long long)((esp_timer_get_time() - wait0) / 1000));
+            dyne_mqtt_pub_status(DYNE_ST_RUNNING, json);
+            ESP_LOGW(TAG, "stall cleared at step %llu", (unsigned long long)step);
+        }
         int64_t t1 = esp_timer_get_time();
         /* 3b) IMU の標本 (計算の直前) */
         if (s_c.feed_imu) feed_imu(&imu_rd, step);
@@ -1065,9 +1143,11 @@ void dyne_v2_run_bsp(void)
     char extra[1024];
     int en = snprintf(extra, sizeof(extra),
              "\"wire\":2,\"crc32\":\"0x%08X\",\"sent\":%llu,\"resend\":%llu,\"replay\":%llu,"
+             "\"echo\":%llu,\"stall_reports\":%llu,"
              "\"bad_env\":%llu,\"rejected\":%llu,\"missing\":%llu,\"dropped\":%llu",
              (unsigned)crc, (unsigned long long)st_sent, (unsigned long long)st_resend,
-             (unsigned long long)st_replay, (unsigned long long)st_bad_env,
+             (unsigned long long)st_replay, (unsigned long long)st_echo, (unsigned long long)st_stall,
+             (unsigned long long)st_bad_env,
              (unsigned long long)(st_rejected + call_u64(f_rejected)),
              (unsigned long long)(st_missing + call_u64(f_missing)), (unsigned long long)call_u64(f_dropped));
     if (s_c.feed_imu)
@@ -1085,6 +1165,9 @@ void dyne_v2_run_bsp(void)
                        (unsigned long long)st_imu_pushed, (unsigned long long)st_imu_late,
                        (unsigned long long)st_imu_early, (unsigned long long)st_imu_lost,
                        (unsigned long long)st_imu_wait_to);
+    if (s_c.test_drop > 0.0) /* 2026-11-15: 試験用のわざとの損失で捨てた数 */
+        en += snprintf(extra + en, sizeof(extra) - en, ",\"test_drop\":%.3f,\"test_dropped\":%llu", s_c.test_drop,
+                       (unsigned long long)st_test_drop);
     if (s_c.replay_log) /* 2026-11-15: 送らなかった再生の記録 (0 でなければ記録は不完全) */
         en += snprintf(extra + en, sizeof(extra) - en, ",\"replay_skip\":%llu", (unsigned long long)st_rl_skip);
     (void)en;
