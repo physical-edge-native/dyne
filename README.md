@@ -76,6 +76,11 @@ real space that the devices keep up to date.
 - **No claim of superiority** over centralised or GPU-based setups, and no
   attempt to replace computational fluid dynamics packages: Dyne aims to export
   its assimilated state to such tools for detailed studies.
+- **Fluids: flow given from outside, for now.** The airflow is imported (first
+  from OpenFOAM) and the devices assimilate what it carries (temperature, CO2,
+  humidity). Whether the devices can solve flow themselves — air, water on
+  surfaces, flow through soil — with neighbour-only exchange is being studied
+  ([design record](docs/design/2026-11-16-fluids-for-now.md)).
 
 ## Related work
 
