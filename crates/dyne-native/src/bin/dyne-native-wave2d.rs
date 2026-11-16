@@ -7,6 +7,7 @@
 //! dyne-native-wave2d scaling --mode strong [--grid 2048x2048] [--cores 1,2,4,8] [--steps 100] [--repeat 3]
 //! dyne-native-wave2d scaling --mode weak   [--patch 512x512]  [--cores 1,2,4,8] [--steps 100] [--repeat 3]
 //!                            [--halo K] [--spin-us N] [--wasm PATH] [--no-verify]
+//! dyne-native-wave2d convergence
 //! ```
 //!
 //! `check` solves one problem as a single patch and with each split, prints the CRC-32 of each
@@ -19,6 +20,10 @@
 //! solve of the same grid (unless `--no-verify`). The problem is a standing wave
 //! (`sin(πx)·sin(πy)`, fixed value 0, Courant number 0.5), chosen so that no subnormal numbers
 //! appear (they are slow on most CPUs and would distort the timing).
+//!
+//! `convergence` runs the convergence-order check of the native solver against an analytic standing
+//! wave (`dyne_native::convergence`): it prints the error table and the observed orders, then
+//! `PASS (order within [1.9, 2.1])` or `FAIL` (exit code 1).
 //!
 //! With `--wasm PATH`, patches run Dyne's WebAssembly wave solver (`wave2d-actor`) in the `wasmi`
 //! interpreter instead of the native solver.
@@ -42,7 +47,8 @@ fn usage() -> ! {
         "usage:\n  dyne-native-wave2d check [--grid NXxNY] [--steps N] [--splits PXxPY,...] [--initial gauss|sin|cos] \
          [--outer fixed|zero-gradient|absorbing] [--halo K,...] [--wasm PATH]\n  \
          dyne-native-wave2d scaling --mode strong|weak [--grid NXxNY] [--patch NXxNY] [--cores 1,2,...] [--steps N] \
-         [--repeat N] [--halo K] [--spin-us N] [--wasm PATH] [--no-verify]"
+         [--repeat N] [--halo K] [--spin-us N] [--wasm PATH] [--no-verify]\n  \
+         dyne-native-wave2d convergence"
     );
     std::process::exit(2)
 }
@@ -366,6 +372,13 @@ fn scaling(a: &HashMap<String, String>) -> Result<bool, PatchError> {
     Ok(ok)
 }
 
+/// The convergence-order check (see `dyne_native::convergence`); prints its own verdict.
+fn convergence() -> Result<bool, PatchError> {
+    let s = dyne_native::convergence::study_2d()?;
+    print!("dyne-native-wave2d convergence: ");
+    Ok(dyne_native::convergence::print_report(&s))
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(cmd) = args.first() else { usage() };
@@ -373,12 +386,15 @@ fn main() -> ExitCode {
     let r = match cmd.as_str() {
         "check" => check(&a),
         "scaling" => scaling(&a),
+        "convergence" => convergence(),
         _ => usage(),
     };
     match r {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => {
-            println!("FAIL: a split differs from the single-patch solve");
+            if cmd != "convergence" {
+                println!("FAIL: a split differs from the single-patch solve");
+            }
             ExitCode::FAILURE
         }
         Err(e) => {
