@@ -1,0 +1,16 @@
+[package]
+name = "dyne-native"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/physical-edge-native/dyne"
+description = "Native patch solvers on a PC: reference and fast backend for Dyne's WebAssembly solvers, bit-exact across splits"
+publish = false
+
+[dependencies]
+dyne-core = { path = "../dyne-core" }
+dyne-wire = { path = "../dyne-wire" }
+# Pure-Rust math (initial conditions and analytic solutions) so that every OS computes the same bits.
+libm = "0.2"
+# Runs Dyne's WebAssembly patch solvers next to the native ones.
+wasmi = "0.47"
