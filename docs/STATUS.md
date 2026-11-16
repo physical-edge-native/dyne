@@ -213,6 +213,17 @@ MTGで見せることを最優先とし、既存の残課題は「後で取り�
   標準ライブラリだけの MQTT(scripts/dyne_mqtt_lite.py)、予行 scripts/wave2d_rehearsal.py(scripts/ci-check.sh の [9])。
   偽のノードで 2×2(損失 30%)・4×2・4×4・吸収境界が PASS (bit-exact)、止まったノードの報告も確認。**実機は未**
   (11/17・11/20)。手順書: docs/2026-11-16-wave2d-cluster-runbook.md(コミット前)
+- 2026-11-16 決定: barye(PC のネイティブの計算部品)を Dyne に統合した。理由・役割(群の検証の参照解、多数ノードの
+  高速な模擬、のちに機器の特性を入れた模擬と、必要なときだけ PC を借りる予報)・故障の前提(全機器は正直、故障は損失・
+  遅延・離脱だけ。損失のもとでのビット一致は待つことで得ており、そのぶん遅れが増える)は
+  docs/design/2026-11-16-native-backend-from-barye.md(英語の設計記録。docs/design/ はこのとき新設)。
+  GitHub issue #34(設計記録)、#36(crates/dyne-native と区画分割・実行器)、#38(2次元の波動・広い境目・
+  dyne-native-wave2d、scripts/ci-check.sh の [10][11])、#40(wave2d-actor との照合を単体テストに。wave2d-actor の
+  フル版のビルドを [1] の単体テストの前へ移し、Python に依らなくした)、#41(3次元の波動・dyne-native-wave3d、[12])、
+  #43(解析解との収束の次数。CI では単体テストの中で1回だけ計算)、#44(文書)。どの段も、barye の ci-check.sh の出力と
+  名前を置き換えたうえで一致した(場のハッシュ 18e44331・2ca26bb5 は不変)。barye の作業記録は
+  docs/2026-11-16-wave2d-milestone.md・wide-halo.md・wave3d.md・convergence.md に移した。barye の Issue のうち、
+  電源につないだ状態での再測定と、1ステップの時間の内訳の測定は Dyne へ移す。barye のアーカイブはユーザーの判断待ち
 
 ### 前回の「今ここ」(2026-11-13): 実機の到着待ち — ソフトはひと通り実装済み(すべて実機未確認)
 

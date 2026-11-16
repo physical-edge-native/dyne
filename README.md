@@ -67,6 +67,32 @@ cargo run --release -p dyne-sim -- \
 Running on ESP32 boards requires ESP-IDF 5.5; see `node-esp32/` and
 `docs/2026-09-21-experiment1-runbook.md`.
 
+## Native solvers on a PC (reference and fast backend)
+
+`crates/dyne-native` runs the same split computation on the threads of one PC, with native Rust
+solvers instead of WebAssembly: one thread per patch, exchanging only border values in the same
+message format. The 2D wave solver performs the same floating-point operations in the same order as
+the WebAssembly wave solver (`crates/wave2d-actor`), so both give identical bits; CI compares the
+fields bit for bit and every border message byte for byte. The native solvers serve as a reference
+for checking runs on devices and as a fast backend for simulating many devices (on one laptop, about
+80–120 times faster per step than interpreting the WebAssembly solver). They are not a general
+field-physics package. A 3D wave solver (seven-point stencil, documented order of operations) is
+bit-exact across splits as well; it has no WebAssembly counterpart for devices yet.
+
+```sh
+# every split must equal the single-patch solution bit for bit
+cargo run --release -p dyne-native --bin dyne-native-wave2d -- check --grid 41x41 --steps 400 --splits 1x1,2x2,4x4,8x8,3x5
+cargo run --release -p dyne-native --bin dyne-native-wave3d -- check --grid 25x23x21 --steps 100 --splits 1x1x1,2x2x2,3x2x1,4x4x2,1x3x5
+# accuracy: observed convergence order against analytic standing waves, which must lie in [1.9, 2.1]
+cargo run --release -p dyne-native --bin dyne-native-wave2d -- convergence
+```
+
+Both tools also measure parallel scaling (`scaling --mode strong|weak`) and accept wider borders
+(`--halo k`: `k` layers exchanged once every `k` steps, still bit-identical). The code was moved from
+the [barye](https://github.com/physical-edge-native/barye) repository; the decision and the roles of
+these solvers are recorded in
+[docs/design/2026-11-16-native-backend-from-barye.md](docs/design/2026-11-16-native-backend-from-barye.md).
+
 ## Repository layout
 
 | Path | Contents |
@@ -74,6 +100,7 @@ Running on ESP32 boards requires ESP-IDF 5.5; see `node-esp32/` and
 | `crates/dyne-wire` | wire format shared by every host (`no_std`) |
 | `crates/dyne-core` | deterministic RNG, discrete-event clock, virtual network, WebAssembly loader |
 | `crates/dyne-sim`, `crates/dyne-sim2d` | N-device simulators (1D / 2D) |
+| `crates/dyne-native` | native PC solvers (2D/3D wave), bit-exact with the WebAssembly solvers; reference and fast backend |
 | `crates/heat1d-actor`, `crates/heat2d-actor` | finite-difference solvers compiled to WebAssembly |
 | `crates/heat1d-pinn-actor` | learned solver (time-discrete physics-informed network) |
 | `crates/sdf2d-grid-actor` | room-shape reconstruction from range sensors (simulator stage) |
