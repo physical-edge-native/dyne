@@ -38,6 +38,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "dyne-native"
+version = "0.1.0"
+dependencies = [
+ "dyne-core",
+ "dyne-wire",
+ "libm",
+ "wasmi",
+]
+
+[[package]]
 name = "dyne-proto"
 version = "0.1.0"
 
