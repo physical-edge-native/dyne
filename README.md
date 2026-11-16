@@ -47,6 +47,17 @@ computation, global reasoning staying with central models) are stated there.
   to the WebAssembly ones, serve as references and as a fast backend for
   simulating many devices (below).
 
+## Connecting to other tools
+
+Dyne does not try to replace established simulators; it hands them the state of the
+real space that the devices keep up to date.
+
+| Target | What is exported | Use | Status |
+|---|---|---|---|
+| USD (Isaac Sim / Isaac Lab and other USD-based tools) | room shape and objects, with collision information | robot learning and simulation in a scene that matches the real room | implemented, awaiting hardware verification |
+| VTK image data (ParaView, PyVista) | 2D/3D field state | inspection and post-processing without licences; checked bit for bit in CI | planned (#57) |
+| OpenFOAM case | grid, initial field and boundary conditions | detailed what-if studies with an established CFD package | planned (#57) |
+
 ## Limits stated up front
 
 - **A speed limit set by the network.** With neighbour-only exchange,
@@ -172,16 +183,16 @@ Implemented and awaiting verification on a 16-device hardware setup (2026-11):
 time synchronisation over Wi-Fi, over-the-air deployment of WebAssembly modules
 to all devices, the 2D wave equation on a device cluster, inertial-sensor (IMU)
 fusion across devices, small networks trained in PyTorch imported via ONNX,
-room-shape reconstruction from range sensors, and USD
-export usable from robot-learning environments such as Isaac Lab.
+room-shape reconstruction from range sensors, and USD export (see
+[Connecting to other tools](#connecting-to-other-tools)).
 
 Planned for 2026–2027 (tracked as GitHub issues):
 a slow indoor field (temperature, CO2 and humidity carried by a given airflow) as
 the first assimilated 3D field; forecasting by handing the devices' state to a PC
 with identical bits; simulation of many devices with device capabilities (speed,
 memory, radio delay and loss) as parameters, calibrated by hardware
-measurements; export of the state to widely used tools (VTK files for
-ParaView, and OpenFOAM cases).
+measurements; export of the field state to VTK and OpenFOAM (see
+[Connecting to other tools](#connecting-to-other-tools)).
 
 ## Contributing
 
