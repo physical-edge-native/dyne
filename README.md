@@ -2,15 +2,22 @@
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24241009.svg)](https://doi.org/10.5281/zenodo.24241009)
 
-**Dyne runs a physical model split across many microcontrollers.** Each small
-device computes the physics of its own patch of space, exchanges only the values
-at the borders with its neighbours, and the patches together form one simulation
-of the whole space — without a central server doing the computation.
+**Dyne keeps a physical model of a space running on the many small devices
+placed in it.** Each microcontroller computes the physics of its own region,
+exchanges only the values at the borders with its neighbours, and keeps its
+region fitted to its own sensor readings. Together the devices hold a live model
+of the whole space — a digital twin whose state lives on the devices, not on a
+server. When a forecast faster than real time is needed, a PC can join for a
+while, continue the same computation from the devices' state with identical
+bits, and leave again.
 
-Dyne is the first toolchain of the
+Dyne is a research tool for this setting: write a solver once, run it split over
+simulated or real devices, and check the result bit for bit against a
+single-solver reference. It is part of the
 [Physical-Edge Native Architecture](https://github.com/physical-edge-native)
-project, which studies how a physical space can be computed by many small,
-heterogeneous devices that cooperate only through their neighbours.
+project; the assumptions behind it (cheap devices of different owners sharing a
+space, fields governed by neighbour coupling, radio costing more than local
+computation, global reasoning staying with central models) are stated there.
 
 > **Status: research prototype (v0.x).** Interfaces change without notice.
 > Development records in `docs/` are written in Japanese.
@@ -23,15 +30,61 @@ heterogeneous devices that cooperate only through their neighbours.
   bit for bit.
 - **Deterministic network simulator.** Packet loss, delay, jitter, pauses and
   network partitions are injected with a fixed random seed, so every run is
-  reproducible across operating systems.
+  reproducible across operating systems. Records of sensor input from hardware
+  runs can be replayed in the simulator and checked device by device.
 - **Devices can join and leave while running.** A device can be added,
   removed, or handed its neighbour's state during a run, and the solution stays
   identical to a reference computation.
 - **Classical and learned solvers side by side.** Finite-difference solvers and
   a small physics-informed neural network (a network trained so that its output
   satisfies the governing equation) plug into the same interface.
-- **Coupling to measurements.** On real hardware, each device feeds its own
-  sensor readings into its local model (data assimilation by nudging).
+- **Coupling to measurements.** Each device feeds its own sensor readings into
+  its local model (data assimilation by nudging: the model value at a sensor is
+  pulled towards the measurement at every observation). Verified in the
+  simulator with a stability map and, on hardware, as a mechanism with
+  temperature sensors.
+- **Native solvers on a PC.** Native Rust versions of the solvers, bit-identical
+  to the WebAssembly ones, serve as references and as a fast backend for
+  simulating many devices (below).
+
+## Limits stated up front
+
+- **A speed limit set by the network.** With neighbour-only exchange,
+  information crosses one region per exchange, so following a field in real
+  time requires region size ÷ exchange delay to exceed the speed at which the
+  physics propagates — a CFL-like condition on the network. With the radio
+  delays measured so far this excludes fast phenomena such as sound and leaves
+  slow fields (indoor heat, CO2, humidity). Slow fields can often be computed by
+  a single device: the value of many devices lies in sensing spread through the
+  field, not in raw compute.
+- **Bit-exact under loss, at the cost of delay.** Devices wait for missing
+  border messages, so loss turns into delay rather than error.
+- **Honest devices only.** The guarantees assume that every device is honest and
+  only faults occur (loss, delay, devices leaving). Authentication and checks
+  against implausible border values are future work.
+- **No claim of superiority** over centralised or GPU-based setups, and no
+  attempt to replace computational fluid dynamics packages: Dyne aims to export
+  its assimilated state to such tools for detailed studies.
+
+## Related work
+
+The individual elements have prior work; Dyne studies their combination on real
+device swarms with numerical guarantees.
+
+- Amorphous and aggregate computing program many locally communicating devices
+  placed in space (Abelson et al., "Amorphous Computing", *Commun. ACM* 43(5),
+  2000; Beal, Pianini and Viroli, "Aggregate Programming for the Internet of
+  Things", *IEEE Computer* 48(9), 2015).
+- Distributed estimation of fields governed by partial differential equations,
+  where each node holds only a local subsystem (Khan and Moura, "Distributing the
+  Kalman Filter for Large-Scale Systems", *IEEE Trans. Signal Processing* 56(10),
+  2008; Battistelli et al., *IEEE Trans. Automatic Control* 62(7), 2017).
+- Split solutions that are reproducible regardless of the decomposition are used
+  in ocean and climate models (Hallberg and Adcroft, "An order-invariant
+  real-to-integer conversion sum", *Parallel Computing* 40, 2014).
+- Indoor airflow and temperature models fitted to sensor data (computational
+  fluid dynamics combined with data assimilation) run on one computer that
+  collects the data; Dyne keeps the fitted state on the devices.
 
 Verified so far (details and raw data in `docs/` and `measured/`):
 
@@ -115,11 +168,20 @@ these solvers are recorded in
 
 ## Roadmap
 
+Implemented and awaiting verification on a 16-device hardware setup (2026-11):
+time synchronisation over Wi-Fi, over-the-air deployment of WebAssembly modules
+to all devices, the 2D wave equation on a device cluster, inertial-sensor (IMU)
+fusion across devices, small networks trained in PyTorch imported via ONNX,
+room-shape reconstruction from range sensors, and USD
+export usable from robot-learning environments such as Isaac Lab.
+
 Planned for 2026–2027 (tracked as GitHub issues):
-time synchronisation of sensors over Wi-Fi, over-the-air deployment of
-WebAssembly modules, importing models trained in PyTorch via ONNX,
-IMU (inertial sensor) arrays, harder physics (wave and fluid problems), and
-USD export usable from robot-learning environments such as Isaac Lab.
+a slow indoor field (temperature, CO2 and humidity carried by a given airflow) as
+the first assimilated 3D field; forecasting by handing the devices' state to a PC
+with identical bits; simulation of many devices with device capabilities (speed,
+memory, radio delay and loss) as parameters, calibrated by hardware
+measurements; export of the state to widely used tools (VTK files for
+ParaView, and OpenFOAM cases).
 
 ## Contributing
 
