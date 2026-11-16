@@ -34,6 +34,7 @@ CRC32(32 ビットの検査値。値の列が 1 ビットでも違えば変わ�
 | 時刻同期 | docs/2026-11-11-timesync-ota.md §7 | `python scripts\dyne_ntp_server.py --port 123`、`scripts\dyne_timesync.py` |
 | ファームの OTA | 同 §4.4 | `scripts\dyne_ota.py fw ...` |
 | 同期が止まらないことの確認(issue #29) | docs/2026-11-13-firmware-nodes.md §14.4 | 本書の §4 がその手順を兼ねる |
+| 隣との交換の遅れ(往復・片道。issue #42) | 本書 §3.4 | `scripts\dyne_timesync.py --record`、`wave2d_cluster.py run --rt-every 1` |
 | IMU・再生 | docs/2026-11-13-imu-fusion.md、docs/2026-11-15-hw-replay.md | — |
 
 波動方程式の実行には時刻同期は要らない(ステップは隣との値のやり取りでそろう)。ただし、ファームは
@@ -69,10 +70,12 @@ cargo build --release -p dyne-sim2d
 期待する出力(時間は手元の PC で約2分。2x2-drop30 は 30% の損失で再送が増えるので 40〜50 秒かかる):
 
 ```
+wait-summary     OK
 cfg-before-ota   OK (exit 2, ...)
 ota              OK (exit 0, ...)
 status           OK (exit 0, ...)
 2x2-drop30       OK (exit 0, ...)
+wait-recorded    OK
 4x2              OK (exit 0, ...)
 4x4              OK (exit 0, ...)
 4x2-absorb       OK (exit 0, ...)
@@ -145,6 +148,75 @@ ALL OK
   `[dyne] heap(after-wasm)` の largest を見る(線形メモリ 64KB の連続の空きが要る)。
 - 波動の実験の間に再起動しても、アクターは書いた枠から積まれる(OTA のやり直しは不要)。
 
+### 3.4 隣との交換の遅れを記録する(往復と片道。GitHub issue #42)
+
+**なぜ**: 2台の実験(2026-08)の「中央値 6〜7ms、95%点 18ms」は、docs/2026-08-16-m2-report.md では「1往復あたり」、
+docs/2026-11-11-edge-physics-design.md §5 では「片道」と書かれている(docs/draft/2026-09-26-issues.md C.11)。元の値は
+1ステップの「同期待ち」(1ステップの時間 − 計算の時間)で、純粋な往復でも片道でもない。群れが実時間で追える速さの上限
+(区画の大きさ ÷ 1回の交換の遅れ)の見積もりがこれで2倍変わるので、今回の実験で次の3つを記録する。
+
+| 記録するもの | 経路 | 道具 | いつ |
+|---|---|---|---|
+| (a) 往復の時間 | ノード ↔ アクセスポイント ↔ PC(時刻同期の往復の交換、UDP) | `dyne_timesync.py` の記録(rtt_us・rtt_min_us) | 時刻同期の段(docs/2026-11-11-timesync-ota.md §7)に続けて |
+| (b) 1ステップの交換の待ち | ノード ↔ アクセスポイント ↔ ノード(界面の UDP) | `wave2d_cluster.py run` の exchange wait の表(result.csv・result.json の wait_ms_*) | 波動の各実行。加えて 2×2 の損失なしを `--rt-every 1` で1回 |
+| (c) 片道(時刻同期の後) | ノード → PC(MQTT) | `dyne_timesync.py` の記録の pc_time − ts_us | 時刻同期が収束した後 |
+
+**(a) 往復**(時刻同期が動いていること。docs/2026-11-11-timesync-ota.md §7.2 の時刻サーバ):
+
+```powershell
+& $PY scripts\dyne_timesync.py --broker <PC> --nodes all --report-every 1 --record 600 --csv wave2d_out\tsync_rtt.csv
+```
+
+最後の表の rtt_min_us・rtt_med_us(ノードごと)を記録する。**PC がアクセスポイントに有線でつながっているか、無線か**も
+記録する。有線なら、この往復は無線を片道1回ずつ通る。ノードどうしの界面の値は、ノード → アクセスポイント → ノードと
+無線を2回通る(片道)ので、無線を通る回数は (a) の往復と同じになる(遅れが同じとは限らない)。
+
+**片道の扱い(時刻同期で直接測れるようになるまで)**: 片道 ≈ 往復 ÷ 2 とみなす。スライド・文書には「往復の実測から、
+片道 = 往復の半分と仮定」と書く。
+
+**(b) 1ステップの交換の待ち**: `wave2d_cluster.py run` は、ノードが rt_every ステップごとに出す rt の報告
+(1ステップの時間と計算の時間の平均)から、その差(送信・隣の値を待つ時間・受信の処理)をノードごとにまとめて表示し、
+result.csv・result.json に wait_ms_n・wait_ms_median・wait_ms_p95・wait_ms_max として残す:
+
+```
+exchange wait per step = step_ms - compute_ms [ms], over the rt reports (each the mean of 100 steps; --rt-every 1 gives per-step values)
+idx node reports   median      p95      max
+  0   A1       4    ...
+```
+
+既定(`--rt-every 100`)では値は 100 ステップの平均なので、2026-08 の表(1ステップごとの中央値・95%点)と比べるには
+1ステップごとの値が要る。損失なしの 2×2 を1回、次で実行する:
+
+```powershell
+& $PY scripts\wave2d_cluster.py run --broker <PC> --layout 2x2 --nodes A1,A2,A3,A4 --rt-every 1
+```
+
+(4台 × 400 ステップ = 1600 通の rt が MQTT に増える。§4.2 の既定の実行の中央値と大きく違えば、報告そのものが
+遅れを増やしている可能性があるので、両方を記録する。)合格・不合格の判定はハッシュだけで、この表は記録用。
+
+**(c) 片道を直接測る(時刻同期の後)**: ノードの tsync の報告には、送った時点の同期した時刻 ts_us が載っており、
+`dyne_timesync.py` は受け取った時点の PC の時刻 pc_time を同じ行に書く。時刻同期が正しければ、
+pc_time − ts_us がノード → PC の片道(MQTT を通る分を含む)になる。
+
+1. 時刻サーバを `--wall` 付きで起動し直す(`dyne_timesync.py` の pc_time と同じ PC の時計を基準にするため。
+   既定は起動時の時刻 + 高分解能カウンタで、PC の時計と少しずつずれる)。起動し直した後、ノードの推定が落ち着くまで
+   約 2 分待つ(docs/2026-11-11-timesync-ota.md §3.2 の直近約 64 秒の当てはめ)。
+2. 記録する:
+
+```powershell
+& $PY scripts\dyne_timesync.py --broker <PC> --nodes all --report-every 1 --record 600 --csv wave2d_out\tsync_oneway.csv
+& $PY -c "import csv,statistics as s; r=[x for x in csv.DictReader(open(r'wave2d_out\tsync_oneway.csv',encoding='utf-8')) if x['topic']=='tsync' and x['synced']=='True']; d=[(float(x['pc_time'])-int(x['ts_us'])/1e6)*1e3 for x in r]; print(len(d),'one-way node->PC [ms]: median %.2f min %.2f' % (s.median(d),min(d)))"
+```
+
+3. 読み方: 片道は 0 より大きく、(a) の往復の半分に近いはず(MQTT と TCP を通る分だけ大きい)。**負の値、または
+   往復の最小の半分より明らかに小さい値が出たら、時刻同期がずれている**(この測定は時刻同期の確かめにもなる)。
+
+まだできないこと: ノードどうしの界面の値の片道を直接測ること。界面のメッセージのヘッダには送った時点の同期した時刻
+(t_us)がすでに付いているが、受け取ったノードが「受け取った時刻 − t_us」を報告する仕組みはファームに無い
+(必要なら issue #42 の続きとして別の issue にする)。
+
+記録の扱い: tsync_rtt.csv・tsync_oneway.csv・result.csv を measured\ へ写すときは §8 の規則に従う。
+
 ---
 
 ## 4. 2×2(4台)
@@ -201,8 +273,9 @@ PASS (bit-exact): 4/4 nodes match dyne-sim2d (gauss_dirichlet 2x2, 400 steps, ..
 ```
 
 合格: `PASS (bit-exact): 4/4`。crc32 は 4.1 と同じ値(損失は通信の計数だけを変え、計算の結果は変えない)。
-resend・echo は 0 か少数。かかった時間を記録する(1ステップの実時間 = 時間 / 400。10 秒ごとの rt の step_ms も
-wave2d_out\<実行>\events.jsonl に残る)。
+resend・echo は 0 か少数。かかった時間を記録する(1ステップの実時間 = 時間 / 400。rt の step_ms も
+wave2d_out\<実行>\events.jsonl に残る)。exchange wait の表(1ステップの交換の待ち)を記録する。続けて §3.4 (b) の
+`--rt-every 1` の実行を行う。
 
 ### 4.3 吸収境界(任意。時間があれば)
 
@@ -327,6 +400,7 @@ dyne-sim2d の `--loss` に当たる)。1 以上は設定を断られる(`mode.t
 | scripts/dyne_ota.py | paho-mqtt が無ければ dyne_mqtt_lite を使う(CI で偽のノードに配るため) |
 | scripts/ci-check.sh, .github/workflows/ci.yml | [9] を追加(wave2d のフル版・縮小版のビルドと予行)。キャッシュに crates/wave2d-actor |
 | .gitignore | wave2d_out/ |
+| scripts/wave2d_cluster.py, scripts/wave2d_rehearsal.py(GitHub issue #42、2026-11-16) | run が rt の報告から1ステップの交換の待ち(step_ms − compute_ms)をノードごとにまとめ、表と result.csv・result.json の wait_ms_* に残す(§3.4)。予行に wait-summary(決まった値での集計の確認)と wait-recorded(2×2 の結果に全ノードの値があること)を足した |
 
 ### 9.1 偽のノードの仕組み
 

@@ -11,7 +11,8 @@ wire-v2 path, node-esp32/main/node_v2.c). This tool does the whole 2D flow after
   3. inject: one retained dyne/cfg/<id> per node (partition, faces, interface ids, peers' ip:port, mode),
      then wait until every node acknowledges the same gen and the CRC32 of the exact payload
   4. start: {"cmd":"start"} to each node of the run (not to dyne/ctl/all, so idle nodes outside the run stay idle)
-  5. collect: running / stall reports (translated to "waiting for which neighbour") / done with crc32
+  5. collect: running / stall reports (translated to "waiting for which neighbour") / done with crc32, and the
+     per-step exchange wait (step time minus compute time of the rt reports; issue #42)
   6. compare: PASS (bit-exact) only if every node's crc32 equals dyne-sim2d's for its block
 
 Subcommands (repository root; Windows: .venv\\Scripts\\python.exe, elsewhere python3):
@@ -102,6 +103,20 @@ class Observer:
     def close(self):
         self.cl.loop_stop()
         self.cl.disconnect()
+
+
+# ---------------------------------------------------------------- exchange wait (issue #42)
+
+def wait_summary(waits):
+    """Per-step exchange wait of one node: step time minus compute time [ms], one value per rt report.
+
+    Each rt report holds the means over its window of rt_every steps, so the values are window means
+    (run with --rt-every 1 to get one value per step). Returns n / median / p95 / max (nearest rank), or {}."""
+    w = sorted(waits)
+    if not w:
+        return {}
+    pick = lambda q: w[min(len(w) - 1, max(0, -(-len(w) * q // 100) - 1))]  # noqa: E731  nearest rank
+    return {"n": len(w), "median": round(pick(50), 3), "p95": round(pick(95), 3), "max": round(w[-1], 3)}
 
 
 # ---------------------------------------------------------------- node cache (ip, port, actor)
@@ -331,6 +346,7 @@ def _run(args, obs, px, py, ids, exp, run_dir):
             if f is not None:
                 iface_src[(b["idx"], f[0])] = f[1]
     done, err, last_step, stalls, final_sum = {}, {}, {}, [], {}
+    waits = {}  # idx -> [step_ms - compute_ms of each rt report]
     pos, t_print = 0, time.time()
     deadline = t_start + args.timeout
     while time.time() < deadline and len(done) + len(err) < len(ids):
@@ -342,6 +358,12 @@ def _run(args, obs, px, py, ids, exp, run_dir):
                 continue
             if p[3] == "field2d" and d.get("step") == args.steps - 1:
                 final_sum[int(p[2])] = d  # topic id = idx (node_v2.c publish_summary)
+                continue
+            if p[3] == "rt":  # topic id = idx, like field2d
+                try:
+                    waits.setdefault(int(p[2]), []).append(float(d["step_ms"]["mean"]) - float(d["compute_ms"]["mean"]))
+                except (KeyError, TypeError, ValueError):
+                    pass
                 continue
             if p[3] != "status" or int(p[2]) not in idx_of:
                 continue
@@ -388,13 +410,23 @@ def _run(args, obs, px, py, ids, exp, run_dir):
                      "match": "yes" if got == e["crc32"] else "NO", "minmax_match": mm,
                      "state": "done" if nid in done else (err.get(nid, {}).get("state") or "timeout"),
                      "last_step": last_step.get(nid, ""), **{k: d.get(k, "") for k in (
-                         "sent", "resend", "replay", "echo", "stall_reports", "missing", "test_dropped")}})
+                         "sent", "resend", "replay", "echo", "stall_reports", "missing", "test_dropped")},
+                     **{f"wait_ms_{k}": v for k, v in wait_summary(waits.get(i, [])).items()}})
+    for r in rows:  # same columns in every row (a node without rt reports gets empty cells)
+        for k in ("wait_ms_n", "wait_ms_median", "wait_ms_p95", "wait_ms_max"):
+            r.setdefault(k, "")
     print(f"\n{'idx':>3} {'node':>4} {'expected':<10} {'got':<10} {'match':<5} {'min/max':<7} {'sent':>6} "
           f"{'resend':>6} {'replay':>6} {'echo':>5} {'stall':>5} {'dropped':>7}")
     for r in rows:
         print(f"{r['idx']:>3} {r['node']:>4} {r['expected']:<10} {r['got'] or r['state']:<10} {r['match']:<5} "
               f"{r['minmax_match'] or '-':<7} {str(r['sent']):>6} {str(r['resend']):>6} {str(r['replay']):>6} "
               f"{str(r['echo']):>5} {str(r['stall_reports']):>5} {str(r['test_dropped']):>7}")
+    print(f"\nexchange wait per step = step_ms - compute_ms [ms], over the rt reports "
+          f"(each the mean of {args.rt_every} steps; --rt-every 1 gives per-step values)")
+    print(f"{'idx':>3} {'node':>4} {'reports':>7} {'median':>8} {'p95':>8} {'max':>8}")
+    for r in rows:
+        print(f"{r['idx']:>3} {r['node']:>4} {str(r['wait_ms_n']):>7} {str(r['wait_ms_median']):>8} "
+              f"{str(r['wait_ms_p95']):>8} {str(r['wait_ms_max']):>8}")
     n_ok = sum(r["match"] == "yes" for r in rows)
     if args.test_drop > 0 and done and all(not r["test_dropped"] for r in rows if r["state"] == "done"):
         print(f"WARNING: --test-drop {args.test_drop} but no node reports test_dropped > 0 (old firmware?)")
@@ -407,6 +439,7 @@ def _run(args, obs, px, py, ids, exp, run_dir):
     verdict = n_ok == len(ids)
     with open(os.path.join(run_dir, "result.json"), "w", encoding="utf-8") as f:
         json.dump({"layout": f"{px}x{py}", "scene": args.scene, "steps": args.steps, "test_drop": args.test_drop,
+                   "rt_every": args.rt_every,
                    "gen": gen, "nodes": ids, "pass": verdict, "timed_out": timed_out, "stalls": stalls,
                    "seconds": round(time.time() - t_start, 1), "rows": rows, "done": done, "err": err}, f, indent=1)
     print(f"record: {run_dir}")
