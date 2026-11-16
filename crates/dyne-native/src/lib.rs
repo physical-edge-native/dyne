@@ -22,7 +22,9 @@
 //!   WebAssembly wave solver (`crates/wave2d-actor`);
 //! - [`halo`]: wider borders for the native solvers (`k` layers, one exchange every `k` steps,
 //!   bit-identical results);
-//! - [`wasm2d`]: running Dyne's 2D WebAssembly patch solvers as patches.
+//! - [`wasm2d`]: running Dyne's 2D WebAssembly patch solvers as patches;
+//! - [`wave3d`]: a native 3D wave-equation patch solver (seven-point Laplacian) with a documented,
+//!   fixed order of floating-point operations.
 //!
 //! Moved from physical-edge-native/barye (crate `barye-core`).
 
@@ -31,6 +33,7 @@ pub mod halo;
 pub mod patch;
 pub mod wasm2d;
 pub mod wave2d;
+pub mod wave3d;
 
 /// Dyne's border-exchange format (wire format version 2) and mailbox conventions.
 pub use dyne_wire as wire;

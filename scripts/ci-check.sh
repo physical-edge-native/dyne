@@ -26,6 +26,10 @@
 #      corner neighbours): 2D 41x41, even and uneven splits, k = 1, 2, 3, 4, with fixed, zero-gradient
 #      and absorbing outer faces: every run must print "PASS (bit-exact)"; a width larger than a patch
 #      must be rejected with an error naming the halo width (issue #38)
+#  12. native 3D wave solver on a PC: a 25x23x21 grid (100 steps) split 1x1x1, 2x2x2, 3x2x1, 4x4x2 and
+#      1x3x5 (uneven), one thread per patch: every split must print "PASS (bit-exact)", and the field hash
+#      must be the pinned one (2ca26bb5), the same on every OS; then wider borders as in step 11, k = 1..4,
+#      splits 2x2x2, 3x2x1, 4x4x2, 1x3x5, three outer face types: every run "PASS (bit-exact)" (issue #41)
 #
 # Usage (from the repository root):  bash scripts/ci-check.sh
 set -euo pipefail
@@ -205,6 +209,27 @@ elif printf '%s\n' "$out" | grep -q "halo width 6 is larger than the patch"; the
 else
   echo "$out"; echo "halo too wide    FAIL (wrong error)"; fail=1
 fi
+
+echo "== [12] native 3D wave solver: split and wider borders = single patch (bit-exact) (issue #41) =="
+NW3="target/release/dyne-native-wave3d${EXE}"
+out=$("$NW3" check --grid 25x23x21 --steps 100 --splits 1x1x1,2x2x2,3x2x1,4x4x2,1x3x5) || true
+echo "$out"
+passes=$(printf '%s\n' "$out" | grep -c "PASS (bit-exact)" || true)
+if [ "$passes" -eq 5 ] && printf '%s\n' "$out" | grep -q "single patch         crc32 2ca26bb5"; then
+  echo "wave3d split     OK"
+else
+  echo "wave3d split     FAIL"; fail=1
+fi
+for outer in fixed zero-gradient absorbing; do
+  out=$("$NW3" check --grid 25x23x21 --steps 41 --splits 2x2x2,3x2x1,4x4x2,1x3x5 --halo 1,2,3,4 --outer "$outer") || true
+  passes=$(printf '%s\n' "$out" | grep -c "PASS (bit-exact)" || true)
+  printf '%s\n' "$out" | sed -n 2p
+  if [ "$passes" -eq 16 ]; then
+    echo "wave3d halo $outer: 16 of 16 bit-exact  OK"
+  else
+    echo "$out"; echo "wave3d halo $outer  FAIL"; fail=1
+  fi
+done
 
 if [ "$fail" -ne 0 ]; then echo "CI CHECK FAILED"; exit 1; fi
 echo "ALL CHECKS PASSED"
