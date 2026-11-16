@@ -14,6 +14,10 @@
 #      a one-bit change in an input is detected (needs Python 3.8+, standard library only)
 #   8. 1D baseline: all outputs of the 12 regression scenarios match the stored hashes of the
 #      reference build byte for byte (scripts/check-baseline12.sh, scripts/baseline12.sha256)
+#   9. wave2d on a cluster, rehearsed without hardware: the runbook's PC commands (OTA of the actor, 2D
+#      configuration, start, collection of per-node hashes) against fake nodes and an in-process MQTT broker;
+#      every node's hash must equal dyne-sim2d's, also with 30% datagram loss; a silent node must produce
+#      stall reports (scripts/wave2d_rehearsal.py; Python 3.8+, standard library only; issue #4)
 #
 # Usage (from the repository root):  bash scripts/ci-check.sh
 set -euo pipefail
@@ -151,6 +155,14 @@ fi
 
 echo "== [8] 1D baseline: 12 scenarios vs stored hashes of the reference build (issue #25) =="
 bash scripts/check-baseline12.sh || fail=1
+
+echo "== [9] wave2d cluster flow on fake nodes over MQTT (issue #4) =="
+if [ -z "$PY" ]; then echo "no Python 3.8+ found (set PYTHON=...): FAIL"; fail=1; else
+  (cd crates/wave2d-actor && cargo build --release --target wasm32-unknown-unknown)
+  (cd crates/wave2d-actor && RUSTFLAGS="-C link-arg=-zstack-size=8192" \
+    cargo build --release --target wasm32-unknown-unknown --features small --target-dir target-small)
+  "$PY" scripts/wave2d_rehearsal.py --sim "$SIM2" --out target/ci-wave2d || fail=1
+fi
 
 if [ "$fail" -ne 0 ]; then echo "CI CHECK FAILED"; exit 1; fi
 echo "ALL CHECKS PASSED"
