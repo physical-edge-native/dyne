@@ -2,7 +2,8 @@
 # Portable regression check used by CI (Linux / macOS / Windows Git Bash).
 # Runs without any hardware: everything goes through the deterministic simulators.
 #
-#   1. unit tests of the native workspace
+#   1. unit tests of the native workspace; wave2d-actor (WebAssembly) is built first, because the
+#      dyne-native tests compare the native 2D wave solver with it bit for bit and byte for byte (issue #40)
 #   2. build the WebAssembly actors (heat1d, heat1d-pinn, heat2d)
 #   3. 1D: a 16-node split solution must match the single-node solution bit for bit
 #   4. 2D: several partitions with packet loss / latency / pauses must match bit for bit;
@@ -33,6 +34,9 @@ EXE=""
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) EXE=".exe" ;; esac
 
 echo "== [1] unit tests =="
+# The WebAssembly wave solver is built first: the dyne-native tests compare the native 2D wave solver
+# with it bit for bit (crates/dyne-native/tests/wasm_actor.rs; a missing file fails when CI=true).
+(cd crates/wave2d-actor && cargo build --release --target wasm32-unknown-unknown)
 cargo test --release --workspace
 
 echo "== [2] build WebAssembly actors =="
@@ -165,7 +169,6 @@ bash scripts/check-baseline12.sh || fail=1
 
 echo "== [9] wave2d cluster flow on fake nodes over MQTT (issue #4) =="
 if [ -z "$PY" ]; then echo "no Python 3.8+ found (set PYTHON=...): FAIL"; fail=1; else
-  (cd crates/wave2d-actor && cargo build --release --target wasm32-unknown-unknown)
   (cd crates/wave2d-actor && RUSTFLAGS="-C link-arg=-zstack-size=8192" \
     cargo build --release --target wasm32-unknown-unknown --features small --target-dir target-small)
   "$PY" scripts/wave2d_rehearsal.py --sim "$SIM2" --out target/ci-wave2d || fail=1
