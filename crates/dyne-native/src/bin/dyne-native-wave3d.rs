@@ -3,6 +3,7 @@
 //! ```text
 //! dyne-native-wave3d check   [--grid 25x23x21] [--steps 100] [--splits 1x1x1,2x2x2,3x2x1,4x4x2]
 //!                            [--initial gauss|sin|cos] [--outer fixed|zero-gradient|absorbing] [--halo 1,2,...]
+//!                            [--vti PATH]
 //! dyne-native-wave3d scaling --mode strong [--grid 256x256x256] [--cores 1,2,4,8] [--steps 20] [--repeat 3]
 //! dyne-native-wave3d scaling --mode weak   [--patch 64x64x64]   [--cores 1,2,4,8] [--steps 20] [--repeat 3]
 //!                            [--halo K] [--spin-us N] [--no-verify]
@@ -12,6 +13,11 @@
 //! `check` solves one problem as a single patch and with each split, prints the CRC-32 of each
 //! global field (the field hash that Dyne's simulators print) and `PASS (bit-exact)` or `FAIL`; the
 //! exit code is 1 if any split differs. The problem uses h = 1/(nx − 1), c = 1 and Courant number 0.5.
+//!
+//! With `--vti PATH`, `check` also writes the final field of the single-patch solve (the field that
+//! every split must reproduce bit for bit) as a VTK ImageData file for ParaView or PyVista: one array
+//! `u`, origin 0, spacing `h` on all axes (`dyne_export::vti`). `dyne-vti info PATH` reads it back and
+//! prints the same CRC-32 as the `single patch` line.
 //!
 //! `scaling` measures the wall time per step of the step loop. Strong scaling keeps the grid fixed and
 //! splits it into one patch per core; weak scaling keeps the patch size fixed and grows the grid with
@@ -30,6 +36,7 @@
 //! (`dyne_native::convergence`): it prints the error table and the observed orders, then
 //! `PASS (order within [1.9, 2.1])` or `FAIL` (exit code 1).
 
+use dyne_export::vti::ImageData;
 use dyne_native::decomp::Decomposition;
 use dyne_native::field_crc32;
 use dyne_native::patch::{run_single, run_threaded, run_threaded_with, PatchError, PatchSolver, RunOptions};
@@ -41,7 +48,7 @@ use std::time::{Duration, Instant};
 fn usage() -> ! {
     eprintln!(
         "usage:\n  dyne-native-wave3d check [--grid NXxNYxNZ] [--steps N] [--splits PXxPYxPZ,...] [--initial gauss|sin|cos] \
-         [--outer fixed|zero-gradient|absorbing] [--halo K,...]\n  \
+         [--outer fixed|zero-gradient|absorbing] [--halo K,...] [--vti PATH]\n  \
          dyne-native-wave3d scaling --mode strong|weak [--grid NXxNYxNZ] [--patch NXxNYxNZ] [--cores 1,2,...] [--steps N] \
          [--repeat N] [--halo K] [--spin-us N] [--no-verify]\n  \
          dyne-native-wave3d convergence"
@@ -118,6 +125,12 @@ fn check(a: &HashMap<String, String>) -> Result<bool, PatchError> {
     );
     let reference = single(&p, steps)?;
     println!("single patch         crc32 {:08x}", field_crc32(&reference));
+    if let Some(path) = a.get("vti") {
+        let mut d = ImageData::new_3d(points, [0.0; 3], [p.h; 3]);
+        d.add("u", reference.clone());
+        d.write_vti(path).map_err(|e| PatchError(e.0))?;
+        println!("vti: wrote {path} (array u, {}x{}x{} points)", points[0], points[1], points[2]);
+    }
     let mut ok = true;
     for &halo in &halos {
         for &parts in &splits {

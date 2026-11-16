@@ -33,6 +33,11 @@
 #      1x3x5 (uneven), one thread per patch: every split must print "PASS (bit-exact)", and the field hash
 #      must be the pinned one (2ca26bb5), the same on every OS; then wider borders as in step 11, k = 1..4,
 #      splits 2x2x2, 3x2x1, 4x4x2, 1x3x5, three outer face types: every run "PASS (bit-exact)" (issue #41)
+#  13. field export to VTK ImageData (.vti, crates/dyne-export): the native 2D and 3D wave solvers and
+#      dyne-sim2d (heat, 2x2 split) write their final field with --vti; dyne-vti reads each file back, and
+#      the CRC-32 of the array must equal the hash the run printed (for the wave solvers also the pinned
+#      hashes of steps 10 and 12): the field was written and read back bit for bit. The unit tests of
+#      dyne-export also cover NaN (with payloads), infinities, -0.0 and subnormal values (issue #57)
 #
 # Usage (from the repository root):  bash scripts/ci-check.sh
 set -euo pipefail
@@ -233,6 +238,41 @@ for outer in fixed zero-gradient absorbing; do
     echo "$out"; echo "wave3d halo $outer  FAIL"; fail=1
   fi
 done
+
+echo "== [13] field export to VTK ImageData: write, read back, same CRC-32 (issue #57) =="
+cargo build --release -p dyne-export
+VTI="target/release/dyne-vti${EXE}"
+VD="target/ci-vti"
+rm -rf "$VD"; mkdir -p "$VD"
+vti_check() { # name, file, array, expected crc32 (8 hex digits), expected points (NXxNYxNZ)
+  local name="$1" file="$2" arr="$3" crc="$4" pts="$5" info
+  if info=$("$VTI" info "$file" 2>&1) \
+     && printf '%s\n' "$info" | grep -q "^$file: $pts points" \
+     && printf '%s\n' "$info" | grep -q "^array $arr: .* crc32 $crc\$"; then
+    printf '%-16s OK (array %s, %s points, crc32 %s)\n' "$name" "$arr" "$pts" "$crc"
+  else
+    echo "$info"; printf '%-16s FAIL (expected array %s, %s points, crc32 %s)\n' "$name" "$arr" "$pts" "$crc"; fail=1
+  fi
+}
+out=$("$NW2" check --grid 41x41 --steps 400 --splits 2x2 --vti "$VD/wave2d.vti") || true
+if printf '%s\n' "$out" | grep -q "single patch      crc32 18e44331"; then
+  vti_check "vti wave2d" "$VD/wave2d.vti" u 18e44331 41x41x1
+else
+  echo "$out"; echo "vti wave2d       FAIL (run)"; fail=1
+fi
+out=$("$NW3" check --grid 25x23x21 --steps 100 --splits 2x2x2 --vti "$VD/wave3d.vti") || true
+if printf '%s\n' "$out" | grep -q "single patch         crc32 2ca26bb5"; then
+  vti_check "vti wave3d" "$VD/wave3d.vti" u 2ca26bb5 25x23x21
+else
+  echo "$out"; echo "vti wave3d       FAIL (run)"; fail=1
+fi
+out=$("$SIM2" --wasm "$W2" --quiet --px 2 --py 2 --nx 33 --ny 25 --steps 200 --vti "$VD/heat2d.vti") || true
+crc=$(printf '%s\n' "$out" | sed -n 's/^crc32: split \([0-9a-f]\{8\}\) .*/\1/p')
+if [ -n "$crc" ] && printf '%s\n' "$out" | grep -q "PASS (bit-exact)"; then
+  vti_check "vti sim2d heat" "$VD/heat2d.vti" u "$crc" 33x25x1
+else
+  echo "$out"; echo "vti sim2d heat   FAIL (run)"; fail=1
+fi
 
 if [ "$fail" -ne 0 ]; then echo "CI CHECK FAILED"; exit 1; fi
 echo "ALL CHECKS PASSED"

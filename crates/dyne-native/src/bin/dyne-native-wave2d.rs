@@ -3,7 +3,7 @@
 //! ```text
 //! dyne-native-wave2d check   [--grid 41x41] [--steps 400] [--splits 1x1,2x2,4x4,8x8,3x5]
 //!                            [--initial gauss|sin|cos] [--outer fixed|zero-gradient|absorbing]
-//!                            [--halo 1,2,...] [--wasm PATH]
+//!                            [--halo 1,2,...] [--wasm PATH] [--vti PATH]
 //! dyne-native-wave2d scaling --mode strong [--grid 2048x2048] [--cores 1,2,4,8] [--steps 100] [--repeat 3]
 //! dyne-native-wave2d scaling --mode weak   [--patch 512x512]  [--cores 1,2,4,8] [--steps 100] [--repeat 3]
 //!                            [--halo K] [--spin-us N] [--wasm PATH] [--no-verify]
@@ -25,6 +25,11 @@
 //! wave (`dyne_native::convergence`): it prints the error table and the observed orders, then
 //! `PASS (order within [1.9, 2.1])` or `FAIL` (exit code 1).
 //!
+//! With `--vti PATH`, `check` also writes the final field of the single-patch solve (the field that
+//! every split must reproduce bit for bit) as a VTK ImageData file for ParaView or PyVista: one array
+//! `u`, origin 0, spacing `h` on both axes (`dyne_export::vti`). `dyne-vti info PATH` reads it back
+//! and prints the same CRC-32 as the `single patch` line.
+//!
 //! With `--wasm PATH`, patches run Dyne's WebAssembly wave solver (`wave2d-actor`) in the `wasmi`
 //! interpreter instead of the native solver.
 //!
@@ -33,6 +38,7 @@
 //! `dyne_native::halo`). `check` accepts a list and checks every split with every width; a width
 //! larger than a patch along a split axis is an error. Dyne's WebAssembly solver supports only 1.
 
+use dyne_export::vti::ImageData;
 use dyne_native::decomp::{Block, Decomposition};
 use dyne_native::field_crc32;
 use dyne_native::patch::{run_single, run_threaded, run_threaded_with, PatchError, PatchSolver, RunOptions};
@@ -45,7 +51,7 @@ use std::time::{Duration, Instant};
 fn usage() -> ! {
     eprintln!(
         "usage:\n  dyne-native-wave2d check [--grid NXxNY] [--steps N] [--splits PXxPY,...] [--initial gauss|sin|cos] \
-         [--outer fixed|zero-gradient|absorbing] [--halo K,...] [--wasm PATH]\n  \
+         [--outer fixed|zero-gradient|absorbing] [--halo K,...] [--wasm PATH] [--vti PATH]\n  \
          dyne-native-wave2d scaling --mode strong|weak [--grid NXxNY] [--patch NXxNY] [--cores 1,2,...] [--steps N] \
          [--repeat N] [--halo K] [--spin-us N] [--wasm PATH] [--no-verify]\n  \
          dyne-native-wave2d convergence"
@@ -202,6 +208,12 @@ fn check(a: &HashMap<String, String>) -> Result<bool, PatchError> {
     );
     let reference = solver.single(&p, steps)?;
     println!("single patch      crc32 {:08x}", field_crc32(&reference));
+    if let Some(path) = a.get("vti") {
+        let mut d = ImageData::new_2d(points, [0.0, 0.0], [p.h, p.h]);
+        d.add("u", reference.clone());
+        d.write_vti(path).map_err(|e| PatchError(e.0))?;
+        println!("vti: wrote {path} (array u, {}x{} points)", points[0], points[1]);
+    }
     let mut ok = true;
     for &halo in &halos {
         for &parts in &splits {

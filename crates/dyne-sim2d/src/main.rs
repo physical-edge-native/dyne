@@ -41,6 +41,13 @@
 //!    各ノードが自分の区画の初期場をそのモデルの予測で作る。dyne_model_load を持つアクター用。
 //!    指定しなければ従来の経路と完全に同じ動作)
 //!
+//! Field export (2026-11-16, GitHub issue #57; nothing changes without the option):
+//!   --vti PATH … writes the final split field as a VTK ImageData file (.vti) for ParaView or PyVista
+//!     (crates/dyne-export): array `u` for the heat and wave solvers; arrays `phi`, `d`, `w` and the true
+//!     signed distance `truth` for the shape grid solver. Origin and spacing are those of the grid
+//!     (origin 0 and h = 1/(nx − 1), or the scene's corner and --h). `dyne-vti info PATH` reads it back
+//!     and prints the CRC-32 of each array, equal to the `crc32: split` values.
+//!
 //! 形の変化への追従 (2026-11-11、docs/2026-11-11-dynamic-shape.md):
 //!   --decay λ --w-forget w --disagree τ --disagree-w w … 古い観測を忘れる仕組みの設定
 //!   --sweep-every n … 形の格子型アクターの距離の反復を n ステップに1回にする (既定 毎ステップ)
@@ -103,6 +110,8 @@ struct Config {
     outer_kind: u32,
     outer_value: f64,
     field_csv: Option<String>,
+    /// --vti PATH: the final split field as VTK ImageData (issue #57)
+    vti: Option<String>,
     quiet: bool,
     /// 初期場のモデル (.dynm) の経路と中身 (heat2d-mlp-actor 用。None なら使わない)
     model: Option<String>,
@@ -186,6 +195,7 @@ fn parse_args() -> Config {
         outer_kind: BC_DIRICHLET,
         outer_value: 0.0,
         field_csv: None,
+        vti: None,
         quiet: false,
         model: None,
         model_bytes: None,
@@ -269,6 +279,7 @@ fn parse_args() -> Config {
                 }
             }
             "--field-csv" => c.field_csv = Some(val),
+            "--vti" => c.vti = Some(val),
             "--model" => c.model = Some(val),
             "--scene" => c.scene = Some(val),
             "--h" => c.h = val.parse().unwrap(),
@@ -2032,6 +2043,22 @@ fn main() {
             }
         }
         std::fs::write(path, s).expect("--field-csv の書き込み");
+    }
+    if let Some(path) = &cfg.vti {
+        let mut d = dyne_export::vti::ImageData::new_2d([cfg.nx, cfg.ny], [geom.x0, geom.y0], [geom.h, geom.h]);
+        if let Some(sc) = &scene {
+            let last = sc.at_step(cfg.steps.saturating_sub(1));
+            let truth: Vec<f64> = (0..cfg.nx * cfg.ny)
+                .map(|k| last.signed_distance(geom.x0 + (k % cfg.nx) as f64 * geom.h, geom.y0 + (k / cfg.nx) as f64 * geom.h))
+                .collect();
+            d.add("phi", split_f.phi.clone()).add("d", split_f.d.clone()).add("w", split_f.w.clone()).add("truth", truth);
+        } else {
+            d.add("u", split_f.phi.clone());
+        }
+        if let Err(e) = d.write_vti(path) {
+            eprintln!("--vti: {e}");
+            std::process::exit(1);
+        }
     }
 
     std::process::exit(if mismatch == 0 && pass { 0 } else { 1 });

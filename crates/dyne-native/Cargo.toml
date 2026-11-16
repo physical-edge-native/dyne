@@ -10,6 +10,8 @@ publish = false
 [dependencies]
 dyne-core = { path = "../dyne-core" }
 dyne-wire = { path = "../dyne-wire" }
+# Writes the final field as a VTK ImageData file (`--vti`).
+dyne-export = { path = "../dyne-export" }
 # Pure-Rust math (initial conditions and analytic solutions) so that every OS computes the same bits.
 libm = "0.2"
 # Runs Dyne's WebAssembly patch solvers next to the native ones.
