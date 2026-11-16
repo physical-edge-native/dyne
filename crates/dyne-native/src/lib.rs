@@ -17,12 +17,20 @@
 //!
 //! - [`decomp`]: splitting a grid of any dimension into blocks, with face and interface numbering;
 //! - [`patch`]: the patch-solver interface and the runners (single patch; one thread per patch,
-//!   exchanging only border messages with neighbouring patches).
+//!   exchanging only border messages with neighbouring patches);
+//! - [`wave2d`]: a native 2D wave-equation patch solver that gives the same bits as Dyne's
+//!   WebAssembly wave solver (`crates/wave2d-actor`);
+//! - [`halo`]: wider borders for the native solvers (`k` layers, one exchange every `k` steps,
+//!   bit-identical results);
+//! - [`wasm2d`]: running Dyne's 2D WebAssembly patch solvers as patches.
 //!
 //! Moved from physical-edge-native/barye (crate `barye-core`).
 
 pub mod decomp;
+pub mod halo;
 pub mod patch;
+pub mod wasm2d;
+pub mod wave2d;
 
 /// Dyne's border-exchange format (wire format version 2) and mailbox conventions.
 pub use dyne_wire as wire;

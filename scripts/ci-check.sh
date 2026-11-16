@@ -18,6 +18,13 @@
 #      configuration, start, collection of per-node hashes) against fake nodes and an in-process MQTT broker;
 #      every node's hash must equal dyne-sim2d's, also with 30% datagram loss; a silent node must produce
 #      stall reports (scripts/wave2d_rehearsal.py; Python 3.8+, standard library only; issue #4)
+#  10. native 2D wave solver on a PC (crates/dyne-native): a 41x41 grid split 1x1, 2x2, 4x4, 8x8 and 3x5
+#      (uneven), one thread per patch: every split must print "PASS (bit-exact)", and the field hash must
+#      be the one of the wave scenario of wave2d-actor (18e44331) (issue #38)
+#  11. wider borders on the native solvers (k layers exchanged once every k steps, also with edge and
+#      corner neighbours): 2D 41x41, even and uneven splits, k = 1, 2, 3, 4, with fixed, zero-gradient
+#      and absorbing outer faces: every run must print "PASS (bit-exact)"; a width larger than a patch
+#      must be rejected with an error naming the halo width (issue #38)
 #
 # Usage (from the repository root):  bash scripts/ci-check.sh
 set -euo pipefail
@@ -162,6 +169,38 @@ if [ -z "$PY" ]; then echo "no Python 3.8+ found (set PYTHON=...): FAIL"; fail=1
   (cd crates/wave2d-actor && RUSTFLAGS="-C link-arg=-zstack-size=8192" \
     cargo build --release --target wasm32-unknown-unknown --features small --target-dir target-small)
   "$PY" scripts/wave2d_rehearsal.py --sim "$SIM2" --out target/ci-wave2d || fail=1
+fi
+
+echo "== [10] native 2D wave solver: split = single patch (bit-exact) (issue #38) =="
+cargo build --release -p dyne-native
+NW2="target/release/dyne-native-wave2d${EXE}"
+out=$("$NW2" check --grid 41x41 --steps 400 --splits 1x1,2x2,4x4,8x8,3x5) || true
+echo "$out"
+passes=$(printf '%s\n' "$out" | grep -c "PASS (bit-exact)" || true)
+if [ "$passes" -eq 5 ] && printf '%s\n' "$out" | grep -q "single patch      crc32 18e44331"; then
+  echo "wave2d split     OK"
+else
+  echo "wave2d split     FAIL"; fail=1
+fi
+
+echo "== [11] native solvers, wider borders: k layers every k steps = single patch (bit-exact) (issue #38) =="
+for outer in fixed zero-gradient absorbing; do
+  out=$("$NW2" check --grid 41x41 --steps 101 --splits 2x2,4x4,8x8,3x5 --halo 1,2,3,4 --outer "$outer") || true
+  passes=$(printf '%s\n' "$out" | grep -c "PASS (bit-exact)" || true)
+  printf '%s\n' "$out" | sed -n 2p
+  if [ "$passes" -eq 16 ]; then
+    echo "wave2d halo $outer: 16 of 16 bit-exact  OK"
+  else
+    echo "$out"; echo "wave2d halo $outer  FAIL"; fail=1
+  fi
+done
+# 8x8 patches of a 41x41 grid have 5 or 6 points per axis: a width of 6 must be refused.
+if out=$("$NW2" check --grid 41x41 --steps 10 --splits 8x8 --halo 6 2>&1); then
+  echo "$out"; echo "halo too wide    FAIL (accepted)"; fail=1
+elif printf '%s\n' "$out" | grep -q "halo width 6 is larger than the patch"; then
+  echo "halo too wide    OK (rejected)"
+else
+  echo "$out"; echo "halo too wide    FAIL (wrong error)"; fail=1
 fi
 
 if [ "$fail" -ne 0 ]; then echo "CI CHECK FAILED"; exit 1; fi
