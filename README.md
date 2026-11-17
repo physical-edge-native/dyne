@@ -2,18 +2,19 @@
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24241009.svg)](https://doi.org/10.5281/zenodo.24241009)
 
-**Dyne keeps a physical model of a space running on the many small devices
-placed in it.** Each microcontroller computes the physics of its own region,
-exchanges only the values at the borders with its neighbours, and keeps its
-region fitted to its own sensor readings. Together the devices hold a live model
-of the whole space — a digital twin whose state lives on the devices, not on a
-server. When a forecast faster than real time is needed, a PC can join for a
-while, continue the same computation from the devices' state with identical
-bits, and leave again.
+**Dyne splits a physical model across networked devices, runs the same
+WebAssembly solver in a deterministic network simulator and on real devices,
+and checks the result bit for bit against a single-solver reference** —
+including under message loss, delay and devices joining or leaving, with
+recorded sensor input that can be replayed.
 
-Dyne is a research tool for this setting: write a solver once, run it split over
-simulated or real devices, and check the result bit for bit against a
-single-solver reference. It is part of the
+Each device computes the physics of its own region (for example, heat in part of
+a room), exchanges only the values at the borders with its neighbours, and keeps
+its region fitted to its own sensor readings. Because the same compiled solver
+runs everywhere, a split run on microcontrollers can be compared with a run in
+the simulator and with an unsplit reference, digit for digit.
+
+Dyne is a research tool. It is part of the
 [Physical-Edge Native Architecture](https://github.com/physical-edge-native)
 project; the assumptions behind it (cheap devices of different owners sharing a
 space, fields governed by neighbour coupling, radio costing more than local
@@ -22,32 +23,173 @@ computation, global reasoning staying with central models) are stated there.
 > **Status: research prototype (v0.x).** Interfaces change without notice.
 > Development records in `docs/` are written in Japanese.
 
-## What it does
+## What you do with Dyne
 
-- **Same answer everywhere.** A numerical model is compiled once to
-  WebAssembly. The same binary runs on a PC, in the simulator and on an ESP32,
-  and a solution split over *N* devices matches the single-device solution
-  bit for bit.
-- **Deterministic network simulator.** Packet loss, delay, jitter, pauses and
-  network partitions are injected with a fixed random seed, so every run is
-  reproducible across operating systems. Records of sensor input from hardware
-  runs can be replayed in the simulator and checked device by device.
-- **Devices can join and leave while running.** A device can be added,
-  removed, or handed its neighbour's state during a run, and the solution stays
-  identical to a reference computation.
+1. **Write a solver against the actor interface and build it to WebAssembly.**
+   A solver ("actor") is a small `no_std` Rust crate that exports a handful of
+   functions: `dyne_init`, `dyne_step`, `dyne_set_neighbor` and
+   `dyne_boundary_value` / `dyne_boundary_grad` (the border values exchanged
+   with neighbours), `dyne_get` / `dyne_len` (the state), and `dyne_observe`
+   (feeding a measurement). `crates/heat1d-actor` is the smallest example. It is
+   compiled once to WebAssembly (`wasm32-unknown-unknown`).
+2. **Check it in the simulator, with faults.** `dyne-sim` (1D) and `dyne-sim2d`
+   (2D) run the module split over *N* simulated devices on a discrete-event
+   clock. Packet loss, delay, jitter, pauses and network partitions are injected
+   from a fixed random seed, so every run is reproducible across operating
+   systems; devices can also join, leave or take over a neighbour's state during
+   a run. The pass criterion is that the split solution equals the
+   single-solver solution bit for bit.
+3. **Deploy it to ESP32 devices.** All devices run the same firmware
+   (`node-esp32/`) and get their role from configuration at run time. PC-side
+   tools flash boards one after another and record which board is which
+   (`scripts/first_flash.py`), update firmware and WebAssembly modules on all
+   devices over the air (`scripts/dyne_ota.py`), synchronise their clocks over
+   Wi-Fi (`scripts/dyne_timesync.py`) and send each device its configuration
+   (`scripts/mqtt_config.py`). The assignment of regions to devices is currently
+   written by hand.
+4. **Check on hardware against the simulator.** Devices report a CRC-32 of
+   their state. Sensor readings are one-off inputs, so the devices record the
+   inputs they handed to the solver; `scripts/hw_replay.py` replays them in
+   `dyne-sim2d --replay` and reports, device by device and checkpoint by
+   checkpoint, whether hardware and simulator agree, so that a mismatch can be
+   traced to a device and a stretch of steps.
+5. **Use the result or hand it over.** Each device keeps its region fitted to
+   its sensors by nudging (data assimilation in which the model value at a
+   sensor is pulled towards the measurement at every observation). The
+   resulting state can be exported to VTK, USD and OpenFOAM (status of each in
+   [Connecting to other tools](#connecting-to-other-tools)).
+
+Steps 1 and 2 and the replay check of step 4 run without hardware and are covered
+by the regression suite (`scripts/ci-check.sh`, run in CI on Linux, macOS and
+Windows). Steps 3 and 4 on hardware need ESP32 boards; their current state is
+listed under [Verified so far](#verified-so-far) and [Roadmap](#roadmap).
+
+### Same answer everywhere — under which conditions
+
+Given the same WebAssembly binary and the same inputs, a solver produces the same
+bits on a PC, in the simulator and on an ESP32. This rests on WebAssembly's
+floating-point semantics, which are deterministic except for two cases the
+standard leaves open: the bit patterns of NaN (not-a-number) results and the
+relaxed-SIMD instructions. Dyne's solvers avoid relying on either: they are built
+without relaxed-SIMD instructions and are not designed to produce NaN, and a run
+that does produce one is outside this guarantee. Splitting a solution does not
+change its bits because each region performs the same floating-point operations
+in the same order as the unsplit solver.
+
+## Limits stated up front
+
+- **A speed limit set by the network.** With neighbour-only exchange,
+  information crosses one region per exchange, so following a field in real
+  time requires region size ÷ exchange delay to exceed the speed at which the
+  physics propagates — a CFL-like condition on the network. With the radio
+  delays measured so far this excludes fast phenomena such as sound and leaves
+  slow fields (indoor heat, CO2, humidity). Slow fields can often be computed by
+  a single device: the value of many devices lies in sensing spread through the
+  field, not in raw compute.
+- **Bit-exact under loss, at the cost of delay.** Devices wait for missing
+  border messages, so loss turns into delay rather than error.
+- **Only the solver is simulated.** The simulator runs the same WebAssembly
+  solver as the devices, but not their firmware or radio stack; the bit-for-bit
+  comparison between hardware and simulator covers the computation, not the
+  rest of the device.
+- **Honest devices only.** The guarantees assume that every device is honest and
+  only faults occur (loss, delay, devices leaving). Authentication and checks
+  against implausible border values are future work.
+- **No claim of superiority** over centralised or GPU-based setups, and no
+  attempt to replace computational fluid dynamics packages: Dyne aims to export
+  its assimilated state to such tools for detailed studies.
+- **Fluids: flow given from outside, for now.** The airflow is to be imported
+  (first from OpenFOAM; the import is implemented but not yet run with
+  OpenFOAM) and the devices assimilate what it carries (temperature, CO2,
+  humidity). Whether the devices can solve flow themselves — air, water on
+  surfaces, flow through soil — with neighbour-only exchange is being studied
+  ([design record](docs/design/2026-11-16-fluids-for-now.md)).
+
+## Verified so far
+
+Details and raw data are in `docs/` and `measured/`.
+
+| | Result |
+|---|---|
+| 1D heat equation, 2–16 devices in the simulator | bit-exact vs single device, also under loss/delay/partitions |
+| 2D heat equation, up to 4×4 partitions | bit-exact, second-order convergence vs analytic solution |
+| Replay of recorded device input (synthetic records) | replay matches, and a single flipped bit is detected; not yet run with records from hardware |
+| ESP32 (Xtensa), WebAssembly interpreter (WAMR) | all digits match the PC result |
+| 2 × ESP32 over Wi-Fi | bit-exact split solution |
+| 4 × ESP32 on batteries with temperature sensors, 4 runs of ~33 min | all runs completed without restart |
+
+## Quick start (no hardware needed)
+
+Requirements: Rust (stable) with the `wasm32-unknown-unknown` target.
+
+```sh
+rustup target add wasm32-unknown-unknown
+bash scripts/ci-check.sh          # builds everything and runs the regression suite
+```
+
+Or step by step:
+
+```sh
+# build the 1D heat-equation solver as a WebAssembly module
+(cd crates/heat1d-actor && cargo build --release --target wasm32-unknown-unknown)
+# run it split over 16 simulated devices and compare with the single-device solution
+cargo run --release -p dyne-sim -- \
+  --wasm crates/heat1d-actor/target/wasm32-unknown-unknown/release/heat1d_actor.wasm \
+  --nodes 16 --points 65 --steps 2000
+# expected: "RESULT: PASS (bit-exact)"
+```
+
+Running on ESP32 boards requires ESP-IDF 5.5; see `node-esp32/` and
+`docs/2026-09-21-experiment1-runbook.md`.
+
+## Applications and examples built on the core
+
+The following use the same solver interface, simulator and checks. Several are
+implemented and awaiting verification on a 16-device hardware setup (see
+[Roadmap](#roadmap)).
+
 - **Classical and learned solvers side by side.** Finite-difference solvers and
   a small physics-informed neural network (a network trained so that its output
-  satisfies the governing equation) plug into the same interface.
-- **Coupling to measurements.** Each device feeds its own sensor readings into
-  its local model (data assimilation by nudging: the model value at a sensor is
-  pulled towards the measurement at every observation). Verified in the
+  satisfies the governing equation) plug into the same interface
+  (`crates/heat1d-pinn-actor`). Small networks trained in PyTorch can be
+  imported via ONNX.
+- **Coupling to measurements.** Nudging (step 5 above) is verified in the
   simulator with a stability map and, on hardware, as a mechanism with
   temperature sensors.
-- **Native solvers on a PC.** Native Rust versions of the solvers, bit-identical
-  to the WebAssembly ones, serve as references and as a fast backend for
-  simulating many devices (below).
+- **Room-shape reconstruction** from range sensors (`crates/sdf2d-grid-actor`,
+  simulator stage).
+- **Inertial-sensor (IMU) fusion across devices** (`crates/imu-fusion-actor`).
+- **Flocking demo** on the same runtime (`crates/swarm-*`).
+- **Native solvers on a PC** and **connections to other tools** (VTK, USD,
+  OpenFOAM), described below.
 
-## Connecting to other tools
+### Native solvers on a PC (reference and fast backend)
+
+`crates/dyne-native` runs the same split computation on the threads of one PC, with native Rust
+solvers instead of WebAssembly: one thread per patch, exchanging only border values in the same
+message format. The 2D wave solver performs the same floating-point operations in the same order as
+the WebAssembly wave solver (`crates/wave2d-actor`), so both give identical bits; CI compares the
+fields bit for bit and every border message byte for byte. The native solvers serve as a reference
+for checking runs on devices and as a fast backend for simulating many devices (on one laptop, about
+80–120 times faster per step than interpreting the WebAssembly solver). They are not a general
+field-physics package. A 3D wave solver (seven-point stencil, documented order of operations) is
+bit-exact across splits as well; it has no WebAssembly counterpart for devices yet.
+
+```sh
+# every split must equal the single-patch solution bit for bit
+cargo run --release -p dyne-native --bin dyne-native-wave2d -- check --grid 41x41 --steps 400 --splits 1x1,2x2,4x4,8x8,3x5
+cargo run --release -p dyne-native --bin dyne-native-wave3d -- check --grid 25x23x21 --steps 100 --splits 1x1x1,2x2x2,3x2x1,4x4x2,1x3x5
+# accuracy: observed convergence order against analytic standing waves, which must lie in [1.9, 2.1]
+cargo run --release -p dyne-native --bin dyne-native-wave2d -- convergence
+```
+
+Both tools also measure parallel scaling (`scaling --mode strong|weak`) and accept wider borders
+(`--halo k`: `k` layers exchanged once every `k` steps, still bit-identical). The code was moved from
+the [barye](https://github.com/physical-edge-native/barye) repository; the decision and the roles of
+these solvers are recorded in
+[docs/design/2026-11-16-native-backend-from-barye.md](docs/design/2026-11-16-native-backend-from-barye.md).
+
+### Connecting to other tools
 
 Dyne does not try to replace established simulators; it hands them the state of the
 real space that the devices keep up to date.
@@ -92,35 +234,44 @@ types and the differences in the Foundation releases (openfoam.org) are in the d
 `dyne_export::foam` (`cargo doc -p dyne-export --open`). Results of OpenFOAM and Dyne differ by their
 discretisation, so comparing them needs a stated tolerance.
 
-## Limits stated up front
-
-- **A speed limit set by the network.** With neighbour-only exchange,
-  information crosses one region per exchange, so following a field in real
-  time requires region size ÷ exchange delay to exceed the speed at which the
-  physics propagates — a CFL-like condition on the network. With the radio
-  delays measured so far this excludes fast phenomena such as sound and leaves
-  slow fields (indoor heat, CO2, humidity). Slow fields can often be computed by
-  a single device: the value of many devices lies in sensing spread through the
-  field, not in raw compute.
-- **Bit-exact under loss, at the cost of delay.** Devices wait for missing
-  border messages, so loss turns into delay rather than error.
-- **Honest devices only.** The guarantees assume that every device is honest and
-  only faults occur (loss, delay, devices leaving). Authentication and checks
-  against implausible border values are future work.
-- **No claim of superiority** over centralised or GPU-based setups, and no
-  attempt to replace computational fluid dynamics packages: Dyne aims to export
-  its assimilated state to such tools for detailed studies.
-- **Fluids: flow given from outside, for now.** The airflow is to be imported (first
-  from OpenFOAM; the import is implemented but not yet run with OpenFOAM) and the devices assimilate what it carries (temperature, CO2,
-  humidity). Whether the devices can solve flow themselves — air, water on
-  surfaces, flow through soil — with neighbour-only exchange is being studied
-  ([design record](docs/design/2026-11-16-fluids-for-now.md)).
-
 ## Related work
 
 The individual elements have prior work; Dyne studies their combination on real
-device swarms with numerical guarantees.
+devices, checked bit for bit. Where a closer comparison is useful, it
+is in [docs/design/2026-11-17-state-of-the-field.md](docs/design/2026-11-17-state-of-the-field.md).
 
+- **Bit-for-bit tests across decompositions.** Climate models routinely check
+  that a run split over a different number of processes gives bit-for-bit
+  identical results (the PEM test, and the exact-restart test ERS, of the CIME
+  test system used by E3SM and CESM;
+  <https://esmci.github.io/cime/versions/master/users_guide/testing.html>).
+  Dyne applies the same criterion to a solution split over devices that
+  exchange messages over a lossy network and may join or leave while running.
+  Split solutions that are reproducible regardless of the decomposition are also used in ocean and climate models (Hallberg and
+  Adcroft, "An order-invariant real-to-integer conversion sum", *Parallel
+  Computing* 40, 2014).
+- **Deterministic simulation testing.** FoundationDB (Zhou et al., "FoundationDB:
+  A Distributed Unbundled Transactional Key Value Store", *ACM SIGMOD* 2021) and
+  TigerBeetle (VOPR, <https://docs.tigerbeetle.com/about/vopr>) run their
+  production code in a simulator that controls time, network and faults from a
+  seed. Their pass criteria are invariants of a database; Dyne's is equality
+  with a numerical reference, and it also compares the simulator with hardware.
+- **Multi-node deterministic emulation.** Renode (Antmicro,
+  <https://renode.io>) emulates several embedded devices, including their
+  radio, deterministically under one virtual clock. It emulates whole devices
+  at instruction level and is therefore more faithful than Dyne's simulator,
+  which runs only the solver.
+- **Placing tasks by space.** DDFlow (Noor, Tseng, Garcia and Srivastava,
+  "DDFlow: visualized declarative programming for heterogeneous IoT networks",
+  *ACM/IEEE IoTDI* 2019) binds data-flow tasks to spatial regions and places
+  them under network constraints. Dyne does not yet place regions
+  automatically.
+- **Coupling learned and classical subdomains.** Landajuela, "Robin-Neumann
+  Coupling of PINN and FEM Solvers: A Steklov-Poincaré View, with Application to
+  Fluid-Structure Interaction with Contact" (arXiv:2606.14181, 2026) analyses the
+  convergence of coupling a physics-informed network with a finite-element
+  subdomain. Dyne mixes such solvers in time-dependent runs, for which it has
+  experimental stability maps but no theorem yet.
 - Amorphous and aggregate computing program many locally communicating devices
   placed in space (Abelson et al., "Amorphous Computing", *Commun. ACM* 43(5),
   2000; Beal, Pianini and Viroli, "Aggregate Programming for the Internet of
@@ -129,72 +280,9 @@ device swarms with numerical guarantees.
   where each node holds only a local subsystem (Khan and Moura, "Distributing the
   Kalman Filter for Large-Scale Systems", *IEEE Trans. Signal Processing* 56(10),
   2008; Battistelli et al., *IEEE Trans. Automatic Control* 62(7), 2017).
-- Split solutions that are reproducible regardless of the decomposition are used
-  in ocean and climate models (Hallberg and Adcroft, "An order-invariant
-  real-to-integer conversion sum", *Parallel Computing* 40, 2014).
 - Indoor airflow and temperature models fitted to sensor data (computational
   fluid dynamics combined with data assimilation) run on one computer that
   collects the data; Dyne keeps the fitted state on the devices.
-
-Verified so far (details and raw data in `docs/` and `measured/`):
-
-| | Result |
-|---|---|
-| 1D heat equation, 2–16 devices in the simulator | bit-exact vs single device, also under loss/delay/partitions |
-| 2D heat equation, up to 4×4 partitions | bit-exact, second-order convergence vs analytic solution |
-| ESP32 (Xtensa), WebAssembly interpreter (WAMR) | all digits match the PC result |
-| 2 × ESP32 over Wi-Fi | bit-exact split solution |
-| 4 × ESP32 on batteries with temperature sensors, 4 runs of ~33 min | all runs completed without restart |
-
-## Quick start (no hardware needed)
-
-Requirements: Rust (stable) with the `wasm32-unknown-unknown` target.
-
-```sh
-rustup target add wasm32-unknown-unknown
-bash scripts/ci-check.sh          # builds everything and runs the regression suite
-```
-
-Or step by step:
-
-```sh
-# build the 1D heat-equation solver as a WebAssembly module
-(cd crates/heat1d-actor && cargo build --release --target wasm32-unknown-unknown)
-# run it split over 16 simulated devices and compare with the single-device solution
-cargo run --release -p dyne-sim -- \
-  --wasm crates/heat1d-actor/target/wasm32-unknown-unknown/release/heat1d_actor.wasm \
-  --nodes 16 --points 65 --steps 2000
-# expected: "RESULT: PASS (bit-exact)"
-```
-
-Running on ESP32 boards requires ESP-IDF 5.5; see `node-esp32/` and
-`docs/2026-09-21-experiment1-runbook.md`.
-
-## Native solvers on a PC (reference and fast backend)
-
-`crates/dyne-native` runs the same split computation on the threads of one PC, with native Rust
-solvers instead of WebAssembly: one thread per patch, exchanging only border values in the same
-message format. The 2D wave solver performs the same floating-point operations in the same order as
-the WebAssembly wave solver (`crates/wave2d-actor`), so both give identical bits; CI compares the
-fields bit for bit and every border message byte for byte. The native solvers serve as a reference
-for checking runs on devices and as a fast backend for simulating many devices (on one laptop, about
-80–120 times faster per step than interpreting the WebAssembly solver). They are not a general
-field-physics package. A 3D wave solver (seven-point stencil, documented order of operations) is
-bit-exact across splits as well; it has no WebAssembly counterpart for devices yet.
-
-```sh
-# every split must equal the single-patch solution bit for bit
-cargo run --release -p dyne-native --bin dyne-native-wave2d -- check --grid 41x41 --steps 400 --splits 1x1,2x2,4x4,8x8,3x5
-cargo run --release -p dyne-native --bin dyne-native-wave3d -- check --grid 25x23x21 --steps 100 --splits 1x1x1,2x2x2,3x2x1,4x4x2,1x3x5
-# accuracy: observed convergence order against analytic standing waves, which must lie in [1.9, 2.1]
-cargo run --release -p dyne-native --bin dyne-native-wave2d -- convergence
-```
-
-Both tools also measure parallel scaling (`scaling --mode strong|weak`) and accept wider borders
-(`--halo k`: `k` layers exchanged once every `k` steps, still bit-identical). The code was moved from
-the [barye](https://github.com/physical-edge-native/barye) repository; the decision and the roles of
-these solvers are recorded in
-[docs/design/2026-11-16-native-backend-from-barye.md](docs/design/2026-11-16-native-backend-from-barye.md).
 
 ## Repository layout
 
@@ -221,9 +309,10 @@ these solvers are recorded in
 
 Implemented and awaiting verification on a 16-device hardware setup (2026-11):
 time synchronisation over Wi-Fi, over-the-air deployment of WebAssembly modules
-to all devices, the 2D wave equation on a device cluster, inertial-sensor (IMU)
-fusion across devices, small networks trained in PyTorch imported via ONNX,
-room-shape reconstruction from range sensors, and USD export (see
+to all devices, replay of recorded device input against the simulator, the 2D
+wave equation on a device cluster, inertial-sensor (IMU) fusion across devices,
+small networks trained in PyTorch imported via ONNX, room-shape reconstruction
+from range sensors, and USD export (see
 [Connecting to other tools](#connecting-to-other-tools)).
 
 Planned for 2026–2027 (tracked as GitHub issues):
@@ -231,7 +320,8 @@ a slow indoor field (temperature, CO2 and humidity carried by a given airflow) a
 the first assimilated 3D field; forecasting by handing the devices' state to a PC
 with identical bits; simulation of many devices with device capabilities (speed,
 memory, radio delay and loss) as parameters, calibrated by hardware
-measurements.
+measurements; automatic region assignment from device positions and what each
+device senses.
 
 ## Contributing
 
