@@ -31,6 +31,7 @@ jobs:
             crates/sdf2d-grid-actor
             crates/imu-fusion-actor
             crates/wave2d-actor
+            examples/decay1d-actor
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

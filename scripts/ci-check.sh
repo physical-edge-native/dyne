@@ -44,6 +44,9 @@
 #      CRC-32 of T as the run. A synthetic OpenFOAM velocity field (crates/dyne-export/tests/fixtures/
 #      openfoam-velocity, hand-written in OpenFOAM's layout) is imported onto Dyne's grid: the CRC-32 of each
 #      component must be the pinned one, also after writing it to .vti and reading it back (issue #57)
+#  15. tutorial solver (examples/decay1d-actor, docs/en/tutorial.md): built as written in the tutorial, it must
+#      give "RESULT: PASS (bit-exact)" split over 4 devices, and over 8 devices with 10% loss, delay and one
+#      device replaced while running (issue #7)
 #
 # Usage (from the repository root):  bash scripts/ci-check.sh
 set -euo pipefail
@@ -321,6 +324,12 @@ if out=$("$FOAM" velocity "$FX" 0 --vti "$FD/velocity.vti" 2>&1) && u_ok "$out" 
 else
   echo "$out"; echo "${out2:-}"; echo "foam velocity    FAIL (expected $U_CRC)"; fail=1
 fi
+
+echo "== [15] tutorial solver: decay1d (docs/en/tutorial.md) =="
+(cd examples/decay1d-actor && cargo build --release --target wasm32-unknown-unknown)
+WT="examples/decay1d-actor/target/wasm32-unknown-unknown/release/decay1d_actor.wasm"
+expect_pass "tutorial-4" "$SIM1" --wasm "$WT" --nodes 4 --points 65 --steps 2000
+expect_pass "tutorial-faults" "$SIM1" --wasm "$WT" --nodes 8 --points 65 --steps 2000 --loss 0.1 --lat-ms 5 --lat-jitter-ms 3 --handover 3@30000:60000
 
 if [ "$fail" -ne 0 ]; then echo "CI CHECK FAILED"; exit 1; fi
 echo "ALL CHECKS PASSED"
