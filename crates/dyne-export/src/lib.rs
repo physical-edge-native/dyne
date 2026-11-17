@@ -14,6 +14,9 @@
 //!   diffusivity. One OpenFOAM cell per Dyne grid point, values in shortest round-trip decimal form;
 //!   [`foam::Case::read`] reads a written case back bit for bit. In the other direction,
 //!   [`foam::import_velocity`] reads a velocity field computed by OpenFOAM on such a mesh.
+//! - [`walls`] and [`polymesh`]: the room shape built by Dyne's devices (a signed distance field) as
+//!   solid grid points, and the OpenFOAM mesh without them, whose faces towards walls and obstacles form
+//!   the patch `walls`.
 //!
 //! The binary `dyne-vti` prints the grid and the CRC-32 of every array of a `.vti` file written by
 //! this crate ([`field_crc32`], the field hash that Dyne's simulators print). The binary `dyne-foam`
@@ -23,7 +26,9 @@
 #![warn(missing_docs)]
 
 pub mod foam;
+pub mod polymesh;
 pub mod vti;
+pub mod walls;
 
 /// CRC-32 (IEEE 802.3) of the little-endian bits of a field: the field hash that Dyne's simulators
 /// and native solvers print, so that an exported field can be compared with a run's output.
