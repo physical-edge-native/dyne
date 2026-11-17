@@ -29,6 +29,8 @@
 //!
 //! Moved from physical-edge-native/barye (crate `barye-core`).
 
+#![warn(missing_docs)]
+
 pub mod convergence;
 pub mod decomp;
 pub mod halo;

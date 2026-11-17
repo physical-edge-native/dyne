@@ -20,6 +20,8 @@
 //! writes an OpenFOAM case from a `.vti` file, reads a case back (printing the CRC-32 of the field),
 //! and imports a velocity field into a `.vti` file.
 
+#![warn(missing_docs)]
+
 pub mod foam;
 pub mod vti;
 
