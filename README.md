@@ -8,6 +8,91 @@ and checks the result bit for bit against a single-solver reference** —
 including under message loss, delay and devices joining or leaving, with
 recorded sensor input that can be replayed.
 
+## What you do with Dyne
+
+Commands are run from the repository root. Steps 1, 2 and 5 need no hardware.
+
+**1. Write a solver against the actor interface and build it to WebAssembly.**
+A solver ("actor") is a small `no_std` Rust crate that exports a handful of
+functions: `dyne_init`, `dyne_step`, `dyne_set_neighbor` and
+`dyne_boundary_value` / `dyne_boundary_grad` (the border values exchanged with
+neighbours), `dyne_get` / `dyne_len` (the state) and `dyne_observe` (feeding a
+measurement). `crates/heat1d-actor` (1D) and `crates/heat2d-actor` (2D) are
+examples.
+
+```sh
+rustup target add wasm32-unknown-unknown
+(cd crates/heat2d-actor && cargo build --release --target wasm32-unknown-unknown)
+```
+
+**2. Check it in the simulator, with faults.** The module runs split over
+simulated devices on a discrete-event clock. Loss, delay, jitter, pauses and
+network partitions come from a fixed random seed, so every run is reproducible
+across operating systems; devices can also join, leave or take over a
+neighbour's state. The pass criterion is that the split solution equals the
+single-solver solution bit for bit.
+
+```sh
+# 2x2 devices, 10% loss, 5 ms delay, device 3 paused, devices 0 and 1 cut off from each other for a while
+cargo run --release -p dyne-sim2d -- --wasm crates/heat2d-actor/target/wasm32-unknown-unknown/release/heat2d_actor.wasm \
+  --px 2 --py 2 --steps 500 --loss 0.1 --lat-ms 5 --pause 3@2000:6000 --partition 0-1@10000:15000
+# 1D, 8 devices: device 3 goes silent at 30 s and is replaced at 60 s by a new instance that takes over its state
+(cd crates/heat1d-actor && cargo build --release --target wasm32-unknown-unknown)
+cargo run --release -p dyne-sim -- --wasm crates/heat1d-actor/target/wasm32-unknown-unknown/release/heat1d_actor.wasm \
+  --nodes 8 --points 65 --steps 2000 --handover 3@30000:60000
+# expected in both: "PASS (bit-exact)"
+```
+
+**3. Deploy it to ESP32 devices** (needs boards and ESP-IDF 5.5). All devices
+run the same firmware (`node-esp32/`) and get their role from configuration at
+run time. PC-side tools flash boards one after another and record which board is
+which, synchronise clocks over Wi-Fi, replace the solver on all devices over the
+air, and send each device its region, neighbours and boundary conditions. The
+assignment of regions to devices is currently written by hand.
+
+```sh
+powershell -ExecutionPolicy Bypass -File node-esp32/build.ps1 -Board devkitc-ve   # build the firmware
+python scripts/first_flash.py                         # flash boards over USB, one after another
+python scripts/dyne_ntp_server.py --port 123          # time server on the PC for clock synchronisation
+python scripts/dyne_ota.py actor --broker <PC address> --wasm <solver.wasm> --name <solver name> --nodes all
+```
+
+**4. Check on hardware against the simulator.** Devices report a CRC-32 of their
+state; the run passes only if every device's checksum equals the simulator's for
+its region. Sensor readings are one-off inputs, so devices can record the inputs
+they hand to the solver, and the recording is replayed in the simulator device by
+device and checkpoint by checkpoint, to locate where hardware and simulator part.
+
+```sh
+# 2D wave equation on four devices: configure, start, collect checksums, compare with dyne-sim2d
+python scripts/wave2d_cluster.py run --broker <PC address> --layout 2x2 --nodes 11,12,13,14
+# record a run with sensor input, then replay it in dyne-sim2d (same layout and steps as the run)
+python scripts/hw_replay.py record --broker <PC address> --out run.jsonl
+python scripts/hw_replay.py check run.jsonl --wasm <solver.wasm> -- <dyne-sim2d arguments of the run>
+```
+
+**5. Use the result or hand it over.** Each device keeps its region fitted to its
+sensors by nudging (data assimilation in which the model value at a sensor is
+pulled towards the measurement at every observation). The state can be exported
+to VTK, OpenFOAM and USD (status of each in
+[Connecting to other tools](#connecting-to-other-tools)).
+
+```sh
+cargo run --release -p dyne-sim2d -- --wasm crates/heat2d-actor/target/wasm32-unknown-unknown/release/heat2d_actor.wasm \
+  --px 2 --py 2 --steps 500 --vti heat2d.vti                                     # VTK image data for ParaView
+cargo run --release -p dyne-export --bin dyne-foam -- case --vti heat2d.vti --out heat2dCase   # OpenFOAM case
+```
+
+`bash scripts/ci-check.sh` runs steps 1, 2, 5 and the replay check of step 4 (on
+synthetic recordings) as a regression suite; CI runs it on Linux, macOS and
+Windows. The hardware steps 3 and 4 are summarised under
+[Verified so far](#verified-so-far) and [Roadmap](#roadmap).
+
+> **Status: research prototype (v0.x).** Interfaces change without notice.
+> Development records in `docs/` are written in Japanese.
+
+## About
+
 Each device computes the physics of its own region (for example, heat in part of
 a room), exchanges only the values at the borders with its neighbours, and keeps
 its region fitted to its own sensor readings. Because the same compiled solver
@@ -20,61 +105,38 @@ project; the assumptions behind it (cheap devices of different owners sharing a
 space, fields governed by neighbour coupling, radio costing more than local
 computation, global reasoning staying with central models) are stated there.
 
-> **Status: research prototype (v0.x).** Interfaces change without notice.
-> Development records in `docs/` are written in Japanese.
+### Why WebAssembly
 
-## What you do with Dyne
+Benefits:
 
-1. **Write a solver against the actor interface and build it to WebAssembly.**
-   A solver ("actor") is a small `no_std` Rust crate that exports a handful of
-   functions: `dyne_init`, `dyne_step`, `dyne_set_neighbor` and
-   `dyne_boundary_value` / `dyne_boundary_grad` (the border values exchanged
-   with neighbours), `dyne_get` / `dyne_len` (the state), and `dyne_observe`
-   (feeding a measurement). `crates/heat1d-actor` is the smallest example. It is
-   compiled once to WebAssembly (`wasm32-unknown-unknown`).
-2. **Check it in the simulator, with faults.** `dyne-sim` (1D) and `dyne-sim2d`
-   (2D) run the module split over *N* simulated devices on a discrete-event
-   clock. Packet loss, delay, jitter, pauses and network partitions are injected
-   from a fixed random seed, so every run is reproducible across operating
-   systems; devices can also join, leave or take over a neighbour's state during
-   a run. The pass criterion is that the split solution equals the
-   single-solver solution bit for bit.
-3. **Deploy it to ESP32 devices.** All devices run the same firmware
-   (`node-esp32/`) and get their role from configuration at run time. PC-side
-   tools flash boards one after another and record which board is which
-   (`scripts/first_flash.py`), update firmware and WebAssembly modules on all
-   devices over the air (`scripts/dyne_ota.py`), synchronise their clocks over
-   Wi-Fi (`scripts/dyne_timesync.py`) and send each device its configuration
-   (`scripts/mqtt_config.py`). The assignment of regions to devices is currently
-   written by hand.
-4. **Check on hardware against the simulator.** Devices report a CRC-32 of
-   their state. Sensor readings are one-off inputs, so the devices record the
-   inputs they handed to the solver; `scripts/hw_replay.py` replays them in
-   `dyne-sim2d --replay` and reports, device by device and checkpoint by
-   checkpoint, whether hardware and simulator agree, so that a mismatch can be
-   traced to a device and a stretch of steps.
-5. **Use the result or hand it over.** Each device keeps its region fitted to
-   its sensors by nudging (data assimilation in which the model value at a
-   sensor is pulled towards the measurement at every observation). The
-   resulting state can be exported to VTK, USD and OpenFOAM (status of each in
-   [Connecting to other tools](#connecting-to-other-tools)).
+- **One binary, identical bits.** The same module gives the same bits on an
+  Xtensa ESP32 and on an x86 PC. WebAssembly fixes IEEE 754 arithmetic strictly
+  (every operation rounded separately, no implicit fused multiply-add), with two
+  exceptions the standard leaves non-deterministic: the bit patterns of NaN
+  (not-a-number) results and the relaxed-SIMD instructions. Dyne's solvers
+  avoid relying on either: they are built without relaxed-SIMD instructions and
+  are not designed to produce NaN, and a run that does produce one is outside
+  this guarantee.
+- **The simulator runs the very same binary** as the devices, so a simulator
+  run checks the code that is deployed, not a re-implementation.
+- **Isolation.** A solver cannot touch memory outside its own or call anything
+  it has not been granted. This matters when devices of different owners host
+  each other's solvers.
+- **The interface is the border contract.** What a solver exports and imports is
+  exactly what it exchanges at its borders, so solvers of different makers or
+  kinds (classical or learned) plug into the same place.
+- **Replaceable over the air** without reflashing the firmware.
 
-Steps 1 and 2 and the replay check of step 4 run without hardware and are covered
-by the regression suite (`scripts/ci-check.sh`, run in CI on Linux, macOS and
-Windows). Steps 3 and 4 on hardware need ESP32 boards; their current state is
-listed under [Verified so far](#verified-so-far) and [Roadmap](#roadmap).
+Costs:
 
-### Same answer everywhere — under which conditions
+- **Interpretation is slow on the ESP32**: about 0.7–1.0 s per step for the
+  room-shape solver; on a PC, interpreting is 80–120 times slower than the
+  native Rust solvers.
+- **64-bit floats are emulated in software** on the ESP32, whose floating-point
+  unit handles single precision only.
 
-Given the same WebAssembly binary and the same inputs, a solver produces the same
-bits on a PC, in the simulator and on an ESP32. This rests on WebAssembly's
-floating-point semantics, which are deterministic except for two cases the
-standard leaves open: the bit patterns of NaN (not-a-number) results and the
-relaxed-SIMD instructions. Dyne's solvers avoid relying on either: they are built
-without relaxed-SIMD instructions and are not designed to produce NaN, and a run
-that does produce one is outside this guarantee. Splitting a solution does not
-change its bits because each region performs the same floating-point operations
-in the same order as the unsplit solver.
+Splitting a solution does not change its bits because each region performs the
+same floating-point operations in the same order as the unsplit solver.
 
 ## Limits stated up front
 
