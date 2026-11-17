@@ -38,6 +38,12 @@
 #      the CRC-32 of the array must equal the hash the run printed (for the wave solvers also the pinned
 #      hashes of steps 10 and 12): the field was written and read back bit for bit. The unit tests of
 #      dyne-export also cover NaN (with payloads), infinities, -0.0 and subnormal values (issue #57)
+#  14. OpenFOAM cases (crates/dyne-export; OpenFOAM itself is not run): the .vti fields of step 13
+#      (dyne-sim2d heat 2D, native wave 3D) are written as scalarTransportFoam cases with dyne-foam; reading
+#      each case back (every file checked against the others) must give the same cell counts and the same
+#      CRC-32 of T as the run. A synthetic OpenFOAM velocity field (crates/dyne-export/tests/fixtures/
+#      openfoam-velocity, hand-written in OpenFOAM's layout) is imported onto Dyne's grid: the CRC-32 of each
+#      component must be the pinned one, also after writing it to .vti and reading it back (issue #57)
 #
 # Usage (from the repository root):  bash scripts/ci-check.sh
 set -euo pipefail
@@ -272,6 +278,48 @@ if [ -n "$crc" ] && printf '%s\n' "$out" | grep -q "PASS (bit-exact)"; then
   vti_check "vti sim2d heat" "$VD/heat2d.vti" u "$crc" 33x25x1
 else
   echo "$out"; echo "vti sim2d heat   FAIL (run)"; fail=1
+fi
+
+echo "== [14] OpenFOAM case export and velocity import (OpenFOAM not run) (issue #57) =="
+FOAM="target/release/dyne-foam${EXE}"
+FD="target/ci-foam"
+rm -rf "$FD"; mkdir -p "$FD"
+foam_check() { # name, case dir, expected cells (NXxNYxNZ), expected crc32 of T
+  local name="$1" dir="$2" cells="$3" crc="$4" info
+  if info=$("$FOAM" info "$dir" 2>&1) \
+     && printf '%s\n' "$info" | grep -q "^$dir: .* case, $cells cells," \
+     && printf '%s\n' "$info" | grep -q "^T: .* crc32 $crc\$"; then
+    printf '%-16s OK (%s cells, T crc32 %s)\n' "$name" "$cells" "$crc"
+  else
+    echo "$info"; printf '%-16s FAIL (expected %s cells, T crc32 %s)\n' "$name" "$cells" "$crc"; fail=1
+  fi
+}
+if [ -n "${crc:-}" ] && "$FOAM" case --vti "$VD/heat2d.vti" --out "$FD/heat2d" --diffusivity 1e-3 --velocity 0.05,0.02,0 \
+     --faces fixed:0,fixed:0,zero-gradient,inlet-outlet:0 --end-time 10 --delta-t 0.01 --write-interval 1 > /dev/null; then
+  foam_check "foam sim2d heat" "$FD/heat2d" 33x25x1 "$crc"
+else
+  echo "foam sim2d heat  FAIL (export)"; fail=1
+fi
+if "$FOAM" case --vti "$VD/wave3d.vti" --out "$FD/wave3d" > /dev/null; then
+  foam_check "foam wave3d" "$FD/wave3d" 25x23x21 2ca26bb5
+else
+  echo "foam wave3d      FAIL (export)"; fail=1
+fi
+FX="crates/dyne-export/tests/fixtures/openfoam-velocity"
+U_CRC="ux 488e48e0 uy 1c058935 uz bca80f3a"
+u_ok() { # output of dyne-foam velocity or dyne-vti info
+  local out="$1" a c
+  set -- $U_CRC
+  while [ $# -gt 0 ]; do
+    a="$1"; c="$2"; shift 2
+    printf '%s\n' "$out" | grep -q "^array $a: 12 values, crc32 $c\$" || return 1
+  done
+}
+if out=$("$FOAM" velocity "$FX" 0 --vti "$FD/velocity.vti" 2>&1) && u_ok "$out" \
+   && out2=$("$VTI" info "$FD/velocity.vti" 2>&1) && u_ok "$out2"; then
+  echo "foam velocity    OK (3x2x2 fixture, $U_CRC)"
+else
+  echo "$out"; echo "${out2:-}"; echo "foam velocity    FAIL (expected $U_CRC)"; fail=1
 fi
 
 if [ "$fail" -ne 0 ]; then echo "CI CHECK FAILED"; exit 1; fi

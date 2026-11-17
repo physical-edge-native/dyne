@@ -1,0 +1,15 @@
+/* Synthetic test case for importing an OpenFOAM velocity field into Dyne (issue #57).
+   Hand-written for this repository (MIT OR Apache-2.0); it was not produced by OpenFOAM. */
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    location    "system";
+    object      dyneGrid;
+}
+
+// Dyne's grid: the centre of OpenFOAM cell n is Dyne's grid point n (x fastest, then y, then z).
+points          (3 2 2);
+origin          (0.05 0.05 0.05);
+spacing         (0.1 0.1 0.1);

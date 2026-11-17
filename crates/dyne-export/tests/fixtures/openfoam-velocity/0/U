@@ -1,0 +1,68 @@
+/* Synthetic test case for importing an OpenFOAM velocity field into Dyne (issue #57).
+   Hand-written for this repository (MIT OR Apache-2.0); it was not produced by OpenFOAM, but it has
+   the layout that OpenFOAM writes for a volVectorField in ASCII (e.g. after mapFields into a case
+   exported by dyne-foam, with writePrecision 17). */
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    arch        "LSB;label=32;scalar=64";
+    class       volVectorField;
+    location    "0";
+    object      U;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+dimensions      [0 1 -1 0 0 0 0];
+
+internalField   nonuniform List<vector>
+12
+(
+(0.10000000000000001 0 0)
+(0.20000000000000001 0.01 0)
+(0.29999999999999999 -0.01 0)
+(0.10000000000000001 0 1e-05)
+(0.20000000000000001 0.050000000000000003 -1e-05)
+(0.29999999999999999 -0 2.5e-17)
+(-0.025000000000000001 0 0)
+(0 0 0)
+(0.33333333333333331 0.66666666666666663 -0.33333333333333331)
+(1.5 -2.25 0.125)
+(1e-300 -1e+20 4.9406564584124654e-324)
+(0.12345678901234568 -0.98765432109876543 0.5)
+)
+;
+
+boundaryField
+{
+    west
+    {
+        type            fixedValue;
+        value           uniform (0.10000000000000001 0 0);
+    }
+    east
+    {
+        type            inletOutlet;
+        inletValue      uniform (0 0 0);
+        value           nonuniform List<vector> 4((0.3 0 0) (0.3 0 0) (1.5 -2.25 0.125) (0.5 0 0));
+    }
+    south
+    {
+        type            noSlip;
+    }
+    north
+    {
+        type            noSlip;
+    }
+    bottom
+    {
+        type            noSlip;
+    }
+    top
+    {
+        type            slip;
+    }
+}
+
+
+// ************************************************************************* //
