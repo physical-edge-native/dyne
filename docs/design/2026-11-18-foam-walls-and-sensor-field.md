@@ -39,6 +39,10 @@ was not passed on, so walls inside the domain and furniture were missing.
   `scalarTransportFoam` runs on all three. In the room run (zero velocity, zero gradient everywhere)
   the sum of `T` over the cells changed by 3.6e-11 relative after 20 steps, i.e. no heat leaks
   through the walls beyond the linear solver tolerance (1e-10).
+- A uniform non-zero velocity together with walls is not a valid flow: it runs into the walls, where
+  `U` is zero, so the flux is not conserved. In a test run (`--velocity 0.02,0.01,0`, 60 s) `T` grew
+  to values between −434 and 2692 from an initial range of 20.9–23.1. `dyne-foam` prints a warning in
+  that case; with walls, use zero velocity or a velocity field computed on the same mesh.
 - `checkMesh` notes "1 bad edges (possibly relevant for finite-area)" for the room: two free cells
   that touch only along an edge (diagonal neighbours between two solid cells). It is not a mesh error
   for finite-volume solvers.

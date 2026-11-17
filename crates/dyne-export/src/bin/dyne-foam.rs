@@ -184,6 +184,13 @@ fn case(args: &[String]) -> Result<(), Usage> {
     );
     if let Some(note) = walls_note {
         println!("{note}");
+        if matches!(c.velocity, Velocity::Uniform(u) if u != [0.0; 3]) {
+            // Found with OpenFOAM on 2026-11-18: T grew without bound in such a run.
+            println!(
+                "WARNING: a uniform velocity flows into the walls (U is zero there), so the flux is not conserved and \
+                 scalarTransportFoam can blow up; use --velocity 0,0,0 or a velocity field computed on this mesh"
+            );
+        }
     }
     Ok(())
 }

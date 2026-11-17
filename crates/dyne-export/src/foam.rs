@@ -63,7 +63,10 @@
 //!   (`solid`), so the case can be read back and a velocity field imported onto Dyne's grid.
 //! - The faces between fluid and solid cells form the patch `walls` (type `wall`). The condition of
 //!   `T` there is [`Case::wall`] (zero gradient by default: no heat flows through walls and furniture);
-//!   `U` is zero there (`fixedValue (0 0 0)`), so no flux enters a wall.
+//!   `U` is zero there (`fixedValue (0 0 0)`), so no flux enters a wall. A uniform non-zero velocity
+//!   is then not a valid flow (it runs into the walls, so the flux is not conserved), and
+//!   `scalarTransportFoam` can blow up with it (seen on 2026-11-18); use zero velocity (diffusion only)
+//!   or a velocity field computed on the same mesh.
 //! - `0/T` and `0/U` have one value per fluid cell. When read back, `T` at solid points is NaN (no
 //!   value) and `U` is zero.
 //!
