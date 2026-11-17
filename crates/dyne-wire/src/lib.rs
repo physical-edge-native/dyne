@@ -1,157 +1,179 @@
-//! dyne-wire: ワイヤ形式v2の単一定義 (no_std)
+//! dyne-wire: the single definition of Dyne's message format (wire format v2), `no_std`.
 //!
-//! ロードマップ (docs/2026-09-01-roadmap.md 2.5) のワイヤ形式v2改訂
-//! (時刻印・物理量種別・界面サンプル列ペイロード) と、発注6 (群れ移植) で追加する
-//! メッセージ種別 (位置・伝聞) を定義する。
+//! Every host (the simulators, the PC tools, and the ESP32 firmware through a C copy that
+//! is checked against this crate) and every solver ("actor") encodes and decodes border
+//! messages with this crate, so the layout is written down once. The format carries the
+//! values exchanged at the borders between regions, plus a few message kinds used by the
+//! applications built on Dyne (flocking agents, range sensors).
 //!
-//! **二重定義の禁止 (2026-09-02 ユーザー決定)**: アクターの受信箱/送信箱
-//! バッファ上のメッセージ形式は本クレートの規約と同一とする。ホスト側・
-//! アクター側の双方が本クレートに依存し、レイアウトを別々に書かない。
-//! (v1 = M0の40バイト形式は crates/dyne-proto に残る歴史的定義。v2は
-//! IFACE_SCALAR がその意味論を包含する)
+//! Wire format v2 has no sequence number and no checksum: on real radio links each
+//! datagram is wrapped in the [`envelope`] (sequence number and CRC-32). The constants of
+//! the solver interface are in [`abi`].
 //!
-//! ## メッセージレイアウト (リトルエンディアン)
+//! ## Message layout (little-endian)
 //!
 //! ```text
 //! offset size field
 //! 0      1    version  = 2
-//! 1      1    kind     (0=IFACE_SCALAR, 1=IFACE_BAND, 2=POSITION, 3=HEARSAY)
-//! 2      1    quantity (物理量種別: 0=温度, 1=流速, 2=変位, 3=慣性(加速度+角速度), 255=指定なし)
+//! 1      1    kind     (0=IFACE_SCALAR, 1=IFACE_BAND, 2=POSITION, 3=HEARSAY, 4=RANGE_FRAME, 5=RAYS)
+//! 2      1    quantity (0=temperature, 1=flow, 2=displacement, 3=inertial, 255=unspecified)
 //! 3      1    reserved = 0
-//! 4      4    src      u32 (kind=IFACE_*: 界面ID / kind=POSITION,HEARSAY: 個体ID)
-//! 8      8    step     u64 (論理ステップ)
-//! 16     8    t_us     u64 (時刻印: 仮想時刻µs。未使用なら0)
-//! 24     -    payload  (kind依存)
+//! 4      4    src      u32 (IFACE_* and RAYS: border id; POSITION, HEARSAY: agent id;
+//!                           RANGE_FRAME: sensor id)
+//! 8      8    step     u64 (logical time step)
+//! 16     8    t_us     u64 (time stamp in microseconds; 0 if unused)
+//! 24     -    payload  (depends on kind)
 //! ```
 //!
-//! payload:
-//! - IFACE_SCALAR: value f64, grad f64 (計40バイト。v1の40バイト意味論を包含)
-//! - IFACE_BAND:   count u32, per_point u32, f64×(count×per_point)
-//!   (界面サンプル列。count=界面上の点の数、per_point=1点あたりの量の数。
-//!   並びは点ごとにまとめる: 点0の量0..per_point−1、点1の…。何の量を入れるかは
-//!   アクターの型ごとの取り決め。per_point=0 は不正。2026-10-10 設計書D4で
-//!   旧 pad 欄を per_point に充てた。それまで本種別の使用箇所は無い)
-//! - POSITION:     x f64, y f64, temp f64, gx f64, gy f64 (計64バイト)
-//! - HEARSAY:      x f64, y f64, score f64, age_steps u64 (計56バイト)
-//! - RANGE_FRAME:  count u32, cols u32, count×(距離 f64 [m], 状態値 u32, 予備 u32)
-//!   (測距フレーム。ファーム/シミュレータのホスト→センサのあるノード。src=センサID。
-//!   状態値はセンサの値そのまま。行の選び方・有効の判定はアクターがする。2026-10-10)
-//! - RAYS:         count u32, 予備 u32, count×40バイトの光線
-//!   (光線束。ノード→隣のノード。src=界面ID。光線 = 原点 x,y f64、終点 x,y f64、
-//!   取得ステップ u32、識別 u32 (センサID<<16 | 区画番号<<8 | 印)。2026-10-10、
-//!   設計書 docs/2026-10-10-shape-grid-actor-design.md §3)
+//! Payloads:
+//! - `IFACE_SCALAR`: value f64, grad f64 (40 bytes in total): one value and its gradient
+//!   at a 1D border.
+//! - `IFACE_BAND`: count u32, per_point u32, then `count × per_point` f64: a border of
+//!   `count` points with `per_point` quantities each, grouped by point (point 0 quantities
+//!   0..per_point−1, then point 1, ...). Which quantities is agreed per solver type.
+//!   `per_point = 0` is invalid.
+//! - `POSITION`: x, y, temp, gx, gy, all f64 (64 bytes in total; flocking demo).
+//! - `HEARSAY`: x, y, score f64, age_steps u64 (56 bytes in total; flocking demo).
+//! - `RANGE_FRAME`: count u32, cols u32, then `count` zones of (distance f64 \[m\], sensor
+//!   status u32, reserved u32): one frame of a multi-zone range sensor, from the host to
+//!   the region that owns the sensor. Which row is used and which status counts as valid
+//!   is decided by the solver.
+//! - `RAYS`: count u32, reserved u32, then `count` rays of 40 bytes (see [`Ray`]): rays
+//!   passed to a neighbouring region (room-shape reconstruction).
 //!
-//! POSITION/HEARSAY のフィールドは現行 dyne-swarm が交換している量に合わせた
-//! 初期定義。群れ実装で確定し、変更時は本コメントと設計書を併せて改訂する。
+//! ## Mailbox framing: fixed-size buffers
 //!
-//! ## 受信箱/送信箱の枠 (framing) — 固定長バッファ
-//!
-//! バッファは固定長。メッセージは先頭から `[u32 len][len バイトのメッセージ]` で
-//! 連続に詰める (lenにヘッダを含む)。終端は len=0 または容量切れ。
-//! **あふれ時の挙動 (2026-09-02 ユーザー決定)**: 入り切らないメッセージは
-//! **破棄し、破棄計数を+1**する (書いた側が自分の計数を持つ。ホストは統計に
-//! 報告し、アクターは自分の破棄数をエクスポートで返せるようにする)。
-//! 部分書き込みは行わない (壊れたメッセージをバッファに残さない)。
+//! Solvers that exchange messages receive and send them through two fixed-size byte
+//! buffers, the inbox and the outbox. Messages are packed from the start as
+//! `[u32 len][len bytes of message]` (len includes the header). The sequence ends at
+//! `len = 0` or at the end of the buffer. A message that does not fit is **dropped and
+//! counted** (the writer keeps its own counter); a message is never written partially.
+//! See [`MailboxWriter`] and [`MailboxReader`].
 
 #![cfg_attr(not(test), no_std)]
+#![warn(missing_docs)]
 
 pub mod abi;
-/// 実機の無線 (UDP) で運ぶための外箱 (通番+CRC32。v2の外側。2026-11-08)
+/// The outer envelope for real radio links (UDP): sequence number and CRC-32 around v2 messages.
 pub mod envelope;
 
+/// Version byte of wire format v2.
 pub const VERSION: u8 = 2;
 
-/// メッセージ種別
+/// Message kind: one value and its gradient at a 1D border.
 pub const KIND_IFACE_SCALAR: u8 = 0;
+/// Message kind: values at the points of a border (2D and 3D).
 pub const KIND_IFACE_BAND: u8 = 1;
+/// Message kind: position, temperature and gradient estimate of a flocking agent.
 pub const KIND_POSITION: u8 = 2;
+/// Message kind: the best place an agent has heard of (flocking demo).
 pub const KIND_HEARSAY: u8 = 3;
+/// Message kind: one frame of a multi-zone range sensor.
 pub const KIND_RANGE_FRAME: u8 = 4;
+/// Message kind: rays passed to a neighbouring region (room-shape reconstruction).
 pub const KIND_RAYS: u8 = 5;
 
-/// 界面IDで運ぶ種別か (ヘッダの src が界面ID)。ホスト・ファームは、この種別の
-/// メッセージを (界面ID, ステップ) ごとに1つの配送単位にまとめて隣へ運ぶ
+/// Whether messages of `kind` are routed by border id (the header's `src` is a border id).
+/// Hosts and firmware bundle such messages per (border id, step) into one delivery unit
+/// for the neighbour.
 pub fn routed_by_iface(kind: u8) -> bool {
     matches!(kind, KIND_IFACE_SCALAR | KIND_IFACE_BAND | KIND_RAYS)
 }
 
-/// 光線の識別欄の印: 対象なし (最大距離の内側に何も無かった区画)
+/// Flag in a ray's id: no target (nothing within the sensor's maximum range in that zone).
 pub const RAY_FLAG_NO_TARGET: u32 = 1;
 
-/// 光線1本 (光線束の要素)
+/// One ray of a `RAYS` message (40 bytes on the wire).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Ray {
+    /// Origin x \[m\].
     pub ox: f64,
+    /// Origin y \[m\].
     pub oy: f64,
+    /// End x \[m\].
     pub ex: f64,
+    /// End y \[m\].
     pub ey: f64,
+    /// Step at which the measurement was taken.
     pub acq_step: u32,
-    /// センサID<<16 | 区画番号<<8 | 印 (RAY_FLAG_*)
+    /// Sensor id << 16 | zone << 8 | flags (`RAY_FLAG_*`).
     pub id: u32,
 }
 
-/// 光線1本のバイト数
+/// Bytes per ray.
 pub const RAY_LEN: usize = 40;
-/// 測距フレームの1区画のバイト数
+/// Bytes per zone of a range frame.
 pub const ZONE_LEN: usize = 16;
 
-/// 区画 c (0..cols) の中心方向の、センサの正面からの角度 [rad] (反時計回りが正)。
-/// 区画0が左端 (正の角度)。シミュレータの模擬センサとアクターが共有する単一定義
+/// Angle \[rad\] of the centre of zone `c` (0..cols) from the sensor's forward direction,
+/// counter-clockwise positive; zone 0 is the leftmost (positive angle). Shared by the
+/// simulated sensor and the solvers.
 pub fn zone_angle_offset(c: u32, cols: u32, fov_rad: f64) -> f64 {
     fov_rad * (((cols as f64) - 1.0) * 0.5 - c as f64) / cols as f64
 }
 
-/// 物理量種別
+/// Quantity: temperature.
 pub const QTY_TEMPERATURE: u8 = 0;
+/// Quantity: flow.
 pub const QTY_FLOW: u8 = 1;
-/// 変位 (波動方程式の u。2026-11-13、wave2d-actor が使う。docs/2026-11-13-imu-fusion.md §6)
+/// Quantity: displacement (the `u` of the wave equation; used by wave2d-actor).
 pub const QTY_DISPLACEMENT: u8 = 2;
-/// 慣性の量 (加速度と角速度の組。2026-11-13、imu-fusion-actor の合意平均の交換に使う)
+/// Quantity: inertial (acceleration and angular rate; used by imu-fusion-actor).
 pub const QTY_INERTIAL: u8 = 3;
+/// Quantity: unspecified.
 pub const QTY_NONE: u8 = 255;
 
-/// ヘッダ長 (バイト)
+/// Header length in bytes.
 pub const HDR_LEN: usize = 24;
 
+/// The variable fields of a message header (the version byte is implied).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Header {
+    /// Message kind (`KIND_*`).
     pub kind: u8,
+    /// Physical quantity (`QTY_*`).
     pub quantity: u8,
-    /// kind=IFACE_*: 界面ID / kind=POSITION,HEARSAY: 送信元の個体ID
+    /// Border id for `IFACE_*` and `RAYS`; sender's agent id for `POSITION` and `HEARSAY`;
+    /// sensor id for `RANGE_FRAME`.
     pub src: u32,
+    /// Logical time step.
     pub step: u64,
-    /// 時刻印 (仮想時刻µs。未使用なら0)
+    /// Time stamp in microseconds (virtual time in the simulators); 0 if unused.
     pub t_us: u64,
 }
 
+/// A decoded payload; variable-length data borrows from the buffer.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[allow(missing_docs)] // the fields are described in each variant's documentation
 pub enum Payload<'a> {
-    /// 界面スカラー交換 (値, 勾配)
+    /// One value and its gradient at a 1D border.
     IfaceScalar { value: f64, grad: f64 },
-    /// 界面サンプル列。data は f64×(count×per_point) の生バイト列
-    /// (アラインメント非依存で読む。i 番目は band_get)
+    /// Values at the points of a border: `data` holds `count × per_point` f64 as raw
+    /// little-endian bytes (read with [`band_get`], independent of alignment).
     IfaceBand { data: &'a [u8], count: u32, per_point: u32 },
-    /// 群れ: 位置・温度・勾配推定
+    /// Flocking demo: position, temperature and gradient estimate.
     Position { x: f64, y: f64, temp: f64, gx: f64, gy: f64 },
-    /// 群れ: 伝聞 (自分が知る最良地点)
+    /// Flocking demo: the best place the sender knows of, and how old that news is.
     Hearsay { x: f64, y: f64, score: f64, age_steps: u64 },
-    /// 測距フレーム。data は ZONE_LEN×count の生バイト列 (i 番目は range_zone)
+    /// Range frame: `data` holds `ZONE_LEN × count` bytes (read with [`range_zone`]);
+    /// `cols` zones per row.
     RangeFrame { data: &'a [u8], count: u32, cols: u32 },
-    /// 光線束。data は RAY_LEN×count の生バイト列 (i 番目は ray_get)
+    /// Rays: `data` holds `RAY_LEN × count` bytes (read with [`ray_get`]).
     Rays { data: &'a [u8], count: u32 },
 }
 
+/// Errors of encoding and decoding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WireError {
-    /// バッファが短すぎる / ペイロード長が宣言と合わない
+    /// The buffer is too short, or the payload length does not match what is declared.
     Truncated,
-    /// version 不一致
+    /// The version byte is not [`VERSION`].
     BadVersion,
-    /// 未知の kind
+    /// Unknown kind, or a header kind that does not match the payload.
     BadKind,
-    /// 欄の値が不正 (例: 界面サンプル列の per_point=0)
+    /// Invalid field value (for example `per_point = 0`).
     BadField,
-    /// 書き込み先の容量不足 (呼び出し側は破棄+計数する)
+    /// Not enough room in the output buffer (the caller drops and counts the message).
     Full,
 }
 
@@ -180,8 +202,9 @@ fn get_f64(buf: &[u8], off: usize) -> f64 {
     f64::from_bits(get_u64(buf, off))
 }
 
-/// ペイロード長 (バイト)。可変長の種別は n に依存: IFACE_BAND は f64 の総数
-/// (count×per_point)、RANGE_FRAME は区画数、RAYS は光線の数
+/// Payload length in bytes. For variable-length kinds it depends on `n`: the total number
+/// of f64 (`count × per_point`) for `IFACE_BAND`, the number of zones for `RANGE_FRAME`,
+/// the number of rays for `RAYS`. `None` for an unknown kind.
 pub fn payload_len(kind: u8, n: u32) -> Option<usize> {
     match kind {
         KIND_IFACE_SCALAR => Some(16),
@@ -194,8 +217,8 @@ pub fn payload_len(kind: u8, n: u32) -> Option<usize> {
     }
 }
 
-/// 1メッセージを buf 先頭へエンコードし、書いたバイト数を返す。
-/// 容量不足なら Err(Full) を返し、**buf には一切書かない** (部分書き込み禁止)。
+/// Encode one message at the start of `buf` and return the number of bytes written.
+/// If it does not fit, return `Err(Full)` and **write nothing** (no partial writes).
 pub fn encode(buf: &mut [u8], hdr: &Header, payload: &Payload) -> Result<usize, WireError> {
     let (kind_ok, plen) = match payload {
         Payload::IfaceScalar { .. } => (KIND_IFACE_SCALAR, 16),
@@ -278,7 +301,7 @@ pub fn encode(buf: &mut [u8], hdr: &Header, payload: &Payload) -> Result<usize, 
     Ok(total)
 }
 
-/// buf 先頭の1メッセージをデコードし、(ヘッダ, ペイロード, 消費バイト数) を返す
+/// Decode the message at the start of `buf`; return (header, payload, bytes consumed).
 pub fn decode(buf: &[u8]) -> Result<(Header, Payload<'_>, usize), WireError> {
     if buf.len() < HDR_LEN {
         return Err(WireError::Truncated);
@@ -383,17 +406,18 @@ pub fn decode(buf: &[u8]) -> Result<(Header, Payload<'_>, usize), WireError> {
     Ok((hdr, payload, p + plen))
 }
 
-/// 界面サンプル列の i 番目の f64 を読む (アラインメント非依存。点 k の量 q は i = k×per_point+q)
+/// Read the `i`-th f64 of an `IFACE_BAND` payload (independent of alignment). Quantity `q`
+/// of point `k` is at `i = k × per_point + q`.
 pub fn band_get(data: &[u8], i: usize) -> f64 {
     get_f64(data, 8 * i)
 }
 
-/// 測距フレームの i 番目の区画: (距離 [m], 状態値)
+/// Zone `i` of a range frame: (distance \[m\], sensor status).
 pub fn range_zone(data: &[u8], i: usize) -> (f64, u32) {
     (get_f64(data, ZONE_LEN * i), get_u32(data, ZONE_LEN * i + 8))
 }
 
-/// 測距フレームの i 番目の区画を書く (data は ZONE_LEN×count の領域)
+/// Write zone `i` of a range frame (`data` is the `ZONE_LEN × count` area).
 pub fn range_zone_put(data: &mut [u8], i: usize, dist_m: f64, status: u32) {
     let o = ZONE_LEN * i;
     put_f64(data, o, dist_m);
@@ -401,7 +425,7 @@ pub fn range_zone_put(data: &mut [u8], i: usize, dist_m: f64, status: u32) {
     put_u32(data, o + 12, 0);
 }
 
-/// 光線束の i 番目の光線を読む
+/// Read ray `i` of a `RAYS` payload.
 pub fn ray_get(data: &[u8], i: usize) -> Ray {
     let o = RAY_LEN * i;
     Ray {
@@ -414,7 +438,7 @@ pub fn ray_get(data: &[u8], i: usize) -> Ray {
     }
 }
 
-/// 光線束の i 番目に光線を書く (data は RAY_LEN×count の領域)
+/// Write ray `i` of a `RAYS` payload (`data` is the `RAY_LEN × count` area).
 pub fn ray_put(data: &mut [u8], i: usize, r: &Ray) {
     let o = RAY_LEN * i;
     put_f64(data, o, r.ox);
@@ -427,21 +451,23 @@ pub fn ray_put(data: &mut [u8], i: usize, r: &Ray) {
 
 // ---------- 受信箱/送信箱の枠 (固定長バッファへの詰め込み) ----------
 
-/// 固定長バッファへ `[u32 len][メッセージ]` 形式でメッセージを詰める書き手。
-/// あふれたメッセージは**破棄+計数** (2026-09-02 ユーザー決定の規約)。
+/// Writer that packs messages into a fixed-size buffer as `[u32 len][message]`.
+/// A message that does not fit is **dropped and counted**.
 pub struct MailboxWriter<'a> {
     buf: &'a mut [u8],
     used: usize,
-    /// あふれで破棄したメッセージ数
+    /// Number of messages dropped because they did not fit.
     pub dropped: u64,
 }
 
 impl<'a> MailboxWriter<'a> {
+    /// Start writing at the beginning of `buf`.
     pub fn new(buf: &'a mut [u8]) -> Self {
         MailboxWriter { buf, used: 0, dropped: 0 }
     }
 
-    /// 1メッセージを追記する。容量不足なら破棄して dropped を+1し Err(Full)。
+    /// Append one message. If it does not fit, drop it, add 1 to `dropped` and return
+    /// `Err(Full)`.
     pub fn push(&mut self, hdr: &Header, payload: &Payload) -> Result<(), WireError> {
         let start = self.used + 4;
         if start > self.buf.len() {
@@ -462,12 +488,13 @@ impl<'a> MailboxWriter<'a> {
         }
     }
 
-    /// 詰め終わったバイト数 (終端の len=0 は含まない)
+    /// Bytes used so far (not counting the terminating `len = 0`).
     pub fn used(&self) -> usize {
         self.used
     }
 
-    /// 終端印 (len=0) を書けるなら書く。読み手は容量切れでも停止するので省略可
+    /// Write the terminating `len = 0` if there is room (optional: readers also stop at
+    /// the end of the buffer). Returns the bytes used.
     pub fn finish(&mut self) -> usize {
         if self.used + 4 <= self.buf.len() {
             put_u32(self.buf, self.used, 0);
@@ -476,13 +503,14 @@ impl<'a> MailboxWriter<'a> {
     }
 }
 
-/// 固定長バッファから `[u32 len][メッセージ]` 列を順に読む読み手
+/// Reader that iterates over the `[u32 len][message]` sequence of a fixed-size buffer.
 pub struct MailboxReader<'a> {
     buf: &'a [u8],
     pos: usize,
 }
 
 impl<'a> MailboxReader<'a> {
+    /// Start reading at the beginning of `buf`.
     pub fn new(buf: &'a [u8]) -> Self {
         MailboxReader { buf, pos: 0 }
     }
@@ -491,8 +519,8 @@ impl<'a> MailboxReader<'a> {
 impl<'a> Iterator for MailboxReader<'a> {
     type Item = Result<(Header, Payload<'a>, &'a [u8]), WireError>;
 
-    /// 次のメッセージ。終端 (len=0 または容量切れ) で None。
-    /// Item の第3要素は生のメッセージバイト列 (転送・控えの保存用)
+    /// The next message, or `None` at the end (`len = 0` or end of buffer). The third
+    /// element is the raw message bytes (for forwarding or keeping a copy).
     fn next(&mut self) -> Option<Self::Item> {
         if self.pos + 4 > self.buf.len() {
             return None;

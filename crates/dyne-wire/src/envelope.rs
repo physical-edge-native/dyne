@@ -1,92 +1,89 @@
-//! 実機の無線 (UDP) で運ぶための外箱 (2026-11-08)
+//! The outer envelope for carrying border messages over a real radio link (UDP).
 //!
-//! 設計書 docs/2026-10-10-order10-design.md の D5 (実機のメッセージ形式) の決定
-//! 「実機もワイヤ形式v2にそろえ、v2の外側に通番とCRCを付ける」の実装。
-//! 本モジュールの説明は docs/2026-11-08-firmware-wire-v2.md。
+//! Wire format v2 messages (24-byte header and payload) have neither a sequence number nor
+//! an error-detecting code. Messages cannot be corrupted in the simulator's virtual
+//! network, but they can on a radio link, so each UDP datagram wraps one delivery unit in
+//! the envelope below. A delivery unit is the framed sequence of v2 messages
+//! `[u32 len][msg]...` for one border and one step (without the terminating `len = 0`).
+//! Hosts and firmware do not convert the contents: the bytes from the sender's outbox go
+//! into the envelope as they are, and the receiver hands them to its inbox as they are.
 //!
-//! v2 のメッセージそのもの (ヘッダ24バイト+ペイロード) には通番も誤り検出符号も
-//! 無い。シミュレータの仮想ネットでは壊れたメッセージは起きないが、実機の無線では
-//! 起きうるので、UDPの1データグラムを次の外箱で包む。中身は「1つの界面・1つの
-//! ステップぶんの配送単位」= 枠つき v2 メッセージ列 `[u32 len][msg]...`
-//! (終端の len=0 は含めない)。ホスト・ファームは中身を変換せず、アクターの
-//! 送信メールボックスから出たバイト列をそのまま入れ、受信側はそのまま受信
-//! メールボックスへ渡す。
-//!
-//! ## 外箱のレイアウト (リトルエンディアン)
+//! ## Envelope layout (little-endian)
 //!
 //! ```text
 //! offset size field
-//! 0      4    magic        = "DYN2" (バイト列 0x44 0x59 0x4E 0x32)
+//! 0      4    magic        = "DYN2" (bytes 0x44 0x59 0x4E 0x32)
 //! 4      1    env_version  = 1
-//! 5      1    flags        = 0 (予約。0以外は不正)
+//! 5      1    flags        = 0 (reserved; anything else is invalid)
 //! 6      2    reserved     = 0
-//! 8      4    sender       u32 送信元ノードID
-//! 12     4    seq          u32 通番 (送信元がステップごとに+1。再送は同じ値)
-//! 16     4    iface        u32 界面ID (中身のメッセージの src と一致すること)
-//! 20     4    payload_len  u32 中身のバイト数 N
-//! 24     8    step         u64 ステップ (中身のメッセージの step と一致すること)
-//! 32     N    payload      枠つき v2 メッセージ列 (1通以上)
-//! 32+N   4    crc32        IEEE CRC32 (offset 0 から 32+N−1 まで。既存の実機形式と同じ式)
+//! 8      4    sender       u32 sending device id
+//! 12     4    seq          u32 sequence number (sender adds 1 per step; a resend keeps it)
+//! 16     4    iface        u32 border id (must equal the src of the messages inside)
+//! 20     4    payload_len  u32 number of payload bytes N
+//! 24     8    step         u64 step (must equal the step of the messages inside)
+//! 32     N    payload      framed v2 messages (one or more)
+//! 32+N   4    crc32        IEEE CRC-32 over bytes 0 .. 32+N−1
 //! ```
 //!
-//! 1データグラムの上限は 1472 バイト (イーサネットの1500バイトから IPv4 20 と
-//! UDP 8 を引いた、分割されずに届く大きさ)。よって中身の上限は 1472−36 = 1436 バイト。
-//! 入り切らない配送単位は**送らずに誤りとして返す** (分割送信は未対応。呼び出し側が
-//! 計数・停止する)。受信側は上限を超える長さのデータグラムを読まずに捨てる。
+//! A datagram is at most 1472 bytes (Ethernet's 1500 minus 20 for IPv4 and 8 for UDP, so
+//! it is not fragmented); the payload is therefore at most 1472 − 36 = 1436 bytes. A unit
+//! that does not fit is **not sent but returned as an error** (splitting is not supported;
+//! the caller counts or stops). Receivers discard longer datagrams unread.
 //!
-//! 外箱の欄 iface/step は中身のヘッダと重複するが、受け手が中身を解読せずに
-//! 配送先と新旧を判定できるようにするため置く。デコードでは両者の一致を検査する。
+//! The `iface` and `step` fields repeat what is in the messages, so that a receiver can
+//! route a datagram and tell old from new without decoding the payload; decoding checks
+//! that both agree.
 
 use crate::{decode, routed_by_iface, WireError};
 
-/// 外箱の識別子
+/// Envelope magic bytes.
 pub const ENV_MAGIC: [u8; 4] = *b"DYN2";
-/// 外箱の版
+/// Envelope version.
 pub const ENV_VERSION: u8 = 1;
-/// 外箱の前置部の長さ
+/// Length of the envelope header.
 pub const ENV_HDR_LEN: usize = 32;
-/// 末尾の CRC32 の長さ
+/// Length of the trailing CRC-32.
 pub const ENV_CRC_LEN: usize = 4;
-/// 1データグラムの上限 (分割されない大きさ)
+/// Largest datagram (not fragmented on Ethernet).
 pub const ENV_MAX_DATAGRAM: usize = 1472;
-/// 中身の上限
+/// Largest payload.
 pub const ENV_MAX_PAYLOAD: usize = ENV_MAX_DATAGRAM - ENV_HDR_LEN - ENV_CRC_LEN;
 
-/// 外箱の前置部の可変欄
+/// The variable fields of an envelope header.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EnvHeader {
-    /// 送信元ノードID
+    /// Sending device id.
     pub sender: u32,
-    /// 通番
+    /// Sequence number.
     pub seq: u32,
-    /// 界面ID
+    /// Border id.
     pub iface: u32,
-    /// ステップ
+    /// Step.
     pub step: u64,
 }
 
-/// 外箱の誤り
+/// Envelope errors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EnvError {
-    /// 前置部+CRCに満たない / payload_len が実際の長さと合わない
+    /// Shorter than header and CRC, or `payload_len` does not match the actual length.
     Truncated,
-    /// 上限 (ENV_MAX_DATAGRAM / ENV_MAX_PAYLOAD) を超える
+    /// Larger than `ENV_MAX_DATAGRAM` / `ENV_MAX_PAYLOAD`.
     Oversize,
-    /// 書き込み先の容量不足
+    /// Not enough room in the output buffer.
     Full,
-    /// 識別子が "DYN2" でない
+    /// The magic bytes are not "DYN2".
     BadMagic,
-    /// 外箱の版の不一致、または予約欄が0でない
+    /// Wrong envelope version, or a reserved field is not 0.
     BadVersion,
-    /// CRC32 の不一致 (無線上での破損)
+    /// CRC-32 mismatch (corrupted on the link).
     BadCrc,
-    /// 中身が配送単位として不正 (空、枠の不整合、v2として解読できない、
-    /// 界面で運ばない種別、外箱の iface/step と中身の不一致)
+    /// The payload is not a valid delivery unit (empty, broken framing, not decodable as v2,
+    /// a kind not routed by border, or iface/step not matching the envelope).
     BadUnit(Option<WireError>),
 }
 
-/// IEEE 802.3 の CRC32 (反射、多項式 0xEDB88320、初期値・最終反転 0xFFFFFFFF)。
-/// node-esp32 の dyne_crc32・crates/dyne-proto の crc32 と同じ式
+/// IEEE 802.3 CRC-32 (reflected, polynomial 0xEDB88320, initial value and final XOR
+/// 0xFFFFFFFF); the same function as `dyne_crc32` of the firmware.
 pub fn crc32(data: &[u8]) -> u32 {
     let mut c: u32 = 0xFFFF_FFFF;
     for &b in data {
@@ -99,7 +96,8 @@ pub fn crc32(data: &[u8]) -> u32 {
     !c
 }
 
-/// 中身 (枠つき v2 メッセージ列) が iface/step の配送単位として正しいかを確かめる
+/// Check that `payload` (framed v2 messages) is a valid delivery unit for border `iface` and
+/// `step`; return the number of messages.
 pub fn check_unit(payload: &[u8], iface: u32, step: u64) -> Result<usize, EnvError> {
     let mut pos = 0usize;
     let mut n = 0usize;
@@ -128,8 +126,8 @@ pub fn check_unit(payload: &[u8], iface: u32, step: u64) -> Result<usize, EnvErr
     Ok(n)
 }
 
-/// 配送単位を外箱に包んで buf 先頭へ書き、データグラムのバイト数を返す。
-/// 誤りのときは buf に一切書かない
+/// Wrap a delivery unit in the envelope at the start of `buf` and return the datagram
+/// length. On error nothing is written.
 pub fn encode_envelope(buf: &mut [u8], hdr: &EnvHeader, payload: &[u8]) -> Result<usize, EnvError> {
     if payload.len() > ENV_MAX_PAYLOAD {
         return Err(EnvError::Oversize);
@@ -155,8 +153,8 @@ pub fn encode_envelope(buf: &mut [u8], hdr: &EnvHeader, payload: &[u8]) -> Resul
     Ok(total)
 }
 
-/// 1データグラム (受信した全バイト) を検査して (前置部, 中身) を返す。
-/// 検査の順: 長さ → 識別子 → 長さ欄 → CRC → 版・予約欄 → 中身
+/// Check one received datagram and return (header, payload). Checks in this order: length,
+/// magic, length field, CRC, version and reserved fields, payload.
 pub fn decode_envelope(dgram: &[u8]) -> Result<(EnvHeader, &[u8]), EnvError> {
     if dgram.len() > ENV_MAX_DATAGRAM {
         return Err(EnvError::Oversize);
