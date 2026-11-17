@@ -1,0 +1,11 @@
+[package]
+name = "dyne-export"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/physical-edge-native/dyne"
+description = "Export of Dyne's field state to other tools: VTK ImageData (.vti) for ParaView and PyVista, lossless and read back bit for bit"
+publish = false
+
+# No dependencies: the VTK XML file is written and read by hand.
+[dependencies]

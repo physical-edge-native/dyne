@@ -224,6 +224,14 @@ MTGで見せることを最優先とし、既存の残課題は「後で取り�
   名前を置き換えたうえで一致した(場のハッシュ 18e44331・2ca26bb5 は不変)。barye の作業記録は
   docs/2026-11-16-wave2d-milestone.md・wide-halo.md・wave3d.md・convergence.md に移した。barye の Issue のうち、
   電源につないだ状態での再測定と、1ステップの時間の内訳の測定は Dyne へ移す。barye のアーカイブはユーザーの判断待ち
+- GitHub issue #57 の前半(2026-11-16、場の書き出し: VTK): 新しいクレート crates/dyne-export(依存なし)に、正則格子の
+  2次元・3次元のスカラー場を VTK ImageData(.vti。ParaView・PyVista で開ける XML 形式)で書き出す部品と、自分が書いた
+  形だけを読む読み手を作った。値は生の little-endian の Float64 で後ろにまとめて置く(VTK 自身の非圧縮の書き方。base64 より
+  約 25% 小さく、符号化の部品が要らない)ので、NaN の中身・無限大・-0.0・非正規化数まで全ビットが残る。
+  dyne-native-wave2d check・dyne-native-wave3d check・dyne-sim2d に --vti PATH を足し、読み直しの道具 dyne-vti info が
+  配列ごとの CRC-32 を出す。scripts/ci-check.sh の [13] で、書き出し→読み直しの CRC-32 が実行の出したハッシュ
+  (18e44331・2ca26bb5・sim2d の熱)と一致することを確かめる。OpenFOAM への書き出しと OpenFOAM の速度場の読み込みは
+  後半の PR(Issue #57 は開いたまま)。README の「Connecting to other tools」への使い方の追記は PR #62 のマージ待ち(コミット前)
 
 ### 前回の「今ここ」(2026-11-13): 実機の到着待ち — ソフトはひと通り実装済み(すべて実機未確認)
 

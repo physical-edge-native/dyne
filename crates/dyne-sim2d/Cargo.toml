@@ -10,5 +10,7 @@ description = "Deterministic 2D multi-node simulator with packet loss, latency, 
 wasmi = "0.47"
 dyne-core = { path = "../dyne-core" }
 dyne-wire = { path = "../dyne-wire" }
+# Writes the final field as a VTK ImageData file (`--vti`).
+dyne-export = { path = "../dyne-export" }
 # 解析解の exp/sin を純Rustで計算する (OS間で出力をビット一致させるため)
 libm = "0.2"
