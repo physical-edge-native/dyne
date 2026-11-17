@@ -57,6 +57,11 @@
 #      CSV file must give byte-identical mesh files. The small case of crates/dyne-export/tests/fixtures/
 #      foam-walls-4x3 (checked once with OpenFOAM's checkMesh) is compared byte for byte by the unit tests
 #      of step 1 (issue #91)
+#  18. initial temperature from point sensors (crates/dyne-export/src/sensors.rs, inverse-distance weighting;
+#      OpenFOAM not run here): five dummy readings (crates/dyne-export/tests/fixtures/sensors-room6.csv) give
+#      the initial T of the walled room of step 17, on the grid of the CSV shape and on the grid of the .vti
+#      file; both must give the pinned CRC-32 of T, and T must stay within the range of the readings
+#      (20.9 to 23.1) (issue #92)
 #
 # Usage (from the repository root):  bash scripts/ci-check.sh
 set -euo pipefail
@@ -368,6 +373,23 @@ elif info=$("$FOAM" info "$RD/vti" 2>&1) \
   echo "foam room walls  OK ($ROOM_CELLS cells, $ROOM_WALL_FACES wall faces, T crc32 $ROOM_T_CRC; CSV shape gives the same mesh)"
 else
   echo "${info:-}"; echo "foam room walls  FAIL (expected $ROOM_CELLS cells, $ROOM_WALL_FACES wall faces, T crc32 $ROOM_T_CRC, same mesh from CSV)"; fail=1
+fi
+
+echo "== [18] initial temperature from point sensors in the walled room (OpenFOAM not run) (issue #92) =="
+SENS="crates/dyne-export/tests/fixtures/sensors-room6.csv"
+SENS_T_CRC=15d3b993
+if [ ! -f "$RD/room6.csv" ]; then
+  echo "foam sensors     FAIL (no shape from step 17)"; fail=1
+elif out=$("$FOAM" case --sensors "$SENS" --shape "$RD/room6.csv" --out "$RD/sensors" 2>&1) \
+     && printf '%s\n' "$out" | grep -q "^$RD/sensors: 2D case, 73x55x1 cells, T from 5 readings of $SENS (crc32 $SENS_T_CRC)\$" \
+     && printf '%s\n' "$out" | grep -q "^initial T (inverse-distance weighting): $ROOM_CELLS cells, min 20.9, max 23.1\$" \
+     && ! printf '%s\n' "$out" | grep -q "WARNING" \
+     && out2=$("$FOAM" case --sensors "$SENS" --vti "$RD/room6.vti" --shape "$RD/room6.vti" --out "$RD/sensors-vti" 2>&1) \
+     && printf '%s\n' "$out2" | grep -q "(crc32 $SENS_T_CRC)\$" \
+     && "$FOAM" info "$RD/sensors" | grep -q "^T: $ROOM_CELLS values, crc32 $SENS_T_CRC\$"; then
+  echo "foam sensors     OK (5 readings, $ROOM_CELLS cells, T in [20.9, 23.1], crc32 $SENS_T_CRC on both grids)"
+else
+  echo "$out"; echo "${out2:-}"; echo "foam sensors     FAIL (expected T crc32 $SENS_T_CRC, range 20.9 to 23.1)"; fail=1
 fi
 
 if [ "$fail" -ne 0 ]; then echo "CI CHECK FAILED"; exit 1; fi

@@ -1,0 +1,8 @@
+# Dummy temperature readings (degrees C) for a test of dyne-foam case --sensors (issue #92).
+# Positions: nodes of the simulated room crates/dyne-sim2d/scenes/room6.txt (metres). Not measured values.
+node,x,y,T
+0,0.55,1.05,21.4
+1,2.15,0.75,22.6
+2,1.35,1.85,20.9
+3,2.25,2.3,21.8
+4,3.1,2.3,23.1

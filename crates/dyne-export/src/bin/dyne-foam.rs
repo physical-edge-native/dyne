@@ -2,7 +2,8 @@
 //! computed by OpenFOAM.
 //!
 //! ```text
-//! dyne-foam case --vti IN.vti --out DIR [--array NAME] [--diffusivity DT] [--velocity UX,UY,UZ]
+//! dyne-foam case (--vti IN.vti [--array NAME] | [--vti GRID.vti] --sensors READINGS.csv) --out DIR
+//!                [--diffusivity DT] [--velocity UX,UY,UZ]
 //!                [--faces W,E,S,N[,B,T]] [--end-time S] [--delta-t S] [--write-interval S]
 //!                [--shape SHAPE.vti|SHAPE.csv [--shape-array NAME] [--weight-array NAME]
 //!                 [--unobserved solid|fluid] [--min-weight W] [--walls FACE] [--regions largest|all]]
@@ -15,6 +16,10 @@
 //!   or `inlet-outlet:VALUE`, in the order west, east, south, north (and bottom, top in 3D); the
 //!   default is `zero-gradient` everywhere. Defaults: `--diffusivity 2.2e-5` (air, m²/s),
 //!   `--velocity 0,0,0`, `--end-time 1`, `--delta-t 0.01`, `--write-interval 0.1`.
+//! - `--sensors` (issue #92) builds the initial `T` from a few point readings instead of a Dyne field,
+//!   by inverse-distance weighting (`dyne_export::sensors`: file format, method and what the result
+//!   means). The grid is that of `--vti` if given, otherwise that of `--shape`. It prints, for every
+//!   reading, the nearest grid point and a warning if it lies outside the grid or in a solid point.
 //! - `--shape` (issue #91) leaves out the grid points inside walls and obstacles of the room shape
 //!   (`dyne_export::walls`): a point is solid where the signed distance `--shape-array` (default `phi`)
 //!   is negative, or where the weight `--weight-array` (default `w`) is `<= --min-weight` (default 0:
@@ -37,11 +42,12 @@
 use dyne_export::field_crc32;
 use dyne_export::foam::{import_velocity, Case, Face, Grid, Velocity};
 use dyne_export::polymesh::{keep_largest_region, WALL_PATCH};
+use dyne_export::sensors::{idw, nearest_point, read_csv, Reading};
 use dyne_export::vti::ImageData;
 use dyne_export::walls::{same_grid, Shape, SolidRule, CSV_TOLERANCE};
 use std::process::ExitCode;
 
-const USAGE: &str = "usage:\n  dyne-foam case --vti IN.vti --out DIR [--array NAME] [--diffusivity DT] [--velocity UX,UY,UZ]\n                 [--faces W,E,S,N[,B,T]] [--end-time S] [--delta-t S] [--write-interval S]\n                 [--shape SHAPE.vti|SHAPE.csv [--shape-array NAME] [--weight-array NAME]\n                  [--unobserved solid|fluid] [--min-weight W] [--walls FACE] [--regions largest|all]]\n  dyne-foam info DIR\n  dyne-foam velocity DIR TIME [--vti OUT.vti]";
+const USAGE: &str = "usage:\n  dyne-foam case (--vti IN.vti [--array NAME] | [--vti GRID.vti] --sensors READINGS.csv) --out DIR\n                 [--diffusivity DT] [--velocity UX,UY,UZ]\n                 [--faces W,E,S,N[,B,T]] [--end-time S] [--delta-t S] [--write-interval S]\n                 [--shape SHAPE.vti|SHAPE.csv [--shape-array NAME] [--weight-array NAME]\n                  [--unobserved solid|fluid] [--min-weight W] [--walls FACE] [--regions largest|all]]\n  dyne-foam info DIR\n  dyne-foam velocity DIR TIME [--vti OUT.vti]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -126,20 +132,46 @@ fn case(args: &[String]) -> Result<(), Usage> {
             "--min-weight",
             "--walls",
             "--regions",
+            "--sensors",
         ],
     )?;
     let get = |k: &str| opts.iter().find(|(key, _)| *key == k).map(|(_, v)| *v);
-    let (Some(input), Some(out)) = (get("--vti"), get("--out")) else {
-        return Err(Usage("case needs --vti and --out".into()));
+    let Some(out) = get("--out") else { return Err(Usage("case needs --out".into())) };
+    let shape = match get("--shape") {
+        Some(path) => Some((path, Shape::read(path, get("--shape-array").unwrap_or("phi"), get("--weight-array").unwrap_or("w")).map_err(fail)?)),
+        None => None,
     };
-    let d = ImageData::read_vti(input).map_err(|e| fail(format!("{input}: {e}")))?;
-    let array = match get("--array") {
-        Some(name) => d.array(name).ok_or_else(|| fail(format!("{input}: no array {name}")))?,
-        None => &d.arrays[0],
+    let sensors = match get("--sensors") {
+        Some(path) => {
+            if get("--array").is_some() {
+                return Err(Usage("--array and --sensors exclude each other (T comes from one of them)".into()));
+            }
+            let text = std::fs::read_to_string(path).map_err(|e| fail(format!("{path}: {e}")))?;
+            Some((path, read_csv(&text).map_err(|e| fail(format!("{path}: {e}")))?))
+        }
+        None => None,
     };
-    let grid = Grid { points: d.points, origin: d.origin, spacing: d.spacing };
+    let (grid, t, source) = match (get("--vti"), &sensors, &shape) {
+        (Some(input), _, _) => {
+            let d = ImageData::read_vti(input).map_err(|e| fail(format!("{input}: {e}")))?;
+            let grid = Grid { points: d.points, origin: d.origin, spacing: d.spacing };
+            match &sensors {
+                Some((path, rs)) => (grid, idw(&grid, rs), format!("{} readings of {path}", rs.len())),
+                None => {
+                    let array = match get("--array") {
+                        Some(name) => d.array(name).ok_or_else(|| fail(format!("{input}: no array {name}")))?,
+                        None => &d.arrays[0],
+                    };
+                    (grid, array.values.clone(), format!("array {}", array.name))
+                }
+            }
+        }
+        (None, Some((path, rs)), Some((_, sh))) => (sh.grid, idw(&sh.grid, rs), format!("{} readings of {path}", rs.len())),
+        (None, Some(_), None) => return Err(Usage("--sensors needs a grid: give --vti or --shape".into())),
+        (None, None, _) => return Err(Usage("case needs --vti or --sensors".into())),
+    };
     let diffusivity = get("--diffusivity").map(|v| number("--diffusivity", v)).transpose()?.unwrap_or(2.2e-5);
-    let mut c = Case::new(grid, array.values.clone(), diffusivity);
+    let mut c = Case::new(grid, t, diffusivity);
     if let Some(v) = get("--velocity") {
         let u: Vec<f64> = v.split(',').map(|s| number("--velocity", s)).collect::<Result<_, _>>()?;
         let [x, y, z] = u[..] else { return Err(Usage("--velocity needs three numbers UX,UY,UZ".into())) };
@@ -161,7 +193,7 @@ fn case(args: &[String]) -> Result<(), Usage> {
     if let Some(v) = get("--write-interval") {
         c.write_interval = number("--write-interval", v)?;
     }
-    let walls_note = match get("--shape") {
+    let walls_note = match &shape {
         None => {
             for k in ["--shape-array", "--weight-array", "--unobserved", "--min-weight", "--walls", "--regions"] {
                 if get(k).is_some() {
@@ -170,16 +202,15 @@ fn case(args: &[String]) -> Result<(), Usage> {
             }
             None
         }
-        Some(path) => Some(apply_shape(&mut c, path, &get)?),
+        Some((path, sh)) => Some(apply_shape(&mut c, path, sh, &get)?),
     };
     c.write(out).map_err(fail)?;
     println!(
-        "{out}: {} case, {}x{}x{} cells, T from array {} (crc32 {:08x})",
+        "{out}: {} case, {}x{}x{} cells, T from {source} (crc32 {:08x})",
         if grid.is_2d() { "2D" } else { "3D" },
         grid.points[0],
         grid.points[1],
         grid.points[2],
-        array.name,
         field_crc32(&c.cell_values())
     );
     if let Some(note) = walls_note {
@@ -192,13 +223,33 @@ fn case(args: &[String]) -> Result<(), Usage> {
             );
         }
     }
+    if let Some((_, rs)) = &sensors {
+        report_sensors(&c, rs);
+    }
     Ok(())
+}
+
+/// Prints where every reading lies on the grid, and the range of the initial field.
+fn report_sensors(c: &Case, rs: &[Reading]) {
+    for (i, r) in rs.iter().enumerate() {
+        let place = match nearest_point(&c.grid, r.pos) {
+            None => "WARNING: outside the grid (still used for the weighting)".to_string(),
+            Some(k) if c.solid.as_ref().is_some_and(|s| s[k]) => {
+                format!("nearest grid point {k}, WARNING: inside a wall or obstacle (still used for the weighting)")
+            }
+            Some(k) => format!("nearest grid point {k}"),
+        };
+        println!("sensor {i}: ({:?}, {:?}, {:?}) T {:?}: {place}", r.pos[0], r.pos[1], r.pos[2], r.value);
+    }
+    let t = c.cell_values();
+    let lo = t.iter().copied().fold(f64::INFINITY, f64::min);
+    let hi = t.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    println!("initial T (inverse-distance weighting): {} cells, min {lo:?}, max {hi:?}", t.len());
 }
 
 /// Reads the room shape, marks the solid points of `c` and sets the wall condition; returns a line
 /// that says what was done.
-fn apply_shape<'a>(c: &mut Case, path: &str, get: &dyn Fn(&str) -> Option<&'a str>) -> Result<String, Usage> {
-    let shape = Shape::read(path, get("--shape-array").unwrap_or("phi"), get("--weight-array").unwrap_or("w")).map_err(fail)?;
+fn apply_shape<'a>(c: &mut Case, path: &str, shape: &Shape, get: &dyn Fn(&str) -> Option<&'a str>) -> Result<String, Usage> {
     if !same_grid(&shape.grid, &c.grid, CSV_TOLERANCE) {
         return Err(fail(format!(
             "{path}: the shape is on a different grid ({:?} points, origin {:?}, spacing {:?}) than the field ({:?}, {:?}, {:?})",
