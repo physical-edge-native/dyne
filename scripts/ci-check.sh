@@ -386,7 +386,8 @@ elif out=$("$FOAM" case --sensors "$SENS" --shape "$RD/room6.csv" --out "$RD/sen
      && ! printf '%s\n' "$out" | grep -q "WARNING" \
      && out2=$("$FOAM" case --sensors "$SENS" --vti "$RD/room6.vti" --shape "$RD/room6.vti" --out "$RD/sensors-vti" 2>&1) \
      && printf '%s\n' "$out2" | grep -q "(crc32 $SENS_T_CRC)\$" \
-     && "$FOAM" info "$RD/sensors" | grep -q "^T: $ROOM_CELLS values, crc32 $SENS_T_CRC\$"; then
+     && info2=$("$FOAM" info "$RD/sensors" 2>&1) \
+     && printf '%s\n' "$info2" | grep -q "^T: $ROOM_CELLS values, crc32 $SENS_T_CRC\$"; then
   echo "foam sensors     OK (5 readings, $ROOM_CELLS cells, T in [20.9, 23.1], crc32 $SENS_T_CRC on both grids)"
 else
   echo "$out"; echo "${out2:-}"; echo "foam sensors     FAIL (expected T crc32 $SENS_T_CRC, range 20.9 to 23.1)"; fail=1
