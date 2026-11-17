@@ -55,8 +55,17 @@ real space that the devices keep up to date.
 | Target | What is exported | Use | Status |
 |---|---|---|---|
 | USD (Isaac Sim / Isaac Lab and other USD-based tools) | room shape and objects, with collision information | robot learning and simulation in a scene that matches the real room | implemented, awaiting hardware verification |
-| VTK image data (ParaView, PyVista) | 2D/3D field state | inspection and post-processing without licences; checked bit for bit in CI | planned (#57) |
+| VTK image data (ParaView, PyVista) | 2D/3D field state | inspection and post-processing without licences; checked bit for bit in CI | implemented (`--vti PATH`) |
 | OpenFOAM case | grid, initial field and boundary conditions | detailed what-if studies with an established CFD package | planned (#57) |
+
+```sh
+# write the final field of a run as VTK image data (open it in ParaView), then print each array's CRC-32
+cargo run --release -p dyne-native --bin dyne-native-wave2d -- check --grid 41x41 --steps 400 --splits 1x1,2x2 --vti wave2d.vti
+cargo run --release -p dyne-export --bin dyne-vti -- info wave2d.vti
+```
+
+Values are stored losslessly (raw little-endian 64-bit floats), so the file reads back bit for bit;
+`dyne-sim2d --vti PATH` writes the field of a split simulator run in the same way.
 
 ## Limits stated up front
 
