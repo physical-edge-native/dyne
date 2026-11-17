@@ -9,10 +9,18 @@
 //!   ParaView and PyVista. Values are stored losslessly (raw little-endian `Float64`), and
 //!   [`vti::ImageData::from_vti_bytes`] reads back exactly what [`vti::ImageData::to_vti_bytes`]
 //!   writes, so a round trip can be checked bit for bit.
+//! - [`foam`]: a scalar field on a regular 2D or 3D grid as an OpenFOAM case for `scalarTransportFoam`
+//!   (advection–diffusion in a given velocity field): mesh, initial field, face conditions, velocity,
+//!   diffusivity. One OpenFOAM cell per Dyne grid point, values in shortest round-trip decimal form;
+//!   [`foam::Case::read`] reads a written case back bit for bit. In the other direction,
+//!   [`foam::import_velocity`] reads a velocity field computed by OpenFOAM on such a mesh.
 //!
 //! The binary `dyne-vti` prints the grid and the CRC-32 of every array of a `.vti` file written by
-//! this crate ([`field_crc32`], the field hash that Dyne's simulators print).
+//! this crate ([`field_crc32`], the field hash that Dyne's simulators print). The binary `dyne-foam`
+//! writes an OpenFOAM case from a `.vti` file, reads a case back (printing the CRC-32 of the field),
+//! and imports a velocity field into a `.vti` file.
 
+pub mod foam;
 pub mod vti;
 
 /// CRC-32 (IEEE 802.3) of the little-endian bits of a field: the field hash that Dyne's simulators

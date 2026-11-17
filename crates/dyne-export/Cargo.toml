@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/physical-edge-native/dyne"
-description = "Export of Dyne's field state to other tools: VTK ImageData (.vti) for ParaView and PyVista, lossless and read back bit for bit"
+description = "Connections of Dyne's field state to other tools: VTK ImageData (.vti) for ParaView and PyVista, OpenFOAM cases (export of a scalar field, import of a velocity field), lossless and read back bit for bit"
 publish = false
 
-# No dependencies: the VTK XML file is written and read by hand.
+# No dependencies: the VTK XML file and the OpenFOAM dictionaries are written and read by hand.
 [dependencies]
