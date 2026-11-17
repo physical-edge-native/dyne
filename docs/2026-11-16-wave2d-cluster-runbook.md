@@ -306,6 +306,11 @@ sent stop to the nodes that did not finish
 A1・A3・A4 の status が `configured`(note stopped)になる。A2 の status は offline(遺言)になる。
 終わったら A2 の電源を入れ、online に戻ったことを `status` で見る。
 
+**この試験の後は、全台を再起動してから次の実行をする**(2026-11-17 追記、GitHub issue #86)。実機で、この試験の
+後の 2×2 が、損失も欠けも無いのに全台で dyne-sim2d と一致しない(毎回同じ誤った CRC32)ことがあった。全台を
+再起動すると一致に戻った。直るまでは、各ノードへ `{"cmd":"reboot"}` を送る(例: mosquitto_pub で
+`dyne/ctl/<id>` へ)か電源を入れ直し、`status` で全台が online に戻ってから次へ進む。
+
 ### 4.5 2×2 の記録
 
 各実行の wave2d_out\<日時>_<分割>_<場面>\ に、expected.json(期待値)、cfg_node<id>.json(送った設定)、
