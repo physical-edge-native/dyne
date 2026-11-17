@@ -204,6 +204,9 @@ cargo run --release -p dyne-sim -- \
 Running on ESP32 boards requires ESP-IDF 5.5; see `node-esp32/` and
 `docs/2026-09-21-experiment1-runbook.md`.
 
+The English documentation is in [docs/en/](docs/en/README.md): [installation](docs/en/installation.md)
+and a [tutorial](docs/en/tutorial.md) that writes a new solver and checks it bit for bit in the simulator.
+
 ## Applications and examples built on the core
 
 The following use the same solver interface, simulator and checks. Several are

@@ -1,0 +1,3 @@
+# Keep the WebAssembly stack small (the default 1 MB does not fit a microcontroller's memory).
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "link-arg=-zstack-size=32768"]
