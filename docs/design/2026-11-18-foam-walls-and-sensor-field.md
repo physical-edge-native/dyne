@@ -1,18 +1,20 @@
-# Design record: walls of the room in the OpenFOAM export
+# Design record: walls of the room and the initial temperature from sensors in the OpenFOAM export
 
 - **Date decided:** 2026-11-18
 - **Decided by:** the maintainer (what to export: the real room shape for the 2026-11-22 talk);
   the representation below was chosen while implementing and is open to review
-- **Issues:** #91 (walls and obstacles), #57 (OpenFOAM export)
+- **Issues:** #91 (walls and obstacles), #92 (initial temperature from point sensors), #57 (OpenFOAM export)
 
-## Context
+## Part 1: walls and obstacles (#91)
+
+### Context
 
 `dyne-foam` writes a `scalarTransportFoam` case in which every Dyne grid point is the centre of one
 cell of a single `blockMesh` block. The room shape that the devices build from distance sensors (a
 signed distance field `phi` with observation weights `w`, the same arrays that feed the USD export)
 was not passed on, so walls inside the domain and furniture were missing.
 
-## Decision
+### Decision
 
 1. **Solid points.** A grid point is solid if it was observed (`w > 0`) and `phi < 0`; a point that
    was not observed (`w = 0`) is solid by default, as in the USD export (`Unobserved`), or free with
@@ -26,7 +28,7 @@ was not passed on, so walls inside the domain and furniture were missing.
 3. `system/dyneGrid` lists the solid points, so the case reads back and a velocity field can be
    imported onto Dyne's grid. Without a shape, the export is unchanged byte for byte.
 
-## Reasons
+### Reasons
 
 - Writing the mesh directly needs no OpenFOAM step whose behaviour on fields we would have to trust
   (the run is just `checkMesh` and the solver), and the result is fully checkable without OpenFOAM:
@@ -47,7 +49,7 @@ was not passed on, so walls inside the domain and furniture were missing.
   that touch only along an edge (diagonal neighbours between two solid cells). It is not a mesh error
   for finite-volume solvers.
 
-## Alternatives considered
+### Alternatives considered
 
 - **`blockMesh` + `topoSet` + `subsetMesh -patch walls`** in the case scripts: standard tools, but the
   cell removal happens inside OpenFOAM, so CI could not check the result, and how `subsetMesh` sets
@@ -59,3 +61,48 @@ was not passed on, so walls inside the domain and furniture were missing.
   a finer mesh than Dyne's grid is wanted.
 - **Keep all cells and make walls a region of very low diffusivity**: no mesh change, but not a wall
   for the flow and not visible as a patch.
+
+## Part 2: initial temperature from a few point sensors (#92)
+
+### Context
+
+For the talk, the temperatures read at 4–6 points of the room (DHT20 / BME280 on the devices) become
+the initial temperature field of the OpenFOAM case. A field of the running twin (a heat model nudged
+to the sensors) is not available on the devices yet, so the field is built from the readings.
+
+### Decision
+
+1. **Inverse-distance weighting** (Shepard's method, power 2, straight-line distances in the plane
+   of a 2D grid): `T(p) = Σ v_i/d_i² / Σ 1/d_i²`, the reading itself at a sensor's position.
+   `dyne-foam case --sensors READINGS.csv` (columns `x`, `y`, optional `z`, `T`; the grid comes from
+   `--vti` or `--shape`).
+2. **Stated meaning and error, before any comparison:** the field is an initial guess, not a
+   measurement. Exact properties: every value lies between the smallest and largest reading (clamped,
+   so rounding cannot leave the range); a grid point at a sensor gets its reading; equal readings give
+   a uniform field; far from the sensors the value tends to their mean. The error between sensors
+   cannot be stated (the readings do not resolve the field); the only bound is the spread of the
+   readings plus the sensor accuracy (about ±0.5 °C DHT20, ±1 °C BME280, from the data sheets).
+3. The sums run in the order of the file, so the field is the same bit for bit on every machine;
+   CI pins its CRC-32 for five dummy readings in the simulated room.
+
+### Reasons
+
+- With 4–6 points, a method with no parameters to tune and no overshoot is the robust choice: it
+  cannot produce temperatures outside the measured range, and it works for any layout of sensors
+  (no triangulation, no minimum number of points).
+- It extends to 3D unchanged (`z` column, distances in 3D).
+- Checked with OpenFOAM (openfoam2606 rc, 2026-11-18): the case with the walls of the simulated room
+  and the five dummy readings passes `checkMesh` and runs with `scalarTransportFoam`; with walls held
+  at 19 °C, `T` stays between 19.0 and 23.1 and decays towards 19 °C.
+
+### Alternatives considered
+
+- **Field of the running twin** (heat model nudged to the sensors): the better source once the
+  devices run it; then the existing `--vti` path is used instead of `--sensors`.
+- **Harmonic interpolation** (steady heat conduction with the readings as fixed values, walls
+  insulating): respects walls and is physically motivated, but needs an iterative solve and a
+  tolerance; a candidate if the straight-line weighting through furniture turns out misleading.
+- **Linear interpolation on a triangulation, constant outside the convex hull**: smoother inside, but
+  needs at least three points not in a line, and most of a room lies outside the hull of 4–6 sensors.
+- **Gaussian process / kriging**: gives an error estimate, but its length scale and noise must be
+  chosen, and with 4–6 points those choices dominate the result.
