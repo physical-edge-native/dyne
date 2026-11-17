@@ -360,7 +360,14 @@ impl Field {
                 self.u_next[c] = u + r * lap;
             }
         }
-        core::mem::swap(&mut self.u, &mut self.u_next);
+        // Copy only the block's own points back (issue #96). Swapping the two whole arrays moved
+        // 2 × PAD_MAX values per step whatever the block size, which made a small block cost about
+        // 1.5 ms per step in the simulator. The halo is refilled by fill_halo before it is read, so
+        // the values computed are the same bit for bit.
+        for j in 0..self.ny {
+            let row = (j + 1) * w + 1;
+            self.u[row..row + self.nx].copy_from_slice(&self.u_next[row..row + self.nx]);
+        }
         self.apply_dirichlet();
         self.step += 1;
         self.got = [false; 4];
