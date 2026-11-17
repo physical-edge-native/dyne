@@ -1,0 +1,28 @@
+{"t": 1794909428.664, "topic": "dyne/node/4/status", "msg": {"state": "offline", "reason": "lwt"}}
+{"t": 1794909428.664, "topic": "dyne/node/168/status", "msg": {"state": "offline", "reason": "lwt"}}
+{"t": 1794909428.664, "topic": "dyne/node/244/status", "msg": {"state": "offline", "reason": "lwt"}}
+{"t": 1794909428.664, "topic": "dyne/node/76/status", "msg": {"state": "offline", "reason": "lwt"}}
+{"t": 1794909428.664, "topic": "dyne/node/232/status", "msg": {"state": "offline", "reason": "lwt"}}
+{"t": 1794909428.664, "topic": "dyne/node/200/status", "msg": {"state": "offline", "reason": "lwt"}}
+{"t": 1794909428.664, "topic": "dyne/node/124/status", "msg": {"state": "offline", "reason": "lwt"}}
+{"t": 1794909428.664, "topic": "dyne/node/192/status", "msg": {"state": "offline", "reason": "lwt"}}
+{"t": 1794909428.664, "topic": "dyne/node/236/status", "msg": {"state": "offline", "reason": "lwt"}}
+{"t": 1794909428.664, "topic": "dyne/node/140/status", "msg": {"state": "offline", "reason": "lwt"}}
+{"t": 1794909428.665, "topic": "dyne/node/40/status", "msg": {"state": "offline", "reason": "lwt"}}
+{"t": 1794909428.665, "topic": "dyne/node/204/status", "msg": {"state": "offline", "reason": "lwt"}}
+{"t": 1794909428.665, "topic": "dyne/node/84/status", "msg": {"state": "offline", "reason": "lwt"}}
+{"t": 1794909428.665, "topic": "dyne/node/172/status", "msg": {"state": "online", "mac": "02:00:00:00:02:AC", "id_src": "mac", "ip": "192.168.50.115", "fw": "node-esp32 exp1", "heap": 4071907, "up_s": 1, "target": "esp32", "ver": "v0.1.0-85-g49ffa98-dirty", "elf": "117b394e8", "part": "ota_1", "ota_state": "pending_verify", "reset": "sw", "boot": 6, "prev_up_s": 0, "actor": {"src": "slot0.wasm", "seq": 1, "name": "wave2d_actor_small"}}}
+{"t": 1794909428.665, "topic": "dyne/node/56/status", "msg": {"state": "online", "mac": "02:00:00:00:02:38", "id_src": "mac", "ip": "192.168.50.116", "fw": "node-esp32 exp1", "heap": 4073507, "up_s": 1, "target": "esp32", "ver": "v0.1.0-85-g49ffa98-dirty", "elf": "117b394e8", "part": "ota_1", "ota_state": "pending_verify", "reset": "sw", "boot": 6, "prev_up_s": 61, "actor": {"src": "slot0.wasm", "seq": 1, "name": "wave2d_actor_small"}}}
+{"t": 1794909428.665, "topic": "dyne/node/201/status", "msg": {"state": "online", "mac": "02:00:00:00:03:C8", "id_src": "nvs", "ip": "192.168.50.108", "fw": "node-esp32 exp1", "heap": 4071907, "up_s": 1, "target": "esp32", "ver": "v0.1.0-85-g49ffa98-dirty", "elf": "117b394e8", "part": "ota_1", "ota_state": "pending_verify", "reset": "sw", "boot": 8, "prev_up_s": 241, "actor": {"src": "slot0.wasm", "seq": 1, "name": "wave2d_actor_small"}}}
+{"t": 1794909430.236, "topic": "dyne/cfg/56/ack", "msg": {"ok": true, "idx": 0, "gen": 1794909430, "crc32": "0x0C8B31D4", "wire": 2}}
+{"t": 1794909430.236, "topic": "dyne/cfg/172/ack", "msg": {"ok": true, "idx": 1, "gen": 1794909430, "crc32": "0x182083C8", "wire": 2}}
+{"t": 1794909430.238, "topic": "dyne/cfg/201/ack", "msg": {"ok": true, "idx": 2, "gen": 1794909430, "crc32": "0xA64BED42", "wire": 2}}
+{"t": 1794909430.24, "topic": "dyne/node/56/status", "msg": {"state": "configured", "idx": 0, "up_s": 29, "gen": 1794909430}}
+{"t": 1794909430.24, "topic": "dyne/node/172/status", "msg": {"state": "configured", "idx": 1, "up_s": 26, "gen": 1794909430}}
+{"t": 1794909430.244, "topic": "dyne/node/201/status", "msg": {"state": "configured", "idx": 2, "up_s": 25, "gen": 1794909430}}
+{"t": 1794909430.483, "topic": "dyne/node/172/status", "msg": {"state": "running", "idx": 1, "up_s": 27, "step": 0}}
+{"t": 1794909430.484, "topic": "dyne/node/172/status", "msg": {"state": "err", "idx": 1, "up_s": 27, "err": "dyne_init2d failed rc=-1"}}
+{"t": 1794909430.484, "topic": "dyne/node/201/status", "msg": {"state": "running", "idx": 2, "up_s": 25, "step": 0}}
+{"t": 1794909430.485, "topic": "dyne/node/201/status", "msg": {"state": "err", "idx": 2, "up_s": 25, "err": "dyne_init2d failed rc=-1"}}
+{"t": 1794909430.518, "topic": "dyne/node/56/status", "msg": {"state": "running", "idx": 0, "up_s": 30, "step": 0}}
+{"t": 1794909430.525, "topic": "dyne/node/56/status", "msg": {"state": "err", "idx": 0, "up_s": 30, "err": "dyne_init2d failed rc=-1"}}

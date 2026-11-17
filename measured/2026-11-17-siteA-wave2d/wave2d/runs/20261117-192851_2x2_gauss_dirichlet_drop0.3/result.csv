@@ -1,0 +1,5 @@
+idx,node,ip_port,expected,got,match,minmax_match,state,last_step,sent,resend,replay,echo,stall_reports,missing,test_dropped,wait_ms_n,wait_ms_median,wait_ms_p95,wait_ms_max
+0,56,192.168.50.116:7777,0xB3E5371A,0xB3E5371A,yes,yes,done,400,800,1166,1694,128,0,0,731,4,126.365,129.293,129.293
+1,172,192.168.50.115:7777,0xCAB30D63,0xCAB30D63,yes,yes,done,400,800,1185,1912,119,0,0,758,4,128.419,131.603,131.603
+2,201,192.168.50.108:7777,0x234F06AC,0x234F06AC,yes,yes,done,400,800,1261,1596,140,0,0,689,4,129.219,130.137,130.137
+3,232,192.168.50.105:7777,0x7B3D7C5C,0x7B3D7C5C,yes,yes,done,400,800,1213,1800,145,0,0,794,4,128.776,132.5,132.5

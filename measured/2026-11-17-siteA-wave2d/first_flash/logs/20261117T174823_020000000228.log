@@ -1,0 +1,222 @@
+# first_flash.py 2026-11-17T17:48:23 port=COM20 usb_serial=USBSERIAL12
+=== esptool ===
+esptool.py v4.12.0
+Serial port COM20
+Connecting....
+Chip is ESP32-D0WD-V3 (revision v3.1)
+Features: WiFi, BT, Dual Core, 240MHz, VRef calibration in efuse, Coding Scheme None
+Crystal is 40MHz
+MAC: 02:00:00:00:02:28
+Uploading stub...
+Running stub...
+Stub running...
+Changing baud rate to 460800
+Changed.
+Manufacturer: a1
+Device: 4017
+Detected flash size: 8MB
+Flash voltage set by a strapping pin to 3.3V
+Hard resetting via RTS pin...
+esptool.py v4.12.0
+Serial port COM20
+Connecting.........
+Chip is ESP32-D0WD-V3 (revision v3.1)
+Features: WiFi, BT, Dual Core, 240MHz, VRef calibration in efuse, Coding Scheme None
+Crystal is 40MHz
+MAC: 02:00:00:00:02:28
+Uploading stub...
+Running stub...
+Stub running...
+Changing baud rate to 460800
+Changed.
+Configuring flash size...
+Flash will be erased from 0x00001000 to 0x00007fff...
+Flash will be erased from 0x00008000 to 0x00008fff...
+Flash will be erased from 0x0000d000 to 0x0000efff...
+Flash will be erased from 0x00010000 to 0x0015bfff...
+SHA digest in image updated
+Compressed 26208 bytes to 16584...
+Writing at 0x00001000... (50 %)
+Writing at 0x00007553... (100 %)
+Wrote 26208 bytes (16584 compressed) at 0x00001000 in 0.5 seconds (effective 437.8 kbit/s)...
+Hash of data verified.
+Compressed 3072 bytes to 142...
+Writing at 0x00008000... (100 %)
+Wrote 3072 bytes (142 compressed) at 0x00008000 in 0.0 seconds (effective 515.2 kbit/s)...
+Hash of data verified.
+Compressed 8192 bytes to 31...
+Writing at 0x0000d000... (100 %)
+Wrote 8192 bytes (31 compressed) at 0x0000d000 in 0.0 seconds (effective 2214.6 kbit/s)...
+Hash of data verified.
+Compressed 1357552 bytes to 907211...
+Writing at 0x00010000... (1 %)
+Writing at 0x0001ba89... (3 %)
+Writing at 0x00028f3e... (5 %)
+Writing at 0x00031a9c... (7 %)
+Writing at 0x000363df... (8 %)
+Writing at 0x0003afb1... (10 %)
+Writing at 0x000407de... (12 %)
+Writing at 0x0004653c... (14 %)
+Writing at 0x0004e469... (16 %)
+Writing at 0x0005952c... (17 %)
+Writing at 0x0005ee48... (19 %)
+Writing at 0x00064a23... (21 %)
+Writing at 0x00069f5e... (23 %)
+Writing at 0x0006f2a5... (25 %)
+Writing at 0x000743f2... (26 %)
+Writing at 0x000796c1... (28 %)
+Writing at 0x0007ebe7... (30 %)
+Writing at 0x00083c58... (32 %)
+Writing at 0x000892ec... (33 %)
+Writing at 0x0008f327... (35 %)
+Writing at 0x00096952... (37 %)
+Writing at 0x0009c843... (39 %)
+Writing at 0x000a2cf0... (41 %)
+Writing at 0x000a87cf... (42 %)
+Writing at 0x000add8b... (44 %)
+Writing at 0x000b3114... (46 %)
+Writing at 0x000b824b... (48 %)
+Writing at 0x000bd5a4... (50 %)
+Writing at 0x000c2692... (51 %)
+Writing at 0x000c7c16... (53 %)
+Writing at 0x000cd669... (55 %)
+Writing at 0x000d2dee... (57 %)
+Writing at 0x000d7ee9... (58 %)
+Writing at 0x000dd49f... (60 %)
+Writing at 0x000e2cd7... (62 %)
+Writing at 0x000e7fe9... (64 %)
+Writing at 0x000ed4f8... (66 %)
+Writing at 0x000f28e8... (67 %)
+Writing at 0x000f7d36... (69 %)
+Writing at 0x000fd7ec... (71 %)
+Writing at 0x00103477... (73 %)
+Writing at 0x00108b8e... (75 %)
+Writing at 0x0010e2fe... (76 %)
+Writing at 0x00113dbe... (78 %)
+Writing at 0x00119820... (80 %)
+Writing at 0x0011ea5b... (82 %)
+Writing at 0x00123c34... (83 %)
+Writing at 0x00128f7d... (85 %)
+Writing at 0x0012e9d4... (87 %)
+Writing at 0x00134150... (89 %)
+Writing at 0x0013cdb3... (91 %)
+Writing at 0x001430f6... (92 %)
+Writing at 0x001489d7... (94 %)
+Writing at 0x0014e47f... (96 %)
+Writing at 0x00153e14... (98 %)
+Writing at 0x001592d7... (100 %)
+Wrote 1357552 bytes (907211 compressed) at 0x00010000 in 20.8 seconds (effective 521.5 kbit/s)...
+Hash of data verified.
+
+Leaving...
+Hard resetting via RTS pin...
+
+=== boot log ===
+ets Jul 29 2019 12:21:46
+
+rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)
+configsip: 0, SPIWP:0xee
+clk_drv:0x00,q_drv:0x00,d_drv:0x00,cs0_drv:0x00,hd_drv:0x00,wp_drv:0x00
+mode:DIO, clock div:2
+load:0x3fff0030,len:6280
+load:0x40078000,len:15916
+ho 0 tail 12 room 4
+load:0x40080400,len:3920
+entry 0x40080644
+I (29) boot: ESP-IDF v5.5.5 2nd stage bootloader
+I (29) boot: compile time Nov 17 2026 16:26:51
+I (29) boot: Multicore bootloader
+I (31) boot: chip revision: v3.1
+I (33) boot.esp32: SPI Speed      : 40MHz
+I (37) boot.esp32: SPI Mode       : DIO
+I (41) boot.esp32: SPI Flash Size : 8MB
+I (44) boot: Enabling RNG early entropy source...
+I (49) boot: Partition Table:
+I (51) boot: ## Label            Usage          Type ST Offset   Length
+I (58) boot:  0 nvs              WiFi data        01 02 00009000 00004000
+I (64) boot:  1 otadata          OTA data         01 00 0000d000 00002000
+I (71) boot:  2 phy_init         RF data          01 01 0000f000 00001000
+I (77) boot:  3 ota_0            OTA app          00 10 00010000 00300000
+I (84) boot:  4 ota_1            OTA app          00 11 00310000 00300000
+I (90) boot:  5 actors           Unknown data     01 40 00610000 001f0000
+I (97) boot: End of partition table
+I (100) boot: No factory image, trying OTA 0
+I (104) esp_image: segment 0: paddr=00010020 vaddr=3f400020 size=4232ch (271148) map
+I (204) esp_image: segment 1: paddr=00052354 vaddr=3ffb0000 size=05aa4h ( 23204) load
+I (213) esp_image: segment 2: paddr=00057e00 vaddr=40080000 size=08218h ( 33304) load
+I (226) esp_image: segment 3: paddr=00060020 vaddr=400d0020 size=ea9c0h (960960) map
+I (555) esp_image: segment 4: paddr=0014a9e8 vaddr=40088218 size=10cb4h ( 68788) load
+I (582) esp_image: segment 5: paddr=0015b6a4 vaddr=50000000 size=00020h (    32) load
+I (595) boot: Loaded app from partition at offset 0x10000
+I (596) boot: Set actual ota_seq=1 in otadata[0]
+I (596) boot: Disabling RNG early entropy source...
+I (610) quad_psram: This chip is ESP32-D0WD
+I (610) esp_psram: Found 8MB PSRAM device
+I (610) esp_psram: Speed: 40MHz
+I (611) esp_psram: PSRAM initialized, cache is in low/high (2-core) mode.
+W (617) esp_psram: Virtual address not enough for PSRAM, map as much as we can. 4MB is mapped
+I (625) cpu_start: Multicore app
+I (1486) esp_psram: SPI SRAM memory test OK
+I (1494) cpu_start: GPIO 3 and 1 are used as console UART I/O pins
+I (1494) cpu_start: Pro cpu start user code
+I (1494) cpu_start: cpu freq: 240000000 Hz
+I (1496) app_init: Application information:
+I (1500) app_init: Project name:     dyne_node
+I (1504) app_init: App version:      v0.1.0-85-g49ffa98
+I (1509) app_init: Compile time:     Nov 17 2026 16:25:59
+I (1514) app_init: ELF file SHA256:  850d96d06...
+I (1519) app_init: ESP-IDF:          v5.5.5
+I (1523) efuse_init: Min chip rev:     v3.0
+I (1527) efuse_init: Max chip rev:     v3.99 
+I (1531) efuse_init: Chip rev:         v3.1
+I (1535) heap_init: Initializing. RAM available for dynamic allocation:
+I (1541) heap_init: At 3FFAE6E0 len 00001920 (6 KiB): DRAM
+I (1546) heap_init: At 3FFC0708 len 0001F8F8 (126 KiB): DRAM
+I (1551) heap_init: At 3FFE0440 len 00003AE0 (14 KiB): D/IRAM
+I (1557) heap_init: At 3FFE4350 len 0001BCB0 (111 KiB): D/IRAM
+I (1563) heap_init: At 40098ECC len 00007134 (28 KiB): IRAM
+I (1568) esp_psram: Adding pool of 4096K of PSRAM memory to heap allocator
+I (1576) spi_flash: detected chip: generic
+I (1578) spi_flash: flash io: dio
+I (1582) main_task: Started on CPU0
+I (1584) esp_psram: Reserving pool of 32K of internal memory for DMA/internal allocations
+I (1592) main_task: Calling app_main()
+[dyne] heap(boot): free=197395 largest=77824 (internal 8bit)
+[dyne] boot #1 reset=poweron prev_uptime=0s part=ota_0 ota_state=valid
+[dyne] node id 40 source=mac (nvs=-1, mac last byte=40)
+
+==== Dyne node-esp32 (node id 40) ====
+[dyne] wire v2 envelope selftest: PASS
+[dyne] actor in use: embedded
+[dyne] heap(after-wasm): free=106727 largest=49152 (internal 8bit)
+I (1677) wifi:wifi driver task: 3ffd9850, prio:23, stack:6656, core=0
+I (1682) wifi:wifi firmware version: b9f67df
+I (1682) wifi:wifi certification version: v7.0
+I (1682) wifi:config NVS flash: enabled
+I (1684) wifi:config nano formatting: disabled
+I (1689) wifi:Init data frame dynamic rx buffer num: 32
+I (1693) wifi:Init static rx mgmt buffer num: 5
+I (1697) wifi:Init management short buffer num: 32
+I (1702) wifi:Init static tx buffer num: 16
+I (1707) wifi:Init tx cache buffer num: 32
+I (1710) wifi:Init static rx buffer size: 1600
+I (1714) wifi:Init static rx buffer num: 16
+I (1718) wifi:Init dynamic rx buffer num: 32
+I (1723) wifi_init: rx ba win: 16
+I (1725) wifi_init: accept mbox: 6
+I (1728) wifi_init: tcpip mbox: 32
+I (1731) wifi_init: udp mbox: 6
+I (1734) wifi_init: tcp mbox: 6
+I (1737) wifi_init: tcp tx win: 5760
+I (1740) wifi_init: tcp rx win: 5760
+I (1743) wifi_init: tcp mss: 1440
+I (1746) wifi_init: WiFi/LWIP prefer SPIRAM
+I (1750) wifi_init: WiFi IRAM OP enabled
+I (1754) wifi_init: WiFi RX IRAM OP enabled
+W (1759) wifi:Password length matches WPA2 standards, authmode threshold changes from OPEN to WPA2
+I (1781) phy_init: phy_version 4863,a3a4459,Oct 28 2025,14:30:06
+W (1781) phy_init: failed to load RF calibration data (0x1102), falling back to full calibration
+I (1840) phy_init: Saving new calibration data due to checksum failure or outdated calibration data, mode(2)
+I (1851) wifi:mode : sta (02:00:00:00:02:28)
+I (1852) wifi:enable tsf
+I (1853) dyne-node: connecting to '(SSID)'...
