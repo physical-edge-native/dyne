@@ -1,0 +1,28 @@
+/* Written by Dyne (crates/dyne-export, https://github.com/physical-edge-native/dyne).
+   Numbers are in the shortest decimal form that reads back to the same 64-bit float. */
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       labelList;
+    location    "constant/polyMesh";
+    note        "nPoints:40  nCells:11  nFaces:53  nInternalFaces:13";
+    object      neighbour;
+}
+
+13
+(
+1
+4
+2
+3
+5
+6
+7
+6
+9
+10
+8
+9
+10
+)

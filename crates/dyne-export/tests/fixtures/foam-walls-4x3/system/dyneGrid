@@ -1,0 +1,23 @@
+/* Written by Dyne (crates/dyne-export, https://github.com/physical-edge-native/dyne).
+   Numbers are in the shortest decimal form that reads back to the same 64-bit float. */
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    location    "system";
+    object      dyneGrid;
+}
+
+// Dyne's grid: the centre of OpenFOAM cell n is the n-th grid point that is not in the list `solid`
+// (grid points inside walls and obstacles, which have no cell); points are numbered x fastest, then y, then z.
+// Read by Dyne when the case is read back or a velocity field is imported; OpenFOAM ignores it.
+points          (4 3 1);
+origin          (0.05 0.05 0.0);
+spacing         (0.1 0.1 0.1);
+solid
+1
+(
+5
+)
+;

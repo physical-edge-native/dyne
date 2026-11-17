@@ -1,0 +1,59 @@
+/* Written by Dyne (crates/dyne-export, https://github.com/physical-edge-native/dyne).
+   Numbers are in the shortest decimal form that reads back to the same 64-bit float. */
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       volScalarField;
+    location    "0";
+    object      T;
+}
+
+dimensions      [0 0 0 1 0 0 0];
+
+internalField   nonuniform List<scalar>
+11
+(
+20.0
+20.5
+21.0
+21.5
+22.0
+23.0
+23.5
+24.0
+24.5
+25.0
+25.5
+)
+;
+
+boundaryField
+{
+    west
+    {
+        type            zeroGradient;
+    }
+    east
+    {
+        type            fixedValue;
+        value           uniform 25.0;
+    }
+    south
+    {
+        type            zeroGradient;
+    }
+    north
+    {
+        type            zeroGradient;
+    }
+    walls
+    {
+        type            fixedValue;
+        value           uniform 18.5;
+    }
+    frontAndBack
+    {
+        type            empty;
+    }
+}

@@ -4,6 +4,8 @@
 //! ```text
 //! dyne-foam case --vti IN.vti --out DIR [--array NAME] [--diffusivity DT] [--velocity UX,UY,UZ]
 //!                [--faces W,E,S,N[,B,T]] [--end-time S] [--delta-t S] [--write-interval S]
+//!                [--shape SHAPE.vti|SHAPE.csv [--shape-array NAME] [--weight-array NAME]
+//!                 [--unobserved solid|fluid] [--min-weight W] [--walls FACE] [--regions largest|all]]
 //! dyne-foam info DIR
 //! dyne-foam velocity DIR TIME [--vti OUT.vti]
 //! ```
@@ -13,9 +15,19 @@
 //!   or `inlet-outlet:VALUE`, in the order west, east, south, north (and bottom, top in 3D); the
 //!   default is `zero-gradient` everywhere. Defaults: `--diffusivity 2.2e-5` (air, m²/s),
 //!   `--velocity 0,0,0`, `--end-time 1`, `--delta-t 0.01`, `--write-interval 0.1`.
+//! - `--shape` (issue #91) leaves out the grid points inside walls and obstacles of the room shape
+//!   (`dyne_export::walls`): a point is solid where the signed distance `--shape-array` (default `phi`)
+//!   is negative, or where the weight `--weight-array` (default `w`) is `<= --min-weight` (default 0:
+//!   not observed) unless `--unobserved fluid`. The shape must be on the grid of the field (same point
+//!   counts, origin and spacing within 1e-6 m). By default only the largest connected fluid region is
+//!   kept (`--regions all` keeps every region). The mesh is then written as `constant/polyMesh` (do not
+//!   run `blockMesh`), and the faces towards solid points form the patch `walls` with the condition
+//!   `--walls` (default `zero-gradient`). Without `--shape` the case is the same as before.
 //! - `info` reads a case written by `case` (every file is checked against the others) and prints the
 //!   grid and the CRC-32 of `T` (`dyne_export::field_crc32`, the field hash that Dyne's simulators
-//!   print), so the exported field can be compared with the run that produced it.
+//!   print), so the exported field can be compared with the run that produced it. For a case with walls
+//!   it also checks the mesh without OpenFOAM (`dyne_export::polymesh::PolyMesh::check`) and prints its
+//!   counts.
 //! - `velocity` reads `DIR/TIME/U` (ASCII, one vector per cell of the mesh exported by `case`) and
 //!   prints the CRC-32 of each component; `--vti` writes the components as arrays `ux`, `uy`, `uz` of
 //!   a `.vti` file on Dyne's grid.
@@ -24,10 +36,12 @@
 
 use dyne_export::field_crc32;
 use dyne_export::foam::{import_velocity, Case, Face, Grid, Velocity};
+use dyne_export::polymesh::{keep_largest_region, WALL_PATCH};
 use dyne_export::vti::ImageData;
+use dyne_export::walls::{same_grid, Shape, SolidRule, CSV_TOLERANCE};
 use std::process::ExitCode;
 
-const USAGE: &str = "usage:\n  dyne-foam case --vti IN.vti --out DIR [--array NAME] [--diffusivity DT] [--velocity UX,UY,UZ]\n                 [--faces W,E,S,N[,B,T]] [--end-time S] [--delta-t S] [--write-interval S]\n  dyne-foam info DIR\n  dyne-foam velocity DIR TIME [--vti OUT.vti]";
+const USAGE: &str = "usage:\n  dyne-foam case --vti IN.vti --out DIR [--array NAME] [--diffusivity DT] [--velocity UX,UY,UZ]\n                 [--faces W,E,S,N[,B,T]] [--end-time S] [--delta-t S] [--write-interval S]\n                 [--shape SHAPE.vti|SHAPE.csv [--shape-array NAME] [--weight-array NAME]\n                  [--unobserved solid|fluid] [--min-weight W] [--walls FACE] [--regions largest|all]]\n  dyne-foam info DIR\n  dyne-foam velocity DIR TIME [--vti OUT.vti]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -95,7 +109,24 @@ fn face(s: &str) -> Result<Face, Usage> {
 fn case(args: &[String]) -> Result<(), Usage> {
     let opts = options(
         args,
-        &["--vti", "--out", "--array", "--diffusivity", "--velocity", "--faces", "--end-time", "--delta-t", "--write-interval"],
+        &[
+            "--vti",
+            "--out",
+            "--array",
+            "--diffusivity",
+            "--velocity",
+            "--faces",
+            "--end-time",
+            "--delta-t",
+            "--write-interval",
+            "--shape",
+            "--shape-array",
+            "--weight-array",
+            "--unobserved",
+            "--min-weight",
+            "--walls",
+            "--regions",
+        ],
     )?;
     let get = |k: &str| opts.iter().find(|(key, _)| *key == k).map(|(_, v)| *v);
     let (Some(input), Some(out)) = (get("--vti"), get("--out")) else {
@@ -130,6 +161,17 @@ fn case(args: &[String]) -> Result<(), Usage> {
     if let Some(v) = get("--write-interval") {
         c.write_interval = number("--write-interval", v)?;
     }
+    let walls_note = match get("--shape") {
+        None => {
+            for k in ["--shape-array", "--weight-array", "--unobserved", "--min-weight", "--walls", "--regions"] {
+                if get(k).is_some() {
+                    return Err(Usage(format!("{k} needs --shape")));
+                }
+            }
+            None
+        }
+        Some(path) => Some(apply_shape(&mut c, path, &get)?),
+    };
     c.write(out).map_err(fail)?;
     println!(
         "{out}: {} case, {}x{}x{} cells, T from array {} (crc32 {:08x})",
@@ -138,9 +180,50 @@ fn case(args: &[String]) -> Result<(), Usage> {
         grid.points[1],
         grid.points[2],
         array.name,
-        field_crc32(&c.t)
+        field_crc32(&c.cell_values())
     );
+    if let Some(note) = walls_note {
+        println!("{note}");
+    }
     Ok(())
+}
+
+/// Reads the room shape, marks the solid points of `c` and sets the wall condition; returns a line
+/// that says what was done.
+fn apply_shape<'a>(c: &mut Case, path: &str, get: &dyn Fn(&str) -> Option<&'a str>) -> Result<String, Usage> {
+    let shape = Shape::read(path, get("--shape-array").unwrap_or("phi"), get("--weight-array").unwrap_or("w")).map_err(fail)?;
+    if !same_grid(&shape.grid, &c.grid, CSV_TOLERANCE) {
+        return Err(fail(format!(
+            "{path}: the shape is on a different grid ({:?} points, origin {:?}, spacing {:?}) than the field ({:?}, {:?}, {:?})",
+            shape.grid.points, shape.grid.origin, shape.grid.spacing, c.grid.points, c.grid.origin, c.grid.spacing
+        )));
+    }
+    let unobserved_solid = match get("--unobserved").unwrap_or("solid") {
+        "solid" => true,
+        "fluid" => false,
+        v => return Err(Usage(format!("--unobserved: {v}: use solid or fluid"))),
+    };
+    let min_weight = get("--min-weight").map(|v| number("--min-weight", v)).transpose()?.unwrap_or(0.0);
+    let mut solid = shape.solid(SolidRule { min_weight, unobserved_solid });
+    let shape_solid = solid.iter().filter(|&&x| x).count();
+    let dropped = match get("--regions").unwrap_or("largest") {
+        "largest" => keep_largest_region(&c.grid, &mut solid),
+        "all" => 0,
+        v => return Err(Usage(format!("--regions: {v}: use largest or all"))),
+    };
+    if let Some(v) = get("--walls") {
+        c.wall = face(v)?;
+    }
+    c.solid = Some(solid);
+    let mesh = c.poly_mesh().map_err(fail)?.expect("walls given");
+    let r = mesh.check().map_err(fail)?;
+    Ok(format!(
+        "walls from {path}: {shape_solid} solid points in the shape, {dropped} fluid points outside the largest region made solid; \
+         {} cells, {} faces on patch {WALL_PATCH}, {} region(s)",
+        r.cells,
+        mesh.patch(WALL_PATCH).map_or(0, |p| p.len),
+        r.regions
+    ))
 }
 
 fn info(dir: &str) -> Result<(), Usage> {
@@ -155,7 +238,21 @@ fn info(dir: &str) -> Result<(), Usage> {
         g.origin,
         g.spacing
     );
-    println!("T: {} values, crc32 {:08x}", c.t.len(), field_crc32(&c.t));
+    let t = c.cell_values();
+    println!("T: {} values, crc32 {:08x}", t.len(), field_crc32(&t));
+    if let Some(mesh) = c.poly_mesh().map_err(fail)? {
+        let r = mesh.check().map_err(fail)?;
+        let patches: Vec<String> = mesh.patches.iter().map(|p| format!("{} {}", p.name, p.len)).collect();
+        println!(
+            "mesh (constant/polyMesh): {} cells, {} faces ({} internal), {} points, {} region(s); patch faces: {}",
+            r.cells,
+            r.faces,
+            r.internal_faces,
+            r.points,
+            r.regions,
+            patches.join(", ")
+        );
+    }
     let faces: Vec<String> = g
         .face_names()
         .iter()
@@ -165,6 +262,7 @@ fn info(dir: &str) -> Result<(), Usage> {
             Face::ZeroGradient => format!("{n} zeroGradient"),
             Face::InletOutlet(v) => format!("{n} inletOutlet {v:?}"),
         })
+        .chain(c.solid.as_ref().map(|_| format!("{WALL_PATCH} {}", face_text(&c.wall))))
         .collect();
     println!("faces: {}", faces.join(", "));
     match &c.velocity {
@@ -173,6 +271,14 @@ fn info(dir: &str) -> Result<(), Usage> {
     }
     println!("DT {:?}, deltaT {:?}, endTime {:?}, writeInterval {:?}", c.diffusivity, c.delta_t, c.end_time, c.write_interval);
     Ok(())
+}
+
+fn face_text(f: &Face) -> String {
+    match f {
+        Face::FixedValue(v) => format!("fixedValue {v:?}"),
+        Face::ZeroGradient => "zeroGradient".into(),
+        Face::InletOutlet(v) => format!("inletOutlet {v:?}"),
+    }
 }
 
 fn components(u: &[[f64; 3]]) -> [Vec<f64>; 3] {
