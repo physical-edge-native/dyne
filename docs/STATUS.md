@@ -232,6 +232,13 @@ MTGで見せることを最優先とし、既存の残課題は「後で取り�
   配列ごとの CRC-32 を出す。scripts/ci-check.sh の [13] で、書き出し→読み直しの CRC-32 が実行の出したハッシュ
   (18e44331・2ca26bb5・sim2d の熱)と一致することを確かめる。OpenFOAM への書き出しと OpenFOAM の速度場の読み込みは
   後半の PR(Issue #57 は開いたまま)。README の「Connecting to other tools」への使い方の追記は PR #62 のマージ待ち(コミット前)
+- GitHub issue #57 の後半(2026-11-17、OpenFOAM との接続): crates/dyne-export に foam モジュールと道具 dyne-foam を足した。
+  書き出し: 正則格子の場を scalarTransportFoam(与えた流速での移流・拡散)の case(blockMeshDict・controlDict・fvSchemes・
+  fvSolution・mapFieldsDict・transportProperties・0/T・0/U)にする。Dyne の格子点1つを OpenFOAM のセル1つの中心にする
+  (値は補間なしで1対1。外周の面は端の点から半間隔外にずれる)。値は最短で元に戻る10進表記。読み込み: Dyne の格子と同じ
+  メッシュ上の U(ASCII)を読む。CFD の結果は mapFields でそのメッシュへ写す。OpenFOAM はこの環境になく、CI でも動かさない
+  (形式と読み直しのビット一致だけを確かめる。OpenFOAM との結果の比較と許容誤差はまだ)。scripts/ci-check.sh の [14]。
+  詳細: docs/2026-11-17-openfoam-bridge.md
 
 ### 前回の「今ここ」(2026-11-13): 実機の到着待ち — ソフトはひと通り実装済み(すべて実機未確認)
 
