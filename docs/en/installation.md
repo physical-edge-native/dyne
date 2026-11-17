@@ -92,5 +92,4 @@ is missing.
 
 Building and flashing the firmware for ESP32 boards (`node-esp32/`) needs
 [ESP-IDF](https://docs.espressif.com/projects/esp-idf/) 5.5. It is not needed
-for anything above. See the hardware guide (being written under issue #7) and,
-for now, `node-esp32/` and the Japanese runbooks in `docs/`.
+for anything above. See the [hardware guide](hardware.md).

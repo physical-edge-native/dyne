@@ -209,6 +209,6 @@ simulator exits with a non-zero status. Undo the change before going on.
 - **Measurements:** add `dyne_observe(i, y, gamma) -> f64` to pull point `i`
   towards a measured value `y` (data assimilation by nudging); see
   `crates/heat1d-actor` and the `--nudge-gamma` option of `dyne-sim`.
-- **Devices:** the same `.wasm` file runs on ESP32 boards; the hardware guide
-  (being written under issue #7) shows how it is deployed and checked against
-  the simulator.
+- **Devices:** the same `.wasm` file runs on ESP32 boards; the
+  [hardware guide](hardware.md) shows how solvers are deployed and checked
+  against the simulator.
