@@ -265,6 +265,7 @@ real space that the devices keep up to date.
 | VTK image data (ParaView, PyVista) | 2D/3D field state | inspection and post-processing without licences; checked bit for bit in CI | implemented (`--vti PATH`) |
 | OpenFOAM case (scalarTransportFoam) | grid, initial field, boundary conditions, given velocity and diffusivity | detailed what-if studies with an established CFD package; case format and read-back checked in CI | implemented (`dyne-foam case`); not yet run with an OpenFOAM installation |
 | OpenFOAM case with the room's walls and furniture | the cells inside walls and obstacles of the room shape built by the devices are left out; their faces form the patch `walls` | the real room in a CFD study | implemented (`dyne-foam case --shape`); a simulated room passes OpenFOAM's `checkMesh` and runs with `scalarTransportFoam` (OpenFOAM.com v2606 release candidate) |
+| OpenFOAM initial temperature from point sensors | readings of a few sensors spread over the grid (inverse-distance weighting) | starting a CFD study from the measured state of the room | implemented (`dyne-foam case --sensors`); runs with `scalarTransportFoam` (OpenFOAM.com v2606 release candidate) |
 | OpenFOAM velocity field (import) | airflow computed by OpenFOAM, mapped onto Dyne's grid | the given airflow that carries temperature, CO2 and humidity | implemented (`dyne-foam velocity`, checked in CI on a synthetic file); not yet run with an OpenFOAM installation |
 
 ```sh
@@ -305,7 +306,16 @@ cd roomCase && checkMesh && scalarTransportFoam
 
 A grid point counts as solid where the signed distance `phi` is negative or where it was not observed
 (`--unobserved fluid` treats unobserved points as free), as in the USD export; only the largest
-connected free region is kept. The choice of this representation is recorded in
+connected free region is kept. Instead of a Dyne field, the initial temperature can come from a few
+point sensors (`--sensors readings.csv`, columns `x,y,T` in metres and the user's temperature unit),
+spread over the grid by inverse-distance weighting: an initial guess that stays within the range of the
+readings, not a measurement of the field. The grid is then that of `--shape` (or `--vti`):
+
+```sh
+cargo run --release -p dyne-export --bin dyne-foam -- case --sensors readings.csv --shape shape.csv --out roomCase --walls zero-gradient
+```
+
+The choice of these representations is recorded in
 [docs/design/2026-11-18-foam-walls-and-sensor-field.md](docs/design/2026-11-18-foam-walls-and-sensor-field.md).
 
 The other OpenFOAM steps above have not yet been run with an OpenFOAM installation, neither in Dyne's tests nor by
