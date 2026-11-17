@@ -461,32 +461,62 @@ static bool wasm_try(uint8_t *wbuf, uint32_t wsize, const char *what)
 /* 2026-11-13: 内部RAMを先に使い、足りなければ PSRAM (外付けのRAM) を使う確保。
  * PSRAM の無い基板 (ESPr) では malloc と同じ。PSRAM のある基板 (DevKitC-VE) では、malloc は
  * 16KB 以上を PSRAM に置く設定 (CONFIG_SPIRAM_USE_MALLOC) なので、計算部品の本体・WAMR の内部の
- * 表をここで内部RAMへ寄せる (内部RAMの方が速い。線形メモリは WAMR の os_mmap が同じ順で確保する) */
+ * 表をここで内部RAMへ寄せる (内部RAMの方が速い。線形メモリは 2026-11-17 から PSRAM。下の lin_alloc) */
 void *dyne_malloc_int_first(size_t size)
 {
     return heap_caps_malloc_prefer(size, 2, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT, MALLOC_CAP_8BIT);
 }
-#if CONFIG_SPIRAM
-static void *wamr_malloc(unsigned int size) { return dyne_malloc_int_first(size); }
-static void *wamr_realloc(void *p, unsigned int size)
+/* 2026-11-17: 線形メモリ (計算部品の作業メモリ、wave2d で 64KB) は PSRAM に置く。
+ * 内部RAMに置くと、Wi-Fi・通信の開始後に内部RAMの空きが 4KB を切り、OTA の作業の場所
+ * (タスクのスタック 6〜8KB、内部RAMが必須) を取れなかった (DevKitC-VE、2026-11-17 の実機)。
+ * WAMR を WASM_MEM_ALLOC_WITH_USAGE=1 でビルドし (CMakeLists.txt)、線形メモリの確保だけを
+ * ここで見分ける。WAMR はこの経路では線形メモリを 0 で埋めないので、ここで埋める。
+ * 8 バイト境界は WAMR の前提 (wasm_allocate_linear_memory の bh_assert)。
+ * PSRAM の無い基板では内部RAMに置く (従来と同じ場所)。計算の結果 (ビット) は置き場所に依らない */
+static void *lin_alloc(size_t size)
 {
+    void *p = NULL;
+#if CONFIG_SPIRAM
+    p = heap_caps_aligned_alloc(8, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+#endif
+    if (!p) p = heap_caps_aligned_alloc(8, size, MALLOC_CAP_8BIT);
+    if (p) memset(p, 0, size);
+    return p;
+}
+static void *wamr_malloc(mem_alloc_usage_t usage, unsigned int size)
+{
+    if (usage == Alloc_For_LinearMemory) return lin_alloc(size);
+    return dyne_malloc_int_first(size);
+}
+static void *wamr_realloc(mem_alloc_usage_t usage, bool full_size_mmaped, void *p, unsigned int size)
+{
+    (void)full_size_mmaped;
+    if (usage == Alloc_For_LinearMemory) {
+        size_t old = p ? heap_caps_get_allocated_size(p) : 0;
+        void *n = lin_alloc(size);
+        if (!n) return NULL;
+        if (p) {
+            memcpy(n, p, old < size ? old : size);
+            heap_caps_free(p);
+        }
+        return n;
+    }
     return heap_caps_realloc_prefer(p, size, 2, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT, MALLOC_CAP_8BIT);
 }
-static void wamr_free(void *p) { heap_caps_free(p); }
-#endif
+static void wamr_free(mem_alloc_usage_t usage, void *p)
+{
+    (void)usage;
+    heap_caps_free(p);
+}
 
 static bool wasm_up(void)
 {
     RuntimeInitArgs ia;
     memset(&ia, 0, sizeof(ia));
-#if CONFIG_SPIRAM
-    ia.mem_alloc_type = Alloc_With_Allocator;
+    ia.mem_alloc_type = Alloc_With_Allocator; /* 2026-11-17: どの基板でも (線形メモリの置き場所のため) */
     ia.mem_alloc_option.allocator.malloc_func = (void *)wamr_malloc;
     ia.mem_alloc_option.allocator.realloc_func = (void *)wamr_realloc;
     ia.mem_alloc_option.allocator.free_func = (void *)wamr_free;
-#else
-    ia.mem_alloc_type = Alloc_With_System_Allocator;
-#endif
     if (!wasm_runtime_full_init(&ia)) return false;
     dyne_actor_cand_t cand[4];
     int nc = dyne_actor_candidates(cand, 4);

@@ -1,5 +1,9 @@
 cmake_minimum_required(VERSION 3.16)
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+# 2026-11-17: WAMR が線形メモリの確保を「用途つき」で呼ぶようにする (main.c の wamr_malloc が
+# 線形メモリだけを PSRAM に置くため)。全コンポーネントに同じ定義を渡す (WAMR の関数の型が変わるので、
+# main と WAMR で食い違わないように)。ESP-IDF の WAMR の Kconfig にはこの項目が無い
+idf_build_set_property(COMPILE_DEFINITIONS "WASM_MEM_ALLOC_WITH_USAGE=1" APPEND)
 project(dyne_node)
 
 # ---- wasm-micro-runtime の version.h 改行正規化 (2026-09-18 設計判断) ----
