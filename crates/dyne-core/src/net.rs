@@ -1,22 +1,28 @@
-//! 仮想ネットワーク: 損失・遅延ジッタ・一時分断 (dyne-sim 従来実装の移設)。
+//! Virtual network: message loss, delay jitter and temporary partitions.
 //!
-//! 乱数の消費順 (ビット互換の要): 分断判定 (乱数を消費しない) → 損失判定
-//! (uniform を1回、loss>0 のときのみ) → 遅延ジッタ (range_u64 を1回)。
-//! この順序を変更すると全回帰のビット一致が壊れる。
+//! Order in which random numbers are drawn (needed for determinism): partition check (no
+//! random number), then loss (one `uniform`, only if `loss > 0`), then delay jitter (one
+//! `range_u64`). Changing this order changes every regression result.
 
 use crate::rng::Rng;
 
+/// The virtual network between simulated devices.
 pub struct VirtNet {
+    /// Probability that a message is lost.
     pub loss: f64,
+    /// Base delay \[µs\].
     pub lat_us: u64,
+    /// Delay jitter \[µs\]: a uniform integer in 0..=2·jitter is added.
     pub lat_jitter_us: u64,
-    /// (split k, start_us, end_us): 期間中、境目 k をまたぐ通信を遮断
-    /// (1次元チェーンでは「ノードk-1|k間」。判定は from<k と to<k の異同)
+    /// Partitions (split k, start_us, end_us): during \[start, end), messages between devices
+    /// below k and devices at or above k are blocked (in a 1D chain: between k−1 and k).
     pub partitions: Vec<(usize, u64, u64)>,
+    /// The random generator of the network.
     pub rng: Rng,
 }
 
 impl VirtNet {
+    /// A network with the given loss, delay, jitter, partitions and seed.
     pub fn new(
         loss: f64,
         lat_us: u64,
@@ -27,15 +33,15 @@ impl VirtNet {
         VirtNet { loss, lat_us, lat_jitter_us, partitions, rng: Rng::new(seed) }
     }
 
-    /// 時刻 t に from→to が分断で遮られているか
+    /// Whether a message from `from` to `to` at time `t` is blocked by a partition.
     pub fn partition_blocks(&self, from: usize, to: usize, t: u64) -> bool {
         self.partitions
             .iter()
             .any(|&(k, a, b)| t >= a && t < b && ((from < k) != (to < k)))
     }
 
-    /// 配送判定: None = 喪失 (分断または確率的ロス)、Some(t) = 配送時刻。
-    /// 配送時刻は now + max(遅延+ジッタ, 1µs)。
+    /// Decide the fate of a message sent at `now`: `None` if lost (partition or random loss),
+    /// otherwise `Some(arrival time)` = now + max(delay + jitter, 1 µs).
     pub fn transit(&mut self, from: usize, to: usize, now: u64) -> Option<u64> {
         if self.partition_blocks(from, to, now) {
             return None;

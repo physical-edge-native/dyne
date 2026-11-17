@@ -1,11 +1,12 @@
-//! 離散イベント・仮想時刻のイベントキュー (dyne-sim 従来実装の移設)。
+//! Event queue in virtual time.
 //!
-//! 順序の決定則 (ビット互換の要): 同時刻のイベントは**スケジュールされた順**
-//! (通し番号 seq の昇順) に配る。壁時計は使わない。
+//! Ordering rule (needed for determinism): events at the same time are delivered in the
+//! order in which they were scheduled. No wall clock is used.
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
+/// A queue of events of type `E` ordered by virtual time, then by scheduling order.
 pub struct EventQueue<E> {
     /// (time, seq, ev_index)
     heap: BinaryHeap<Reverse<(u64, u64, usize)>>,
@@ -14,11 +15,12 @@ pub struct EventQueue<E> {
 }
 
 impl<E> EventQueue<E> {
+    /// An empty queue.
     pub fn new() -> Self {
         EventQueue { heap: BinaryHeap::new(), events: Vec::new(), seq: 0 }
     }
 
-    /// 仮想時刻 t にイベントを予約する
+    /// Schedule `ev` at virtual time `t`.
     pub fn schedule(&mut self, t: u64, ev: E) {
         self.events.push(Some(ev));
         let idx = self.events.len() - 1;
@@ -26,7 +28,7 @@ impl<E> EventQueue<E> {
         self.heap.push(Reverse((t, self.seq, idx)));
     }
 
-    /// 最も早いイベントを取り出す (時刻昇順、同時刻は予約順)
+    /// Take the earliest event (by time; events at the same time in scheduling order).
     pub fn pop(&mut self) -> Option<(u64, E)> {
         self.heap.pop().map(|Reverse((t, _, idx))| {
             let ev = self.events[idx].take().expect("event consumed twice");
