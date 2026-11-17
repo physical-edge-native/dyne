@@ -1,0 +1,26 @@
+/* Written by Dyne (crates/dyne-export, https://github.com/physical-edge-native/dyne).
+   Numbers are in the shortest decimal form that reads back to the same 64-bit float. */
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    location    "system";
+    object      fvSolution;
+}
+
+solvers
+{
+    T
+    {
+        solver          PBiCGStab;
+        preconditioner  DILU;
+        tolerance       1e-10;
+        relTol          0;
+    }
+}
+
+SIMPLE
+{
+    nNonOrthogonalCorrectors 0;
+}

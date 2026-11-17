@@ -51,6 +51,27 @@
 //! `physicalProperties` for many solvers, so `scalarTransportFoam` may need to be replaced by the
 //! equivalent function or module there.
 //!
+//! # Walls and obstacles
+//!
+//! A case can leave out the grid points inside walls and obstacles ([`Case::solid`], e.g. from the room
+//! shape that Dyne's devices build from distance sensors: see [`crate::walls`]). Then:
+//!
+//! - The mesh is written directly as `constant/polyMesh` ([`crate::polymesh`]) instead of
+//!   `system/blockMeshDict`; **do not run `blockMesh`** on such a case (it would replace the mesh by
+//!   the full block). A `system/blockMeshDict` left in the directory by an earlier export is removed.
+//! - Cell `c` is the `c`-th fluid grid point (x fastest); `system/dyneGrid` lists the solid points
+//!   (`solid`), so the case can be read back and a velocity field imported onto Dyne's grid.
+//! - The faces between fluid and solid cells form the patch `walls` (type `wall`). The condition of
+//!   `T` there is [`Case::wall`] (zero gradient by default: no heat flows through walls and furniture);
+//!   `U` is zero there (`fixedValue (0 0 0)`), so no flux enters a wall. A uniform non-zero velocity
+//!   is then not a valid flow (it runs into the walls, so the flux is not conserved), and
+//!   `scalarTransportFoam` can blow up with it (seen on 2026-11-18); use zero velocity (diffusion only)
+//!   or a velocity field computed on the same mesh.
+//! - `0/T` and `0/U` have one value per fluid cell. When read back, `T` at solid points is NaN (no
+//!   value) and `U` is zero.
+//!
+//! Without solid points nothing changes: the files are byte for byte those of a case without walls.
+//!
 //! # Importing a velocity field
 //!
 //! [`import_velocity`] reads the `internalField` of a `volVectorField` `U` (ASCII) in a case whose mesh
@@ -78,6 +99,7 @@
 //! are not supported. The decimal text is parsed with correct rounding, so the imported values are
 //! exactly the numbers in the file; with `writePrecision 17` they are OpenFOAM's 64-bit values.
 
+use crate::polymesh::{PolyMesh, WALL_PATCH};
 use std::fmt;
 use std::fmt::Write as _;
 use std::path::Path;
@@ -168,7 +190,7 @@ impl Grid {
         ]
     }
 
-    fn check(&self) -> Result<(), FoamError> {
+    pub(crate) fn check(&self) -> Result<(), FoamError> {
         if self.points.contains(&0) {
             return err(format!("every axis needs at least one point (points {:?})", self.points));
         }
@@ -232,6 +254,13 @@ pub struct Case {
     pub delta_t: f64,
     /// Interval between written time directories (`writeInterval`, `writeControl runTime`).
     pub write_interval: f64,
+    /// Grid points inside walls and obstacles (one entry per point, x fastest; `true` = solid, no
+    /// cell). `None`: every point is a cell, written as one `blockMesh` block (see the module
+    /// documentation, "Walls and obstacles").
+    pub solid: Option<Vec<bool>>,
+    /// Condition of `T` on the faces between fluid and solid cells (patch `walls`); used only with
+    /// [`Case::solid`].
+    pub wall: Face,
 }
 
 impl Case {
@@ -249,7 +278,34 @@ impl Case {
             end_time: 1.0,
             delta_t: 0.01,
             write_interval: 0.1,
+            solid: None,
+            wall: Face::ZeroGradient,
         }
+    }
+
+    /// Grid point index of every OpenFOAM cell: all points without walls, the fluid points with.
+    pub fn cell_points(&self) -> Vec<usize> {
+        match &self.solid {
+            None => (0..self.grid.cells()).collect(),
+            Some(s) => (0..s.len()).filter(|&k| !s[k]).collect(),
+        }
+    }
+
+    /// The values of `T` that the case holds, one per OpenFOAM cell (the values of `0/T`).
+    pub fn cell_values(&self) -> Vec<f64> {
+        match &self.solid {
+            None => self.t.clone(),
+            Some(_) => self.cell_points().into_iter().map(|k| self.t[k]).collect(),
+        }
+    }
+
+    /// Patch names with a condition of `T`: the sides of the grid, then `walls` if there are walls.
+    fn patch_names(&self) -> Vec<&'static str> {
+        let mut v = self.grid.face_names().to_vec();
+        if self.solid.is_some() {
+            v.push(WALL_PATCH);
+        }
+        v
     }
 
     fn check(&self) -> Result<(), FoamError> {
@@ -258,13 +314,22 @@ impl Case {
         if self.t.len() != n {
             return err(format!("T has {} values, the grid has {} points", self.t.len(), n));
         }
-        if let Some(k) = self.t.iter().position(|v| !v.is_finite()) {
+        if let Some(s) = &self.solid {
+            if s.len() != n {
+                return err(format!("the solid mask has {} entries, the grid has {} points", s.len(), n));
+            }
+            if s.iter().all(|&x| x) {
+                return err("every grid point is solid: no cell left");
+            }
+        }
+        let cells = self.cell_points();
+        if let Some(&k) = cells.iter().find(|&&k| !self.t[k].is_finite()) {
             return err(format!("T[{k}] = {:?} is not finite; OpenFOAM cannot use it", self.t[k]));
         }
         if self.faces.len() != self.grid.face_names().len() {
             return err(format!("{} face conditions given, the grid has {} faces", self.faces.len(), self.grid.face_names().len()));
         }
-        for (f, name) in self.faces.iter().zip(self.grid.face_names()) {
+        for (f, name) in self.faces.iter().chain([&self.wall]).zip(self.patch_names()) {
             if let Face::FixedValue(v) | Face::InletOutlet(v) = f {
                 if !v.is_finite() {
                     return err(format!("face {name}: value {v:?} is not finite"));
@@ -274,7 +339,7 @@ impl Case {
         match &self.velocity {
             Velocity::Uniform(u) if !u.iter().all(|v| v.is_finite()) => return err("velocity is not finite"),
             Velocity::Cells(c) if c.len() != n => return err(format!("U has {} vectors, the grid has {} points", c.len(), n)),
-            Velocity::Cells(c) if !c.iter().flatten().all(|v| v.is_finite()) => return err("velocity is not finite"),
+            Velocity::Cells(c) if !cells.iter().flat_map(|&k| c[k]).all(|v| v.is_finite()) => return err("velocity is not finite"),
             _ => {}
         }
         if !(self.diffusivity.is_finite() && self.diffusivity >= 0.0) {
@@ -291,23 +356,42 @@ impl Case {
     /// The files of the case as (path relative to the case directory, contents).
     pub fn files(&self) -> Result<Vec<(&'static str, String)>, FoamError> {
         self.check()?;
-        Ok(vec![
-            ("system/blockMeshDict", self.block_mesh_dict()),
+        let mut files = match &self.solid {
+            None => vec![("system/blockMeshDict", self.block_mesh_dict())],
+            Some(s) => PolyMesh::build(&self.grid, s)?.files(),
+        };
+        files.extend([
             ("system/controlDict", self.control_dict()),
             ("system/fvSchemes", fv_schemes()),
             ("system/fvSolution", fv_solution()),
-            ("system/dyneGrid", grid_dict(&self.grid)),
+            ("system/dyneGrid", grid_dict(&self.grid, self.solid.as_deref())),
             ("system/mapFieldsDict", self.map_fields_dict()),
             ("constant/transportProperties", self.transport_properties()),
             ("0/T", self.t_file()),
             ("0/U", self.u_file()),
-        ])
+        ]);
+        Ok(files)
     }
 
-    /// Writes the case into directory `dir` (created if needed; existing files are replaced).
+    /// The mesh of a case with walls ([`Case::solid`]); `None` without walls.
+    pub fn poly_mesh(&self) -> Result<Option<PolyMesh>, FoamError> {
+        self.check()?;
+        self.solid.as_ref().map(|s| PolyMesh::build(&self.grid, s)).transpose()
+    }
+
+    /// Writes the case into directory `dir` (created if needed; existing files are replaced). With
+    /// walls, a `system/blockMeshDict` already in `dir` is removed, so that `blockMesh` cannot be run
+    /// by mistake.
     pub fn write(&self, dir: impl AsRef<Path>) -> Result<(), FoamError> {
         let dir = dir.as_ref();
-        for (rel, text) in self.files()? {
+        let files = self.files()?;
+        if self.solid.is_some() {
+            let stale = dir.join("system/blockMeshDict");
+            if stale.exists() {
+                std::fs::remove_file(&stale).map_err(|e| FoamError(format!("cannot remove {}: {e}", stale.display())))?;
+            }
+        }
+        for (rel, text) in files {
             let path = dir.join(rel);
             if let Some(p) = path.parent() {
                 std::fs::create_dir_all(p).map_err(|e| FoamError(format!("cannot create {}: {e}", p.display())))?;
@@ -317,16 +401,35 @@ impl Case {
         Ok(())
     }
 
-    /// Reads a case written by [`Case::write`] (all nine files) and checks that they agree with each
-    /// other: the mesh of `blockMeshDict` must be the one of `system/dyneGrid`, and `T` and `U` must
-    /// have one value per cell and the expected patches.
+    /// Reads a case written by [`Case::write`] and checks that its files agree with each other: the
+    /// mesh of `blockMeshDict` (or, with walls, the files of `constant/polyMesh`, compared with the mesh
+    /// built again from `system/dyneGrid`) must be the one of `system/dyneGrid`, and `T` and `U` must
+    /// have one value per cell and the expected patches. With walls, `T` is NaN and `U` zero at the
+    /// solid points.
     pub fn read(dir: impl AsRef<Path>) -> Result<Case, FoamError> {
         let dir = dir.as_ref();
-        let grid = read_grid(dir)?;
+        let (grid, solid) = read_layout(dir)?;
         let n = grid.cells();
-
-        let bm = read_foam(&read_text(&dir.join("system/blockMeshDict"))?, "dictionary")?;
-        check_block_mesh(&bm, &grid)?;
+        let cells: Vec<usize> = match &solid {
+            None => (0..n).collect(),
+            Some(s) => (0..n).filter(|&k| !s[k]).collect(),
+        };
+        match &solid {
+            None => {
+                let bm = read_foam(&read_text(&dir.join("system/blockMeshDict"))?, "dictionary")?;
+                check_block_mesh(&bm, &grid)?;
+            }
+            Some(s) => {
+                for (rel, want) in PolyMesh::build(&grid, s)?.files() {
+                    if read_text(&dir.join(rel))?.replace("\r\n", "\n") != want {
+                        return err(format!("{rel}: differs from the mesh of system/dyneGrid"));
+                    }
+                }
+            }
+        }
+        let mut probe = Case::new(grid, Vec::new(), 0.0);
+        probe.solid = solid.clone();
+        let patch_names = probe.patch_names();
 
         let cd = read_foam(&read_text(&dir.join("system/controlDict"))?, "dictionary")?;
         if cd.word("application")? != "scalarTransportFoam" {
@@ -339,7 +442,7 @@ impl Case {
         read_foam(&read_text(&dir.join("system/fvSolution"))?, "dictionary")?;
         let mf = read_foam(&read_text(&dir.join("system/mapFieldsDict"))?, "dictionary")?;
         let cutting: Vec<&Tok> = mf.stream("cuttingPatches")?.iter().filter(|t| matches!(t, Tok::W(_))).collect();
-        if cutting.len() != grid.face_names().len() {
+        if cutting.len() != patch_names.len() {
             return err("mapFieldsDict: cuttingPatches must name every face");
         }
 
@@ -357,17 +460,18 @@ impl Case {
 
         let tf = read_foam(&read_text(&dir.join("0/T"))?, "volScalarField")?;
         let t_dimensions = dimensions(tf.stream("dimensions")?)?;
-        let t = match field(tf.stream("internalField")?, "scalar", scalar)? {
+        let t_cells = match field(tf.stream("internalField")?, "scalar", scalar)? {
             Internal::Values(v) => v,
-            Internal::Uniform(v) => vec![v; n],
+            Internal::Uniform(v) => vec![v; cells.len()],
         };
-        if t.len() != n {
-            return err(format!("0/T has {} values, the mesh has {} cells", t.len(), n));
+        if t_cells.len() != cells.len() {
+            return err(format!("0/T has {} values, the mesh has {} cells", t_cells.len(), cells.len()));
         }
+        let t = spread(&t_cells, &cells, n, f64::NAN);
         let bf = tf.dict("boundaryField")?;
-        check_patch_names(bf, &grid, "0/T")?;
+        check_patch_names(bf, &patch_names, &grid, "0/T")?;
         let mut faces = Vec::new();
-        for name in grid.face_names() {
+        for name in &patch_names {
             let p = bf.dict(name)?;
             let face = match p.word("type")? {
                 "fixedValue" => Face::FixedValue(uniform_scalar(p.stream("value")?)?),
@@ -383,6 +487,7 @@ impl Case {
             };
             faces.push(face);
         }
+        let wall = if solid.is_some() { faces.pop().unwrap() } else { Face::ZeroGradient };
 
         let uf = read_foam(&read_text(&dir.join("0/U"))?, "volVectorField")?;
         if dimensions(uf.stream("dimensions")?)? != [0, 1, -1, 0, 0, 0, 0] {
@@ -390,11 +495,22 @@ impl Case {
         }
         let velocity = match field(uf.stream("internalField")?, "vector", vector)? {
             Internal::Uniform(u) => Velocity::Uniform(u),
-            Internal::Values(c) => Velocity::Cells(c),
+            Internal::Values(c) if c.len() == cells.len() => Velocity::Cells(spread(&c, &cells, n, [0.0; 3])),
+            Internal::Values(c) => return err(format!("0/U has {} vectors, the mesh has {} cells", c.len(), cells.len())),
         };
-        check_patch_names(uf.dict("boundaryField")?, &grid, "0/U")?;
+        let ub = uf.dict("boundaryField")?;
+        check_patch_names(ub, &patch_names, &grid, "0/U")?;
+        if solid.is_some() {
+            let w = ub.dict(WALL_PATCH)?;
+            let mut i = 1;
+            let v = w.stream("value")?;
+            let zero = w.word("type")? == "fixedValue" && v.first() == Some(&Tok::W("uniform".into())) && vector(v, &mut i)? == [0.0; 3];
+            if !zero || i != v.len() {
+                return err("0/U walls: expected fixedValue uniform (0 0 0)");
+            }
+        }
 
-        let case = Case { grid, t, t_dimensions, faces, velocity, diffusivity, end_time, delta_t, write_interval };
+        let case = Case { grid, t, t_dimensions, faces, velocity, diffusivity, end_time, delta_t, write_interval, solid, wall };
         case.check()?;
         Ok(case)
     }
@@ -466,7 +582,7 @@ impl Case {
         let _ = write!(s, "patchMap        ( );
 
 cuttingPatches  ( {} );
-", self.grid.face_names().join(" "));
+", self.patch_names().join(" "));
         s
     }
 
@@ -489,14 +605,14 @@ cuttingPatches  ( {} );
             d[4],
             d[5],
             d[6],
-            self.t.len()
+            self.cell_points().len()
         );
-        for v in &self.t {
-            s.push_str(&num_str(*v));
+        for v in self.cell_values() {
+            s.push_str(&num_str(v));
             s.push('\n');
         }
         s.push_str(")\n;\n\nboundaryField\n{\n");
-        for (f, name) in self.faces.iter().zip(self.grid.face_names()) {
+        for (f, name) in self.faces.iter().chain([&self.wall]).zip(self.patch_names()) {
             let body = match f {
                 Face::FixedValue(v) => format!("        type            fixedValue;\n        value           uniform {};\n", num_str(*v)),
                 Face::ZeroGradient => "        type            zeroGradient;\n".to_string(),
@@ -520,9 +636,10 @@ cuttingPatches  ( {} );
                 let _ = writeln!(s, "internalField   uniform {};", vec3(u));
             }
             Velocity::Cells(c) => {
-                let _ = write!(s, "internalField   nonuniform List<vector>\n{}\n(\n", c.len());
-                for u in c {
-                    s.push_str(&vec3(u));
+                let cells = self.cell_points();
+                let _ = write!(s, "internalField   nonuniform List<vector>\n{}\n(\n", cells.len());
+                for k in cells {
+                    s.push_str(&vec3(&c[k]));
                     s.push('\n');
                 }
                 s.push_str(")\n;\n");
@@ -531,6 +648,10 @@ cuttingPatches  ( {} );
         s.push_str("\nboundaryField\n{\n");
         for name in self.grid.face_names() {
             let _ = write!(s, "    {name}\n    {{\n        type            zeroGradient;\n    }}\n");
+        }
+        if self.solid.is_some() {
+            // No flow through walls and obstacles.
+            let _ = write!(s, "    {WALL_PATCH}\n    {{\n        type            fixedValue;\n        value           uniform (0 0 0);\n    }}\n");
         }
         empty_patch(&mut s, &self.grid);
         s.push_str("}\n");
@@ -544,7 +665,7 @@ fn empty_patch(s: &mut String, g: &Grid) {
     }
 }
 
-fn header(class: &str, location: &str, object: &str) -> String {
+pub(crate) fn header(class: &str, location: &str, object: &str) -> String {
     format!(
         "/* Written by Dyne (crates/dyne-export, https://github.com/physical-edge-native/dyne).\n   \
          Numbers are in the shortest decimal form that reads back to the same 64-bit float. */\n\
@@ -576,9 +697,14 @@ fn fv_solution() -> String {
     s
 }
 
-fn grid_dict(g: &Grid) -> String {
+fn grid_dict(g: &Grid, solid: Option<&[bool]>) -> String {
     let mut s = header("dictionary", "system", "dyneGrid");
-    s.push_str("// Dyne's grid: the centre of OpenFOAM cell n is Dyne's grid point n (x fastest, then y, then z).\n");
+    if solid.is_some() {
+        s.push_str("// Dyne's grid: the centre of OpenFOAM cell n is the n-th grid point that is not in the list `solid`\n");
+        s.push_str("// (grid points inside walls and obstacles, which have no cell); points are numbered x fastest, then y, then z.\n");
+    } else {
+        s.push_str("// Dyne's grid: the centre of OpenFOAM cell n is Dyne's grid point n (x fastest, then y, then z).\n");
+    }
     s.push_str("// Read by Dyne when the case is read back or a velocity field is imported; OpenFOAM ignores it.\n");
     let _ = write!(
         s,
@@ -589,11 +715,30 @@ fn grid_dict(g: &Grid) -> String {
         vec3(&g.origin),
         vec3(&g.spacing)
     );
+    if let Some(m) = solid {
+        let list: Vec<usize> = (0..m.len()).filter(|&k| m[k]).collect();
+        let _ = write!(s, "solid\n{}\n(\n", list.len());
+        for row in list.chunks(16) {
+            let words: Vec<String> = row.iter().map(|k| k.to_string()).collect();
+            let _ = writeln!(s, "{}", words.join(" "));
+        }
+        s.push_str(")\n;\n");
+    }
     s
 }
 
+/// Puts the values of the cells back on the grid: `cells[c]` is the grid point of cell `c`; the
+/// other points get `fill`.
+fn spread<T: Copy>(values: &[T], cells: &[usize], n: usize, fill: T) -> Vec<T> {
+    let mut out = vec![fill; n];
+    for (v, &k) in values.iter().zip(cells) {
+        out[k] = *v;
+    }
+    out
+}
+
 /// Shortest round-trip decimal form (`Debug` of `f64`).
-fn num_str(v: f64) -> String {
+pub(crate) fn num_str(v: f64) -> String {
     format!("{v:?}")
 }
 
@@ -606,6 +751,12 @@ fn vec3(v: &[f64; 3]) -> String {
 
 /// Reads `system/dyneGrid` of a case exported by [`Case::write`].
 pub fn read_grid(case_dir: impl AsRef<Path>) -> Result<Grid, FoamError> {
+    Ok(read_layout(case_dir)?.0)
+}
+
+/// Reads `system/dyneGrid` of a case exported by [`Case::write`]: the grid, and for a case with walls
+/// the solid mask (one entry per grid point, `true` = no cell).
+pub fn read_layout(case_dir: impl AsRef<Path>) -> Result<(Grid, Option<Vec<bool>>), FoamError> {
     let d = read_foam(&read_text(&case_dir.as_ref().join("system/dyneGrid"))?, "dictionary")?;
     let p = labels3(d.stream("points")?)?;
     let mut i = 0;
@@ -614,26 +765,46 @@ pub fn read_grid(case_dir: impl AsRef<Path>) -> Result<Grid, FoamError> {
     let spacing = vector(d.stream("spacing")?, &mut i)?;
     let g = Grid { points: p, origin, spacing };
     g.check()?;
-    Ok(g)
+    if !d.keys().contains(&"solid") {
+        return Ok((g, None));
+    }
+    let t = d.stream("solid")?;
+    let count = label(t.first())?;
+    let mut i = 1;
+    let list = list_of_labels(t, &mut i)?;
+    if list.len() != count || i != t.len() {
+        return err("dyneGrid: solid must be N ( indices )");
+    }
+    let mut m = vec![false; g.cells()];
+    for (j, &k) in list.iter().enumerate() {
+        if k >= m.len() || (j > 0 && k <= list[j - 1]) {
+            return err("dyneGrid: solid indices must be increasing grid point indices");
+        }
+        m[k] = true;
+    }
+    Ok((g, Some(m)))
 }
 
 /// Reads the velocity `U` of time directory `time` (e.g. `"0"` after `mapFields`, or the last time of
 /// a run on this mesh) in a case exported by [`Case::write`], and returns Dyne's grid and one vector
-/// per grid point (x fastest). A uniform field is repeated for every point.
+/// per grid point (x fastest). A uniform field is repeated for every point. In a case with walls, the
+/// file has one vector per fluid cell and the solid points get zero velocity.
 pub fn import_velocity(case_dir: impl AsRef<Path>, time: &str) -> Result<(Grid, Vec<[f64; 3]>), FoamError> {
     let dir = case_dir.as_ref();
-    let grid = read_grid(dir)?;
+    let (grid, solid) = read_layout(dir)?;
     let path = dir.join(time).join("U");
     let u = read_vector_field(&read_text(&path)?).map_err(|e| FoamError(format!("{}: {e}", path.display())))?;
     let n = grid.cells();
+    let cells: Vec<usize> = (0..n).filter(|&k| solid.as_ref().map_or(true, |s| !s[k])).collect();
     let u = match u {
-        Internal::Uniform(v) => vec![v; n],
-        Internal::Values(v) if v.len() == n => v,
+        Internal::Uniform(v) => vec![v; cells.len()],
+        Internal::Values(v) if v.len() == cells.len() => v,
         Internal::Values(v) => {
-            return err(format!("{}: {} vectors, the grid of system/dyneGrid has {} points", path.display(), v.len(), n));
+            let what = if solid.is_some() { "fluid points" } else { "points" };
+            return err(format!("{}: {} vectors, the grid of system/dyneGrid has {} {what}", path.display(), v.len(), cells.len()));
         }
     };
-    Ok((grid, u))
+    Ok((grid, spread(&u, &cells, n, [0.0; 3])))
 }
 
 /// The `internalField` of a field file.
@@ -950,8 +1121,8 @@ fn labels3(t: &[Tok]) -> Result<[usize; 3], FoamError> {
     }
 }
 
-fn check_patch_names(bf: &Dict, g: &Grid, file: &str) -> Result<(), FoamError> {
-    let mut want: Vec<&str> = g.face_names().to_vec();
+fn check_patch_names(bf: &Dict, names: &[&str], g: &Grid, file: &str) -> Result<(), FoamError> {
+    let mut want: Vec<&str> = names.to_vec();
     if g.is_2d() {
         want.push(EMPTY_PATCH);
     }
@@ -1178,6 +1349,91 @@ mod tests {
         let a = awkward(72);
         c.velocity = Velocity::Cells((0..24).map(|k| [a[3 * k], a[3 * k + 1], a[3 * k + 2]]).collect());
         round_trip(&c, "3d");
+    }
+
+    /// A case with walls reads back with the same values in the fluid cells, NaN in T and zero in U at
+    /// the solid points, and writes the same files again.
+    fn round_trip_walls(c: &Case, name: &str) {
+        let d = dir(name);
+        let _ = std::fs::remove_dir_all(&d);
+        // A blockMeshDict of an earlier export without walls is removed.
+        let mut plain = c.clone();
+        plain.solid = None;
+        plain.t = plain.t.iter().map(|v| if v.is_finite() { *v } else { 0.0 }).collect();
+        plain.write(&d).unwrap();
+        assert!(d.join("system/blockMeshDict").exists());
+        c.write(&d).unwrap();
+        assert!(!d.join("system/blockMeshDict").exists());
+        let r = Case::read(&d).unwrap();
+        let s = c.solid.as_ref().unwrap();
+        assert_eq!(r.solid.as_ref(), Some(s));
+        assert!(same_bits(&r.cell_values(), &c.cell_values()));
+        assert!((0..s.len()).all(|k| r.t[k].is_nan() == s[k]));
+        assert_eq!(r.files().unwrap(), c.files().unwrap());
+        let (g, u) = import_velocity(&d, "0").unwrap();
+        assert_eq!(g, c.grid);
+        for k in 0..s.len() {
+            let want = match &c.velocity {
+                _ if s[k] => [0.0; 3],
+                Velocity::Uniform(v) => *v,
+                Velocity::Cells(v) => v[k],
+            };
+            assert!(same_bits(&u[k], &want));
+        }
+        assert_eq!(r.poly_mesh().unwrap().unwrap().check().unwrap().regions, 1);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn walls_round_trip_2d_and_3d() {
+        let g = Grid::new_2d([6, 5], [0.025, 0.025], [0.05, 0.05]);
+        let mut c = Case::new(g, awkward(30), 2.2e-5);
+        let mut s = vec![false; 30];
+        for k in [7, 8, 13, 14, 29] {
+            s[k] = true;
+        }
+        c.t[7] = f64::NAN; // a value inside a wall is not written, so it may be anything
+        c.solid = Some(s);
+        c.wall = Face::FixedValue(18.0);
+        c.velocity = Velocity::Uniform([0.1, 0.0, 0.0]);
+        round_trip_walls(&c, "walls2d");
+
+        let g = Grid::new_3d([4, 3, 3], [0.0; 3], [0.1, 0.2, 0.3]);
+        let mut c = Case::new(g, awkward(36), 1e-3);
+        let mut s = vec![false; 36];
+        for k in [13, 14, 17, 25] {
+            s[k] = true;
+        }
+        c.solid = Some(s);
+        let a = awkward(108);
+        c.velocity = Velocity::Cells((0..36).map(|k| [a[3 * k], a[3 * k + 1], a[3 * k + 2]]).collect());
+        round_trip_walls(&c, "walls3d");
+    }
+
+    #[test]
+    fn walls_files() {
+        let g = Grid::new_2d([3, 3], [0.0, 0.0], [1.0, 1.0]);
+        let mut c = Case::new(g, vec![1.0; 9], 1e-3);
+        let mut s = vec![false; 9];
+        s[4] = true;
+        c.solid = Some(s);
+        let files = c.files().unwrap();
+        let get = |p: &str| files.iter().find(|(k, _)| *k == p).map(|f| f.1.clone());
+        assert!(get("system/blockMeshDict").is_none());
+        assert!(get("0/T").unwrap().contains("nonuniform List<scalar>\n8\n("));
+        assert!(get("0/T").unwrap().contains("    walls\n    {\n        type            zeroGradient;\n    }\n"));
+        assert!(get("0/U").unwrap().contains("    walls\n    {\n        type            fixedValue;\n        value           uniform (0 0 0);\n"));
+        assert!(get("system/dyneGrid").unwrap().contains("solid\n1\n(\n4\n)\n;\n"));
+        assert!(get("system/mapFieldsDict").unwrap().contains("cuttingPatches  ( west east south north walls );"));
+        assert!(get("constant/polyMesh/owner").unwrap().contains("note        \"nPoints:32  nCells:8  nFaces:40  nInternalFaces:8\";"));
+        let mut all = c.clone();
+        all.solid = Some(vec![true; 9]);
+        assert!(all.files().is_err());
+        // A non-finite value inside a wall is fine, in a cell it is not.
+        c.t[4] = f64::INFINITY;
+        assert!(c.files().is_ok());
+        c.t[3] = f64::NAN;
+        assert!(c.files().is_err());
     }
 
     #[test]

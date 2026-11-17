@@ -264,6 +264,7 @@ real space that the devices keep up to date.
 | USD (Isaac Sim / Isaac Lab and other USD-based tools) | room shape and objects, with collision information | robot learning and simulation in a scene that matches the real room | implemented, awaiting hardware verification |
 | VTK image data (ParaView, PyVista) | 2D/3D field state | inspection and post-processing without licences; checked bit for bit in CI | implemented (`--vti PATH`) |
 | OpenFOAM case (scalarTransportFoam) | grid, initial field, boundary conditions, given velocity and diffusivity | detailed what-if studies with an established CFD package; case format and read-back checked in CI | implemented (`dyne-foam case`); not yet run with an OpenFOAM installation |
+| OpenFOAM case with the room's walls and furniture | the cells inside walls and obstacles of the room shape built by the devices are left out; their faces form the patch `walls` | the real room in a CFD study | implemented (`dyne-foam case --shape`); a simulated room passes OpenFOAM's `checkMesh` and runs with `scalarTransportFoam` (OpenFOAM.com v2606 release candidate) |
 | OpenFOAM velocity field (import) | airflow computed by OpenFOAM, mapped onto Dyne's grid | the given airflow that carries temperature, CO2 and humidity | implemented (`dyne-foam velocity`, checked in CI on a synthetic file); not yet run with an OpenFOAM installation |
 
 ```sh
@@ -293,7 +294,21 @@ cargo run --release -p dyne-export --bin dyne-foam -- case --vti wave2d.vti --ou
 cargo run --release -p dyne-export --bin dyne-foam -- velocity flowGrid 0 --vti flow.vti
 ```
 
-These OpenFOAM steps have not yet been run with an OpenFOAM installation, neither in Dyne's tests nor by
+With the room shape (`--shape`: the `.vti` of `dyne-sim2d --vti`, or the `shape.csv` that
+`scripts/twin_live.py` writes from the devices), the grid points inside walls and furniture get no
+cell, and the mesh is written directly as `constant/polyMesh`, so `blockMesh` is not run:
+
+```sh
+cargo run --release -p dyne-export --bin dyne-foam -- case --vti room.vti --shape room.vti --out roomCase
+cd roomCase && checkMesh && scalarTransportFoam
+```
+
+A grid point counts as solid where the signed distance `phi` is negative or where it was not observed
+(`--unobserved fluid` treats unobserved points as free), as in the USD export; only the largest
+connected free region is kept. The choice of this representation is recorded in
+[docs/design/2026-11-18-foam-walls-and-sensor-field.md](docs/design/2026-11-18-foam-walls-and-sensor-field.md).
+
+The other OpenFOAM steps above have not yet been run with an OpenFOAM installation, neither in Dyne's tests nor by
 hand: CI checks only the file format and the bit-for-bit read-back. The details, the mapping of boundary
 types and the differences in the Foundation releases (openfoam.org) are in the documentation of
 `dyne_export::foam` (`cargo doc -p dyne-export --open`). Results of OpenFOAM and Dyne differ by their

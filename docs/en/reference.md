@@ -15,7 +15,7 @@ CI builds it with warnings treated as errors, so every public item is documented
 | `dyne-wire` | the message format exchanged at region borders (wire format v2), the mailbox framing, the envelope used on radio links, and (module `abi`) the constants of the solver interface |
 | `dyne-core` | the deterministic simulator parts: random numbers, event queue in virtual time, virtual network, loading of 1D WebAssembly solvers, transparent boundary coefficients |
 | `dyne-native` | native PC solvers that give the same bits as the WebAssembly solvers, domain splitting, wide borders, convergence checks |
-| `dyne-export` | export to VTK image data and OpenFOAM, import of OpenFOAM velocity fields |
+| `dyne-export` | export to VTK image data and OpenFOAM (also with the walls and furniture of a room shape: modules `walls`, `polymesh`), import of OpenFOAM velocity fields |
 
 ## Solver interface
 

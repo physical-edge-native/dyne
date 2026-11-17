@@ -1,0 +1,52 @@
+/* Written by Dyne (crates/dyne-export, https://github.com/physical-edge-native/dyne).
+   Numbers are in the shortest decimal form that reads back to the same 64-bit float. */
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       polyBoundaryMesh;
+    location    "constant/polyMesh";
+    object      boundary;
+}
+
+6
+(
+    west
+    {
+        type            patch;
+        nFaces          3;
+        startFace       13;
+    }
+    east
+    {
+        type            patch;
+        nFaces          3;
+        startFace       16;
+    }
+    south
+    {
+        type            patch;
+        nFaces          4;
+        startFace       19;
+    }
+    north
+    {
+        type            patch;
+        nFaces          4;
+        startFace       23;
+    }
+    walls
+    {
+        type            wall;
+        inGroups        1(wall);
+        nFaces          4;
+        startFace       27;
+    }
+    frontAndBack
+    {
+        type            empty;
+        inGroups        1(empty);
+        nFaces          22;
+        startFace       31;
+    }
+)

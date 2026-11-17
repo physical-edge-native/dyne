@@ -49,6 +49,14 @@
 #      device replaced while running (issue #7)
 #  16. API documentation of the core crates (dyne-wire, dyne-core, dyne-native, dyne-export): cargo doc with
 #      warnings as errors, so broken links and undocumented public items fail (issue #7)
+#  17. OpenFOAM case with the walls of a room (crates/dyne-export; OpenFOAM itself is not run here): the
+#      shape grid solver builds the furnished room of crates/dyne-sim2d/scenes/room6.txt from simulated
+#      distance sensors (dyne-sim2d, 2x2 split), and dyne-foam writes a case without the cells inside walls
+#      and furniture (patch "walls"). The mesh check without OpenFOAM must pass with one region, and the
+#      cell count, wall face count and CRC-32 of T must be the pinned ones; the same shape read from the
+#      CSV file must give byte-identical mesh files. The small case of crates/dyne-export/tests/fixtures/
+#      foam-walls-4x3 (checked once with OpenFOAM's checkMesh) is compared byte for byte by the unit tests
+#      of step 1 (issue #91)
 #
 # Usage (from the repository root):  bash scripts/ci-check.sh
 set -euo pipefail
@@ -338,6 +346,28 @@ if RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p dyne-wire -p dyne-core -p d
   echo "cargo doc        OK"
 else
   echo "cargo doc        FAIL (warnings in the API documentation)"; fail=1
+fi
+
+echo "== [17] OpenFOAM case with the walls of a simulated room (OpenFOAM not run) (issue #91) =="
+(cd crates/sdf2d-grid-actor && cargo build --release --target wasm32-unknown-unknown)
+WS="crates/sdf2d-grid-actor/target/wasm32-unknown-unknown/release/sdf2d_grid_actor.wasm"
+RD="target/ci-foam-room"
+rm -rf "$RD"; mkdir -p "$RD"
+ROOM_CELLS=2711; ROOM_WALL_FACES=387; ROOM_T_CRC=1e8f4034
+out=$("$SIM2" --wasm "$WS" --scene crates/dyne-sim2d/scenes/room6.txt --px 2 --py 2 --steps 120 --quiet \
+      --vti "$RD/room6.vti" --field-csv "$RD/room6.csv") || true
+if ! printf '%s\n' "$out" | grep -q "PASS (bit-exact)"; then
+  echo "$out"; echo "foam room walls  FAIL (dyne-sim2d run)"; fail=1
+elif ! "$FOAM" case --vti "$RD/room6.vti" --array truth --shape "$RD/room6.vti" --out "$RD/vti" > "$RD/vti.log" 2>&1 \
+     || ! "$FOAM" case --vti "$RD/room6.vti" --array truth --shape "$RD/room6.csv" --out "$RD/csv" > "$RD/csv.log" 2>&1; then
+  cat "$RD/vti.log" "$RD/csv.log"; echo "foam room walls  FAIL (export)"; fail=1
+elif info=$("$FOAM" info "$RD/vti" 2>&1) \
+     && printf '%s\n' "$info" | grep -q "^T: $ROOM_CELLS values, crc32 $ROOM_T_CRC\$" \
+     && printf '%s\n' "$info" | grep -q "^mesh (constant/polyMesh): $ROOM_CELLS cells, .* 1 region(s); .*walls $ROOM_WALL_FACES," \
+     && (for f in points faces owner neighbour boundary; do cmp -s "$RD/vti/constant/polyMesh/$f" "$RD/csv/constant/polyMesh/$f" || exit 1; done); then
+  echo "foam room walls  OK ($ROOM_CELLS cells, $ROOM_WALL_FACES wall faces, T crc32 $ROOM_T_CRC; CSV shape gives the same mesh)"
+else
+  echo "${info:-}"; echo "foam room walls  FAIL (expected $ROOM_CELLS cells, $ROOM_WALL_FACES wall faces, T crc32 $ROOM_T_CRC, same mesh from CSV)"; fail=1
 fi
 
 if [ "$fail" -ne 0 ]; then echo "CI CHECK FAILED"; exit 1; fi
