@@ -17,6 +17,8 @@
 //! - [`walls`] and [`polymesh`]: the room shape built by Dyne's devices (a signed distance field) as
 //!   solid grid points, and the OpenFOAM mesh without them, whose faces towards walls and obstacles form
 //!   the patch `walls`.
+//! - [`sensors`]: an initial field from a few point sensors (inverse-distance weighting), e.g. the
+//!   temperature readings of the devices for the initial `T` of an OpenFOAM case.
 //!
 //! The binary `dyne-vti` prints the grid and the CRC-32 of every array of a `.vti` file written by
 //! this crate ([`field_crc32`], the field hash that Dyne's simulators print). The binary `dyne-foam`
@@ -27,6 +29,7 @@
 
 pub mod foam;
 pub mod polymesh;
+pub mod sensors;
 pub mod vti;
 pub mod walls;
 
