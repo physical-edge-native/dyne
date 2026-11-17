@@ -247,8 +247,8 @@ is in [docs/design/2026-11-17-state-of-the-field.md](docs/design/2026-11-17-stat
   <https://esmci.github.io/cime/versions/master/users_guide/testing.html>).
   Dyne applies the same criterion to a solution split over devices that
   exchange messages over a lossy network and may join or leave while running.
-  Split solutions that are reproducible regardless of the decomposition are also used in ocean and climate models (Hallberg and
-  Adcroft, "An order-invariant real-to-integer conversion sum", *Parallel
+  Split solutions that are reproducible regardless of the decomposition are
+  also used in ocean and climate models (Hallberg and Adcroft, "An order-invariant real-to-integer conversion sum", *Parallel
   Computing* 40, 2014).
 - **Deterministic simulation testing.** FoundationDB (Zhou et al., "FoundationDB:
   A Distributed Unbundled Transactional Key Value Store", *ACM SIGMOD* 2021) and
