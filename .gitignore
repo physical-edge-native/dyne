@@ -111,6 +111,8 @@ slides/**/old25_degradation.jpg
 
 # 書き出しの試験の入力 (crates/dyne-export のテスト用の小さな手書きの CSV。実測ではない) も追跡する (2026-11-18、issue #92)
 !crates/dyne-export/tests/fixtures/*.csv
+# Dummy inputs of the simulator's scenes (room tutorial: dummy thermometer readings, issue #96)
+!crates/dyne-sim2d/scenes/*.csv
 
 # ESP-IDF (vl53-eval/ = VL53L5CX評価用ファーム)
 vl53-eval/build/
