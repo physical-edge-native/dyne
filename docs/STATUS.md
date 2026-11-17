@@ -164,6 +164,19 @@ MTGで見せることを最優先とし、既存の残課題は「後で取り�
 手を付けずに残し、更新は新しい文書で行う(2026-11-08ユーザー指示)。以下の旧ロードマップv3への
 言及は履歴。
 
+### 並行(2026-11-18): Isaac Lab で部屋の USD に Go2 を歩かせる準備(Issue #93、GPU の計算機は未実行)
+
+- 手順書: docs/2026-11-18-isaac-go2-procedure.md(GPU の計算機は Linux、Isaac Sim は導入済み・Isaac Lab は未確認。
+  Isaac Sim の版の調べ方 → Isaac Lab の版の合わせ方 → Go2 の歩行の方策(配布の学習済み、無ければ学習)→ 部屋で実行)
+- 台本: scripts/isaaclab_go2_room.py(案 A = 学習した歩行の方策 + 目標へ向かう単純な規則。上の層も学習する案 B は未着手)。
+  Isaac なしの確認 `--check-only` はこの PC で PASS(ダミーの部屋 room6: Go2 を置ける面積 約 2.2 m²、直線で行ける目標 3 点)。
+  Isaac の部分は未実行。Jetbot の台本(isaac_sim_room.py・isaaclab_room.py・isaaclab_nav_task.py)は残す
+  (isaaclab_room.py は取り込みの確認として手順で使う。isaaclab_nav_task.py は発表には使わない)
+- 調べた版(2026-11-18): Isaac Lab の最新は 3.0.0(Isaac Sim 6.2、Python 3.12、課題の名前・起動の方法が 2.x と違う)。
+  台本は 2.3.2(Isaac Sim 5.1)前提。GPU の計算機の Isaac Sim の版で分かれる
+- ダミーの部屋の USD は usd_check.py で PASS(衝突判定 91 個、正解との外接箱の差 最大 23.4 mm)
+- 次: GPU の計算機で手順書の段階 1〜7(ユーザー)。場所A の部屋の画像・動画は dyne-private へ
+
 ### 今ここ(2026-11-17): 16台の最初の書き込みと、2次元の波動方程式の実機 2×2(場所A)
 
 場所A = 2026-11-27 までの仮の部屋(以後の場所Bと値を直接比べない)。まとめの下書き: docs/2026-11-17-wave2d-hw-day1.md。
