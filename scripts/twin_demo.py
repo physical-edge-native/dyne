@@ -27,6 +27,9 @@
   - ダミー: 温度場。暖房(壁の発熱面)と窓(冷たい面)を置いた定常の熱拡散を部屋の格子
     (家具は熱を通さない)で解いた架空の場。ノードの読み値はその場の値をそのまま
     取ったもの(理想の温度センサ)。Dyne の計算ではない。
+    2026-11-18 (issue #96): --temp-vti で、Dyne の温度場(dyne-sim2d の熱のアクターをダミーの読み値へ
+    ナッジングした場の .vti、配列 u)をこのダミーの代わりに表示・書き出しする(部屋のチュートリアル
+    docs/en/tutorial-room.md)。--temp-readings で温度計の位置と読み値を表示に足す。
   - 家具の高さ: 平面(2 次元)の計算なので高さの情報はない。推定表面の裏側にある場面ファイルの
     家具の高さ(box の 5 番目の値)を使い、外壁は天井まで伸ばす。
 
@@ -398,6 +401,33 @@ def dummy_temperature(sc, bounds, step, heater, window, t_heater, t_window, t_am
     return {"nx": nx, "ny": ny, "x0": x0, "y0": y0, "step": step, "T": T, "free": free}
 
 
+def read_temp_vti(path):
+    """Dyne の温度場 (dyne-sim2d --vti の 2 次元の .vti、配列 u) を温度場の辞書にする (issue #96)。
+    書式は crates/dyne-export/src/vti.rs (生の little endian の Float64、各配列の前に UInt64 のバイト数)"""
+    b = open(path, "rb").read()
+    start = b.index(b'<AppendedData encoding="raw">')
+    head = b[:start].decode("utf-8")
+    base = b.index(b"_", start) + 1
+    ext = [int(v) for v in re.search(r'WholeExtent="([^"]+)"', head).group(1).split()]
+    origin = [float(v) for v in re.search(r'Origin="([^"]+)"', head).group(1).split()]
+    spacing = [float(v) for v in re.search(r'Spacing="([^"]+)"', head).group(1).split()]
+    nx, ny = ext[1] + 1, ext[3] + 1
+    m = re.search(r'Name="u" NumberOfComponents="1" format="appended" offset="(\d+)"', head)
+    if not m or ext[5] != 0:
+        raise SystemExit("%s: 2 次元の .vti で配列 u を持つものが必要" % path)
+    o = base + int(m.group(1))
+    T = np.frombuffer(b, "<f8", nx * ny, o + 8).reshape(ny, nx).copy()
+    return {"nx": nx, "ny": ny, "x0": origin[0], "y0": origin[1], "step": spacing[0], "T": T, "free": None,
+            "source": "dyne"}
+
+
+def read_temp_readings(path):
+    """温度計の読み値の CSV (# で始まる行は注記。列 id,x,y,T)"""
+    with open(path, encoding="utf-8") as f:
+        lines = [l for l in f if l.strip() and not l.startswith("#")]
+    return list(csv.DictReader(lines))
+
+
 def sample_temp(tf, x, y):
     u = (x - tf["x0"]) / tf["step"]
     v = (y - tf["y0"]) / tf["step"]
@@ -601,6 +631,10 @@ def build_parser():
     ap.add_argument("--unobserved-min-w", type=float, default=0.0, help="この重み以下を未観測とみなす")
     ap.add_argument("--json", action="store_true", help="表示のデータを <out>.json にも書く(常駐版のダッシュボードが読む)")
     ap.add_argument("--no-html", action="store_true", help="HTML (<out>.html) を書かない(2026-11-15)")
+    ap.add_argument("--temp-vti", default=None,
+                    help="温度場を Dyne の熱のアクターの結果(dyne-sim2d --vti の .vti、配列 u)にする(既定はダミーの温度場。issue #96)")
+    ap.add_argument("--temp-readings", default=None,
+                    help="温度計の読み値の CSV(id,x,y,T)。位置と読み値を表示に足す(--temp-vti と使う。issue #96)")
     # 旧版との互換(使わない)
     ap.add_argument("--heat-csv")
     ap.add_argument("--temps")
@@ -716,12 +750,24 @@ def export(a, cache=None, quiet=False):
     heater = ((bounds[0], bounds[1] + 0.8), (bounds[0], bounds[1] + 1.8))         # 西の壁の発熱面
     window = ((bounds[0] + 1.3, bounds[3]), (bounds[0] + 2.9, bounds[3]))        # 北の壁の窓
     # 温度場は場面(部屋の形と家具)だけで決まり、推定した形に依らないので、常駐版では場面ごとに 1 回だけ解く
-    temp_key = (scene_key, bounds)
-    tf = cached("temperature", temp_key,
-                lambda: dummy_temperature(sc, bounds, 0.05, heater, window, 30.0, 12.0, 20.0, 1.2))
+    dyne_temp = bool(getattr(a, "temp_vti", None))
+    if dyne_temp:
+        # Dyne の温度場 (issue #96): 熱のアクターをダミーの読み値へナッジングした場
+        temp_key = ("vti", _file_key(a.temp_vti))
+        tf = cached("temperature", temp_key, lambda: read_temp_vti(a.temp_vti))
+    else:
+        temp_key = (scene_key, bounds)
+        tf = cached("temperature", temp_key,
+                    lambda: dummy_temperature(sc, bounds, 0.05, heater, window, 30.0, 12.0, 20.0, 1.2))
     T = tf["T"]
     tmin, tmax = float(np.floor(T.min())), float(np.ceil(T.max()))
-    say("温度場(ダミー): 定常の熱拡散、暖房 30 度・窓 12 度・周囲 20 度、範囲 %.1f〜%.1f 度" % (T.min(), T.max()))
+    if dyne_temp:
+        say("温度場(Dyne の計算): 熱のアクターを温度計の読み値へナッジングした場 %s、範囲 %.1f〜%.1f 度"
+            % (os.path.basename(a.temp_vti), T.min(), T.max()))
+    else:
+        say("温度場(ダミー): 定常の熱拡散、暖房 30 度・窓 12 度・周囲 20 度、範囲 %.1f〜%.1f 度" % (T.min(), T.max()))
+    temp_name = "温度場(Dyne の計算)" if dyne_temp else "温度場(ダミー)"
+    temp_reading_name = "温度(Dyne の場、ノード中心)" if dyne_temp else "温度の読み値(ダミー)"
 
     # --- 3 次元の要素(表示用の木構造)
     prims = []
@@ -796,15 +842,29 @@ def export(a, cache=None, quiet=False):
                 for tri in ((0, 1, 2), (0, 2, 3)):
                     tt.append(tuple((tf["x0"] + P[v][0] * step, tf["y0"] + P[v][1] * step, 0.003) for v in tri))
                     tc += [color_map(T[P[v][1], P[v][0]], tmin, tmax) for v in tri]
-        tprops = {"種類": "温度場(ダミー)", "注意": "架空の定常熱拡散の解。Dyne の計算ではない",
-                  "暖房": "西の壁 y=%.1f〜%.1f m、30 度" % (heater[0][1], heater[1][1]),
-                  "窓": "北の壁 x=%.1f〜%.1f m、12 度" % (window[0][0], window[1][0]),
-                  "範囲": "%.1f〜%.1f 度" % (T.min(), T.max()), "刻み": "%.2f m" % step}
-        add("/Room/TemperatureField", "Scope", tprops, label="温度場(ダミー)")
+        if dyne_temp:
+            tprops = {"種類": temp_name,
+                      "中身": "2 次元の熱のアクターを各ノードで分担して解き、温度計のダミーの読み値へナッジングした場",
+                      "注意": "読み値に近づけたモデルの状態。正解の温度ではない(暖房・窓などの熱源はモデルに無い)",
+                      "範囲": "%.1f〜%.1f 度" % (T.min(), T.max()), "刻み": "%.2f m" % step}
+        else:
+            tprops = {"種類": "温度場(ダミー)", "注意": "架空の定常熱拡散の解。Dyne の計算ではない",
+                      "暖房": "西の壁 y=%.1f〜%.1f m、30 度" % (heater[0][1], heater[1][1]),
+                      "窓": "北の壁 x=%.1f〜%.1f m、12 度" % (window[0][0], window[1][0]),
+                      "範囲": "%.1f〜%.1f 度" % (T.min(), T.max()), "刻み": "%.2f m" % step}
+        add("/Room/TemperatureField", "Scope", tprops, label=temp_name)
         add("/Room/TemperatureField/Floor", "Mesh", tprops, tris=tt, vcolors=tc, label="床の温度")
         tt2 = [tuple((p[0], p[1], a.slice_z) for p in t) for t in tt]
         add("/Room/TemperatureField/Slice", "Mesh", dict(tprops, 高さ="%.2f m(同じ値を表示)" % a.slice_z), tris=tt2, vcolors=tc,
             alpha=0.45, visible=False, label="水平断面 %.1f m" % a.slice_z)
+        if dyne_temp and getattr(a, "temp_readings", None):
+            for r in read_temp_readings(a.temp_readings):
+                x, y, t = float(r["x"]), float(r["y"]), float(r["T"])
+                add("/Room/TemperatureField/Thermometer_%s" % usd_name(r["id"]), "Mesh",
+                    {"種類": "温度計(模擬、ダミーの読み値)", "番号": r["id"], "位置": "(%.2f, %.2f) m" % (x, y),
+                     "読み値": "%.2f 度" % t, "Dyne の場の値": "%.2f 度" % sample_temp(tf, x, y)},
+                    tris=box_tris(x, y, 1.0, 0.05, 0.05, 0.05), color=color_map(t, tmin, tmax),
+                    label="温度計 %s" % r["id"])
         out = prims[n0:]
         del prims[n0:]
         return out
@@ -835,7 +895,7 @@ def export(a, cache=None, quiet=False):
              "観測済みの格子点": "%.0f %%" % ((sub_phi > 0).mean() * 100),
              "隣との境目": len(nd["ifaces"]), "送信": "%d 通 / %.1f kB" % (nd["sent"], nd["bytes"] / 1e3),
              "損失 / 再送": "%d / %d" % (nd["lost"], nd["resend"]), "センサ": len(nd["sensors"]),
-             "温度の読み値(ダミー)": "%.2f 度" % tval},
+             temp_reading_name: "%.2f 度" % tval},
             tris=box_tris(cx, cy, 0.03, 0.10, 0.07, 0.04), color=(0.36, 0.78, 0.45), lines3=border,
             label="ノード %d" % nd["id"])
         for sid in nd["sensors"]:
@@ -861,7 +921,7 @@ def export(a, cache=None, quiet=False):
                 tris=box_tris(s["x"] + 0.03 * math.cos(s["yaw"]), s["y"] + 0.03 * math.sin(s["yaw"]), z, 0.06, 0.035, 0.025, s["yaw"]),
                 color=(0.35, 0.62, 0.98), lines3=rays, label="センサ %d" % sid)
     if readings:
-        stats["温度の読み値(ダミー、ノード中心)"] = "%.1f〜%.1f 度" % (min(readings), max(readings))
+        stats[temp_reading_name if dyne_temp else "温度の読み値(ダミー、ノード中心)"] = "%.1f〜%.1f 度" % (min(readings), max(readings))
 
     # --- 衝突判定の形(推定表面 → 間引いた折れ線 → 物の側へ立てた閉じた板)
     fheights = {"misc": a.furniture_height}
@@ -932,6 +992,15 @@ def export(a, cache=None, quiet=False):
             "log": log, "console": console, "tmin": tmin, "tmax": tmax,
             "cmap": [[s, list(c)] for s, c in CMAP],
             "stamp": {"sequence": a.sequence, "createdUtc": meta["createdUtc"]}}
+    if dyne_temp:
+        # 温度場の出所の表記 (issue #96。twin_demo_view.html が既定のダミーの表記の代わりに出す)
+        data["tempNote"] = "形・温度 = Dyne の分担計算 / 測距・温度計 = 模擬の入力"
+        data["tempLegend"] = "Dyne の計算(読み値へナッジングした熱のモデル)"
+        data["tempAbout"] = ('<p class="note"><b>温度:</b> Dyne の計算。2 次元の熱のアクターを各ノードが自分の区画で解き、'
+                             '温度計のダミーの読み値(架空の定常の場の値に小さな誤差を足したもの)へ毎ステップ引き寄せた'
+                             '(ナッジングした)モデルの状態です。読み値に近づけた推定であって、正解の温度ではありません'
+                             '(暖房・窓などの熱源はモデルに無く、温度計の無い所は拡散でならした値です)。'
+                             '家具の高さは場面ファイルの値です。</p>')
     if a.json:
         # json.dump(ファイル) は Python で書いた遅い符号化器を使うので、C の json.dumps で文字列にしてから書く
         # (出力のバイト列は同じ。2026-11-15)
@@ -983,9 +1052,11 @@ def write_usda(path, sc, segs, cats, groups, a, bounds, tf, nodes, sens_by_id, g
                colliders, meta, ground_extent, usd_temp=None):
     """USD(物理のスキーマつき)を書く。構成は twin_physics.py の冒頭を参照。
     usd_temp: usd_temperature_arrays() の結果(常駐版が使い回す。None ならここで作る)"""
+    dyne_temp = tf.get("source") == "dyne"
     doc = ("Dyne 部屋のデジタルツイン(デモ)。Visual は格子型アクターの符号つき距離場のゼロ等値線を押し出したもの、"
            "Collision は同じ表面から物の側へ立てた閉じた板(静的な衝突判定)。"
-           "測距は理想化した模擬入力、TemperatureField はダミー(架空の定常熱拡散)。")
+           + ("測距は理想化した模擬入力、TemperatureField は Dyne の熱のアクターを温度計のダミーの読み値へナッジングした場。"
+              if dyne_temp else "測距は理想化した模擬入力、TemperatureField はダミー(架空の定常熱拡散)。"))
     W = twin_physics.UsdRoomWriter(doc, meta, ground_extent)
     # 見た目(推定)
     for cat, ks in sorted(groups.items(), key=lambda kv: str(kv[0])):
@@ -1023,7 +1094,8 @@ def write_usda(path, sc, segs, cats, groups, a, bounds, tf, nodes, sens_by_id, g
     W.UsdGeom.Scope.Define(W.stage, "/Room/TemperatureField")
     W.mesh("/Room/TemperatureField/Floor", pts, idx, counts=[4] * ((nx - 1) * (ny - 1)), vcolors=cols,
            primvars={"temperature": (temps, W.UsdGeom.Tokens.vertex)},
-           custom={"dyne:note": ("String", "ダミーの温度場(摂氏)。架空の定常熱拡散の解で、実測でも Dyne の計算でもない")})
+           custom={"dyne:note": ("String", "Dyne の温度場(摂氏)。熱のアクターを温度計のダミーの読み値へナッジングしたモデルの状態で、正解の温度ではない"
+                                 if dyne_temp else "ダミーの温度場(摂氏)。架空の定常熱拡散の解で、実測でも Dyne の計算でもない")})
     # ノードとセンサの目印(衝突判定なし)
     Gf, UsdGeom = W.Gf, W.UsdGeom
     UsdGeom.Scope.Define(W.stage, "/Room/Markers/Nodes")
@@ -1038,7 +1110,8 @@ def write_usda(path, sc, segs, cats, groups, a, bounds, tf, nodes, sens_by_id, g
         pr.CreateAttribute("dyne:nodeId", W.Sdf.ValueTypeNames.Int, custom=True).Set(nd["id"])
         pr.CreateAttribute("dyne:regionMin", W.Sdf.ValueTypeNames.Double2, custom=True).Set(Gf.Vec2d(x0n, y0n))
         pr.CreateAttribute("dyne:regionMax", W.Sdf.ValueTypeNames.Double2, custom=True).Set(Gf.Vec2d(x1n, y1n))
-        pr.CreateAttribute("dyne:temperatureDummy", W.Sdf.ValueTypeNames.Double, custom=True).Set(sample_temp(tf, cx, cy))
+        pr.CreateAttribute("dyne:temperature" if dyne_temp else "dyne:temperatureDummy", W.Sdf.ValueTypeNames.Double,
+                           custom=True).Set(sample_temp(tf, cx, cy))
         body = UsdGeom.Cube.Define(W.stage, base + "/Body")
         body.CreateSizeAttr(0.06)
         body.CreateDisplayColorAttr([Gf.Vec3f(0.36, 0.78, 0.45)])
