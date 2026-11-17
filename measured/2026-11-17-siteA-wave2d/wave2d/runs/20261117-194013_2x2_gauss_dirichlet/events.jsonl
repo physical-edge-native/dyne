@@ -1,0 +1,70 @@
+{"t": 1794912013.685, "topic": "dyne/node/4/status", "msg": {"state": "offline", "reason": "lwt"}}
+{"t": 1794912013.685, "topic": "dyne/node/168/status", "msg": {"state": "offline", "reason": "lwt"}}
+{"t": 1794912013.685, "topic": "dyne/node/244/status", "msg": {"state": "offline", "reason": "lwt"}}
+{"t": 1794912013.685, "topic": "dyne/node/76/status", "msg": {"state": "offline", "reason": "lwt"}}
+{"t": 1794912013.685, "topic": "dyne/node/232/status", "msg": {"state": "done", "idx": 3, "up_s": 707, "wire": 2, "crc32": "0xC67B53C5", "sent": 800, "resend": 4, "replay": 2, "echo": 0, "stall_reports": 0, "bad_env": 0, "rejected": 0, "missing": 0, "dropped": 0}}
+{"t": 1794912013.685, "topic": "dyne/node/200/status", "msg": {"state": "offline", "reason": "lwt"}}
+{"t": 1794912013.685, "topic": "dyne/node/124/status", "msg": {"state": "offline", "reason": "lwt"}}
+{"t": 1794912013.686, "topic": "dyne/node/192/status", "msg": {"state": "offline", "reason": "lwt"}}
+{"t": 1794912013.686, "topic": "dyne/node/236/status", "msg": {"state": "offline", "reason": "lwt"}}
+{"t": 1794912013.686, "topic": "dyne/node/140/status", "msg": {"state": "offline", "reason": "lwt"}}
+{"t": 1794912013.686, "topic": "dyne/node/40/status", "msg": {"state": "offline", "reason": "lwt"}}
+{"t": 1794912013.686, "topic": "dyne/node/204/status", "msg": {"state": "offline", "reason": "lwt"}}
+{"t": 1794912013.686, "topic": "dyne/node/84/status", "msg": {"state": "offline", "reason": "lwt"}}
+{"t": 1794912013.686, "topic": "dyne/node/172/status", "msg": {"state": "done", "idx": 1, "up_s": 931, "wire": 2, "crc32": "0x78C7037B", "sent": 800, "resend": 2, "replay": 4, "echo": 1, "stall_reports": 0, "bad_env": 0, "rejected": 0, "missing": 0, "dropped": 0}}
+{"t": 1794912013.686, "topic": "dyne/node/56/status", "msg": {"state": "done", "idx": 0, "up_s": 2549, "wire": 2, "crc32": "0x41B5CB48", "sent": 800, "resend": 4, "replay": 7, "echo": 0, "stall_reports": 0, "bad_env": 0, "rejected": 0, "missing": 0, "dropped": 0}}
+{"t": 1794912013.686, "topic": "dyne/node/201/status", "msg": {"state": "done", "idx": 2, "up_s": 65, "wire": 2, "crc32": "0x430A079E", "sent": 800, "resend": 2, "replay": 7, "echo": 3, "stall_reports": 0, "bad_env": 0, "rejected": 0, "missing": 0, "dropped": 0}}
+{"t": 1794912015.209, "topic": "dyne/cfg/172/ack", "msg": {"ok": true, "idx": 1, "gen": 1794912015, "crc32": "0x9CD6D123", "wire": 2}}
+{"t": 1794912015.209, "topic": "dyne/cfg/56/ack", "msg": {"ok": true, "idx": 0, "gen": 1794912015, "crc32": "0x5ED213FD", "wire": 2}}
+{"t": 1794912015.21, "topic": "dyne/cfg/201/ack", "msg": {"ok": true, "idx": 2, "gen": 1794912015, "crc32": "0xE4AEAE80", "wire": 2}}
+{"t": 1794912015.211, "topic": "dyne/cfg/232/ack", "msg": {"ok": true, "idx": 3, "gen": 1794912015, "crc32": "0xA048738C", "wire": 2}}
+{"t": 1794912015.212, "topic": "dyne/node/56/status", "msg": {"state": "configured", "idx": 0, "up_s": 2614, "gen": 1794912015}}
+{"t": 1794912015.213, "topic": "dyne/node/172/status", "msg": {"state": "configured", "idx": 1, "up_s": 997, "gen": 1794912015}}
+{"t": 1794912015.215, "topic": "dyne/node/201/status", "msg": {"state": "configured", "idx": 2, "up_s": 131, "gen": 1794912015}}
+{"t": 1794912015.216, "topic": "dyne/node/232/status", "msg": {"state": "configured", "idx": 3, "up_s": 773, "gen": 1794912015}}
+{"t": 1794912015.494, "topic": "dyne/node/232/status", "msg": {"state": "running", "idx": 3, "up_s": 773, "step": 0}}
+{"t": 1794912015.494, "topic": "dyne/node/172/status", "msg": {"state": "running", "idx": 1, "up_s": 997, "step": 0}}
+{"t": 1794912015.497, "topic": "dyne/node/201/status", "msg": {"state": "running", "idx": 2, "up_s": 131, "step": 0}}
+{"t": 1794912015.505, "topic": "dyne/node/56/status", "msg": {"state": "running", "idx": 0, "up_s": 2615, "step": 0}}
+{"t": 1794912029.046, "topic": "dyne/node/201/status", "msg": {"state": "running", "idx": 2, "up_s": 144, "step": 100}}
+{"t": 1794912029.049, "topic": "dyne/node/172/status", "msg": {"state": "running", "idx": 1, "up_s": 1011, "step": 100}}
+{"t": 1794912029.053, "topic": "dyne/node/232/status", "msg": {"state": "running", "idx": 3, "up_s": 787, "step": 100}}
+{"t": 1794912029.058, "topic": "dyne/node/56/status", "msg": {"state": "running", "idx": 0, "up_s": 2628, "step": 100}}
+{"t": 1794912029.059, "topic": "dyne/node/1/field2d", "msg": {"step": 99, "nx": 40, "ny": 41, "ix0": 41, "iy0": 0, "crc32": "0xDC026C93", "min": -0.06336018503068849, "max": 0.11288963702174466}}
+{"t": 1794912029.061, "topic": "dyne/node/2/field2d", "msg": {"step": 99, "nx": 41, "ny": 40, "ix0": 0, "iy0": 41, "crc32": "0x576780EE", "min": -0.0325168217346136, "max": 0.004793803832278116}}
+{"t": 1794912029.066, "topic": "dyne/node/3/field2d", "msg": {"step": 99, "nx": 40, "ny": 40, "ix0": 41, "iy0": 41, "crc32": "0x0DDED5A5", "min": -0.07416496574140942, "max": 0.11143695327626435}}
+{"t": 1794912029.068, "topic": "dyne/node/0/field2d", "msg": {"step": 99, "nx": 41, "ny": 41, "ix0": 0, "iy0": 0, "crc32": "0x49DA01A0", "min": -0.08104670023971232, "max": 0.10220398525768407}}
+{"t": 1794912030.066, "topic": "dyne/node/2/rt", "msg": {"step": 99, "window": 100, "step_ms": {"mean": 132.673}, "compute_ms": {"mean": 113.068}, "wire": 2}}
+{"t": 1794912030.067, "topic": "dyne/node/1/rt", "msg": {"step": 99, "window": 100, "step_ms": {"mean": 132.774}, "compute_ms": {"mean": 112.917}, "wire": 2}}
+{"t": 1794912030.073, "topic": "dyne/node/3/rt", "msg": {"step": 99, "window": 100, "step_ms": {"mean": 132.88}, "compute_ms": {"mean": 111.418}, "wire": 2}}
+{"t": 1794912030.074, "topic": "dyne/node/0/rt", "msg": {"step": 99, "window": 100, "step_ms": {"mean": 132.66}, "compute_ms": {"mean": 113.666}, "wire": 2}}
+{"t": 1794912040.25, "topic": "dyne/node/172/status", "msg": {"state": "running", "idx": 1, "up_s": 1022, "stall": true, "step": 109, "wait_ms": 10003, "missing": [3], "sent": 220, "resend": 468, "replay": 3, "echo": 1, "bad_env": 0}}
+{"t": 1794912040.25, "topic": "dyne/node/201/status", "msg": {"state": "running", "idx": 2, "up_s": 156, "stall": true, "step": 109, "wait_ms": 10003, "missing": [1], "sent": 220, "resend": 439, "replay": 1, "echo": 1, "bad_env": 0}}
+{"t": 1794912040.397, "topic": "dyne/node/56/status", "msg": {"state": "running", "idx": 0, "up_s": 2639, "stall": true, "step": 110, "wait_ms": 10020, "missing": [0, 2], "sent": 222, "resend": 948, "replay": 4, "echo": 0, "bad_env": 0}}
+{"t": 1794912050.248, "topic": "dyne/node/201/status", "msg": {"state": "running", "idx": 2, "up_s": 166, "stall": true, "step": 109, "wait_ms": 20001, "missing": [1], "sent": 220, "resend": 892, "replay": 1, "echo": 1, "bad_env": 0}}
+{"t": 1794912050.267, "topic": "dyne/node/172/status", "msg": {"state": "running", "idx": 1, "up_s": 1032, "stall": true, "step": 109, "wait_ms": 20019, "missing": [3], "sent": 220, "resend": 935, "replay": 3, "echo": 1, "bad_env": 0}}
+{"t": 1794912050.392, "topic": "dyne/node/56/status", "msg": {"state": "running", "idx": 0, "up_s": 2649, "stall": true, "step": 110, "wait_ms": 20015, "missing": [0, 2], "sent": 222, "resend": 1898, "replay": 4, "echo": 0, "bad_env": 0}}
+{"t": 1794912060.26, "topic": "dyne/node/172/status", "msg": {"state": "running", "idx": 1, "up_s": 1042, "stall": true, "step": 109, "wait_ms": 30012, "missing": [3], "sent": 220, "resend": 1400, "replay": 3, "echo": 1, "bad_env": 0}}
+{"t": 1794912060.261, "topic": "dyne/node/201/status", "msg": {"state": "running", "idx": 2, "up_s": 176, "stall": true, "step": 109, "wait_ms": 30013, "missing": [1], "sent": 220, "resend": 1361, "replay": 1, "echo": 1, "bad_env": 0}}
+{"t": 1794912060.384, "topic": "dyne/node/56/status", "msg": {"state": "running", "idx": 0, "up_s": 2659, "stall": true, "step": 110, "wait_ms": 30007, "missing": [0, 2], "sent": 222, "resend": 2848, "replay": 4, "echo": 0, "bad_env": 0}}
+{"t": 1794912070.249, "topic": "dyne/node/172/status", "msg": {"state": "running", "idx": 1, "up_s": 1052, "stall": true, "step": 109, "wait_ms": 40003, "missing": [3], "sent": 220, "resend": 1852, "replay": 3, "echo": 1, "bad_env": 0}}
+{"t": 1794912070.251, "topic": "dyne/node/201/status", "msg": {"state": "running", "idx": 2, "up_s": 186, "stall": true, "step": 109, "wait_ms": 40004, "missing": [1], "sent": 220, "resend": 1829, "replay": 1, "echo": 1, "bad_env": 0}}
+{"t": 1794912070.395, "topic": "dyne/node/56/status", "msg": {"state": "running", "idx": 0, "up_s": 2669, "stall": true, "step": 110, "wait_ms": 40018, "missing": [0, 2], "sent": 222, "resend": 3800, "replay": 4, "echo": 0, "bad_env": 0}}
+{"t": 1794912080.29, "topic": "dyne/node/172/status", "msg": {"state": "running", "idx": 1, "up_s": 1062, "stall": true, "step": 109, "wait_ms": 50012, "missing": [3], "sent": 220, "resend": 2309, "replay": 3, "echo": 1, "bad_env": 0}}
+{"t": 1794912080.29, "topic": "dyne/node/201/status", "msg": {"state": "running", "idx": 2, "up_s": 196, "stall": true, "step": 109, "wait_ms": 50012, "missing": [1], "sent": 220, "resend": 2301, "replay": 1, "echo": 1, "bad_env": 0}}
+{"t": 1794912080.384, "topic": "dyne/node/56/status", "msg": {"state": "running", "idx": 0, "up_s": 2679, "stall": true, "step": 110, "wait_ms": 50007, "missing": [0, 2], "sent": 222, "resend": 4750, "replay": 4, "echo": 0, "bad_env": 0}}
+{"t": 1794912090.249, "topic": "dyne/node/172/status", "msg": {"state": "running", "idx": 1, "up_s": 1072, "stall": true, "step": 109, "wait_ms": 60002, "missing": [3], "sent": 220, "resend": 2761, "replay": 3, "echo": 1, "bad_env": 0}}
+{"t": 1794912090.25, "topic": "dyne/node/201/status", "msg": {"state": "running", "idx": 2, "up_s": 206, "stall": true, "step": 109, "wait_ms": 60003, "missing": [1], "sent": 220, "resend": 2767, "replay": 1, "echo": 1, "bad_env": 0}}
+{"t": 1794912090.396, "topic": "dyne/node/56/status", "msg": {"state": "running", "idx": 0, "up_s": 2689, "stall": true, "step": 110, "wait_ms": 60017, "missing": [0, 2], "sent": 222, "resend": 5700, "replay": 4, "echo": 0, "bad_env": 0}}
+{"t": 1794912100.257, "topic": "dyne/node/172/status", "msg": {"state": "running", "idx": 1, "up_s": 1082, "stall": true, "step": 109, "wait_ms": 70010, "missing": [3], "sent": 220, "resend": 3227, "replay": 3, "echo": 1, "bad_env": 0}}
+{"t": 1794912100.258, "topic": "dyne/node/201/status", "msg": {"state": "running", "idx": 2, "up_s": 216, "stall": true, "step": 109, "wait_ms": 70011, "missing": [1], "sent": 220, "resend": 3237, "replay": 1, "echo": 1, "bad_env": 0}}
+{"t": 1794912100.382, "topic": "dyne/node/56/status", "msg": {"state": "running", "idx": 0, "up_s": 2699, "stall": true, "step": 110, "wait_ms": 70005, "missing": [0, 2], "sent": 222, "resend": 6648, "replay": 4, "echo": 0, "bad_env": 0}}
+{"t": 1794912110.253, "topic": "dyne/node/172/status", "msg": {"state": "running", "idx": 1, "up_s": 1092, "stall": true, "step": 109, "wait_ms": 80005, "missing": [3], "sent": 220, "resend": 3694, "replay": 3, "echo": 1, "bad_env": 0}}
+{"t": 1794912110.255, "topic": "dyne/node/201/status", "msg": {"state": "running", "idx": 2, "up_s": 226, "stall": true, "step": 109, "wait_ms": 80007, "missing": [1], "sent": 220, "resend": 3700, "replay": 1, "echo": 1, "bad_env": 0}}
+{"t": 1794912110.399, "topic": "dyne/node/56/status", "msg": {"state": "running", "idx": 0, "up_s": 2709, "stall": true, "step": 110, "wait_ms": 80020, "missing": [0, 2], "sent": 222, "resend": 7600, "replay": 4, "echo": 0, "bad_env": 0}}
+{"t": 1794912120.262, "topic": "dyne/node/172/status", "msg": {"state": "running", "idx": 1, "up_s": 1102, "stall": true, "step": 109, "wait_ms": 90011, "missing": [3], "sent": 220, "resend": 4168, "replay": 3, "echo": 1, "bad_env": 0}}
+{"t": 1794912120.262, "topic": "dyne/node/201/status", "msg": {"state": "running", "idx": 2, "up_s": 236, "stall": true, "step": 109, "wait_ms": 90013, "missing": [1], "sent": 220, "resend": 4163, "replay": 1, "echo": 1, "bad_env": 0}}
+{"t": 1794912120.383, "topic": "dyne/node/56/status", "msg": {"state": "running", "idx": 0, "up_s": 2719, "stall": true, "step": 110, "wait_ms": 90007, "missing": [0, 2], "sent": 222, "resend": 8550, "replay": 4, "echo": 0, "bad_env": 0}}
+{"t": 1794912130.263, "topic": "dyne/node/172/status", "msg": {"state": "running", "idx": 1, "up_s": 1112, "stall": true, "step": 109, "wait_ms": 100017, "missing": [3], "sent": 220, "resend": 4638, "replay": 3, "echo": 1, "bad_env": 0}}
+{"t": 1794912130.264, "topic": "dyne/node/201/status", "msg": {"state": "running", "idx": 2, "up_s": 246, "stall": true, "step": 109, "wait_ms": 100017, "missing": [1], "sent": 220, "resend": 4614, "replay": 1, "echo": 1, "bad_env": 0}}
+{"t": 1794912130.388, "topic": "dyne/node/56/status", "msg": {"state": "running", "idx": 0, "up_s": 2729, "stall": true, "step": 110, "wait_ms": 100011, "missing": [0, 2], "sent": 222, "resend": 9502, "replay": 4, "echo": 0, "bad_env": 0}}

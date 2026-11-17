@@ -1,0 +1,106 @@
+{
+ "layout": "3x1",
+ "scene": "gauss_dirichlet",
+ "steps": 400,
+ "test_drop": 0.0,
+ "rt_every": 100,
+ "gen": 1794909430,
+ "nodes": [
+  56,
+  172,
+  201
+ ],
+ "pass": false,
+ "timed_out": false,
+ "stalls": [],
+ "seconds": 0.2,
+ "rows": [
+  {
+   "idx": 0,
+   "node": 56,
+   "ip_port": "192.168.50.116:7777",
+   "expected": "0xC12A08CF",
+   "got": "",
+   "match": "NO",
+   "minmax_match": "",
+   "state": "err",
+   "last_step": 0,
+   "sent": "",
+   "resend": "",
+   "replay": "",
+   "echo": "",
+   "stall_reports": "",
+   "missing": "",
+   "test_dropped": "",
+   "wait_ms_n": "",
+   "wait_ms_median": "",
+   "wait_ms_p95": "",
+   "wait_ms_max": ""
+  },
+  {
+   "idx": 1,
+   "node": 172,
+   "ip_port": "192.168.50.115:7777",
+   "expected": "0x53BC73A5",
+   "got": "",
+   "match": "NO",
+   "minmax_match": "",
+   "state": "err",
+   "last_step": 0,
+   "sent": "",
+   "resend": "",
+   "replay": "",
+   "echo": "",
+   "stall_reports": "",
+   "missing": "",
+   "test_dropped": "",
+   "wait_ms_n": "",
+   "wait_ms_median": "",
+   "wait_ms_p95": "",
+   "wait_ms_max": ""
+  },
+  {
+   "idx": 2,
+   "node": 201,
+   "ip_port": "192.168.50.108:7777",
+   "expected": "0x61AF2D0C",
+   "got": "",
+   "match": "NO",
+   "minmax_match": "",
+   "state": "err",
+   "last_step": 0,
+   "sent": "",
+   "resend": "",
+   "replay": "",
+   "echo": "",
+   "stall_reports": "",
+   "missing": "",
+   "test_dropped": "",
+   "wait_ms_n": "",
+   "wait_ms_median": "",
+   "wait_ms_p95": "",
+   "wait_ms_max": ""
+  }
+ ],
+ "done": {},
+ "err": {
+  "172": {
+   "state": "err",
+   "idx": 1,
+   "up_s": 27,
+   "err": "dyne_init2d failed rc=-1"
+  },
+  "201": {
+   "state": "err",
+   "idx": 2,
+   "up_s": 25,
+   "err": "dyne_init2d failed rc=-1"
+  },
+  "56": {
+   "state": "err",
+   "idx": 0,
+   "up_s": 30,
+   "err": "dyne_init2d failed rc=-1"
+  }
+ }
+}

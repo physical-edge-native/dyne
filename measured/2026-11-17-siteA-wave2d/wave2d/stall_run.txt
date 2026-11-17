@@ -1,0 +1,66 @@
+== gauss_dirichlet 2x2 (4 nodes), 4000 steps; dyne-sim2d whole field crc32: split a830effd single a830effd
+idx node state       ip:port                actor (online)         block
+  0   56 done        192.168.50.116:7777    ?                      (0,0) 41x41
+  1  172 done        192.168.50.115:7777    ?                      (41,0) 40x41
+  2  201 done        192.168.50.108:7777    ?                      (0,41) 41x40
+  3  232 done        192.168.50.105:7777    ?                      (41,41) 40x40
+published 4 configurations (gen 1794912015, retained); waiting for the acks
+all 4 acks ok (gen 1794912015, payload CRC32 match, wire 2)
+start sent to 4 nodes
+  t = 10 s, steps reported: 56:0 172:0 201:0 232:0
+  t = 20 s, steps reported: 56:100 172:100 201:100 232:100
+STALL  node 172 (idx 1) at step 109, waited 10003 ms, missing: iface 3 from idx 3 (node 232)  [sent 220 resend 468 echo 1]
+STALL  node 201 (idx 2) at step 109, waited 10003 ms, missing: iface 1 from idx 3 (node 232)  [sent 220 resend 439 echo 1]
+STALL  node 56 (idx 0) at step 110, waited 10020 ms, missing: iface 0 from idx 1 (node 172), iface 2 from idx 2 (node 201)  [sent 222 resend 948 echo 0]
+  t = 30 s, steps reported: 56:100 172:100 201:100 232:100
+STALL  node 201 (idx 2) at step 109, waited 20001 ms, missing: iface 1 from idx 3 (node 232)  [sent 220 resend 892 echo 1]
+STALL  node 172 (idx 1) at step 109, waited 20019 ms, missing: iface 3 from idx 3 (node 232)  [sent 220 resend 935 echo 1]
+STALL  node 56 (idx 0) at step 110, waited 20015 ms, missing: iface 0 from idx 1 (node 172), iface 2 from idx 2 (node 201)  [sent 222 resend 1898 echo 0]
+  t = 40 s, steps reported: 56:100 172:100 201:100 232:100
+STALL  node 172 (idx 1) at step 109, waited 30012 ms, missing: iface 3 from idx 3 (node 232)  [sent 220 resend 1400 echo 1]
+STALL  node 201 (idx 2) at step 109, waited 30013 ms, missing: iface 1 from idx 3 (node 232)  [sent 220 resend 1361 echo 1]
+STALL  node 56 (idx 0) at step 110, waited 30007 ms, missing: iface 0 from idx 1 (node 172), iface 2 from idx 2 (node 201)  [sent 222 resend 2848 echo 0]
+  t = 50 s, steps reported: 56:100 172:100 201:100 232:100
+STALL  node 172 (idx 1) at step 109, waited 40003 ms, missing: iface 3 from idx 3 (node 232)  [sent 220 resend 1852 echo 1]
+STALL  node 201 (idx 2) at step 109, waited 40004 ms, missing: iface 1 from idx 3 (node 232)  [sent 220 resend 1829 echo 1]
+STALL  node 56 (idx 0) at step 110, waited 40018 ms, missing: iface 0 from idx 1 (node 172), iface 2 from idx 2 (node 201)  [sent 222 resend 3800 echo 0]
+  t = 60 s, steps reported: 56:100 172:100 201:100 232:100
+STALL  node 172 (idx 1) at step 109, waited 50012 ms, missing: iface 3 from idx 3 (node 232)  [sent 220 resend 2309 echo 1]
+STALL  node 201 (idx 2) at step 109, waited 50012 ms, missing: iface 1 from idx 3 (node 232)  [sent 220 resend 2301 echo 1]
+STALL  node 56 (idx 0) at step 110, waited 50007 ms, missing: iface 0 from idx 1 (node 172), iface 2 from idx 2 (node 201)  [sent 222 resend 4750 echo 0]
+  t = 70 s, steps reported: 56:100 172:100 201:100 232:100
+STALL  node 172 (idx 1) at step 109, waited 60002 ms, missing: iface 3 from idx 3 (node 232)  [sent 220 resend 2761 echo 1]
+STALL  node 201 (idx 2) at step 109, waited 60003 ms, missing: iface 1 from idx 3 (node 232)  [sent 220 resend 2767 echo 1]
+STALL  node 56 (idx 0) at step 110, waited 60017 ms, missing: iface 0 from idx 1 (node 172), iface 2 from idx 2 (node 201)  [sent 222 resend 5700 echo 0]
+  t = 80 s, steps reported: 56:100 172:100 201:100 232:100
+STALL  node 172 (idx 1) at step 109, waited 70010 ms, missing: iface 3 from idx 3 (node 232)  [sent 220 resend 3227 echo 1]
+STALL  node 201 (idx 2) at step 109, waited 70011 ms, missing: iface 1 from idx 3 (node 232)  [sent 220 resend 3237 echo 1]
+STALL  node 56 (idx 0) at step 110, waited 70005 ms, missing: iface 0 from idx 1 (node 172), iface 2 from idx 2 (node 201)  [sent 222 resend 6648 echo 0]
+  t = 90 s, steps reported: 56:100 172:100 201:100 232:100
+STALL  node 172 (idx 1) at step 109, waited 80005 ms, missing: iface 3 from idx 3 (node 232)  [sent 220 resend 3694 echo 1]
+STALL  node 201 (idx 2) at step 109, waited 80007 ms, missing: iface 1 from idx 3 (node 232)  [sent 220 resend 3700 echo 1]
+STALL  node 56 (idx 0) at step 110, waited 80020 ms, missing: iface 0 from idx 1 (node 172), iface 2 from idx 2 (node 201)  [sent 222 resend 7600 echo 0]
+  t = 100 s, steps reported: 56:100 172:100 201:100 232:100
+STALL  node 172 (idx 1) at step 109, waited 90011 ms, missing: iface 3 from idx 3 (node 232)  [sent 220 resend 4168 echo 1]
+STALL  node 201 (idx 2) at step 109, waited 90013 ms, missing: iface 1 from idx 3 (node 232)  [sent 220 resend 4163 echo 1]
+STALL  node 56 (idx 0) at step 110, waited 90007 ms, missing: iface 0 from idx 1 (node 172), iface 2 from idx 2 (node 201)  [sent 222 resend 8550 echo 0]
+  t = 110 s, steps reported: 56:100 172:100 201:100 232:100
+STALL  node 172 (idx 1) at step 109, waited 100017 ms, missing: iface 3 from idx 3 (node 232)  [sent 220 resend 4638 echo 1]
+STALL  node 201 (idx 2) at step 109, waited 100017 ms, missing: iface 1 from idx 3 (node 232)  [sent 220 resend 4614 echo 1]
+STALL  node 56 (idx 0) at step 110, waited 100011 ms, missing: iface 0 from idx 1 (node 172), iface 2 from idx 2 (node 201)  [sent 222 resend 9502 echo 0]
+
+idx node expected   got        match min/max   sent resend replay  echo stall dropped
+  0   56 0xF3371186 timeout    NO    -                                               
+  1  172 0xC436142B timeout    NO    -                                               
+  2  201 0x9702BC1D timeout    NO    -                                               
+  3  232 0x5403A3BC timeout    NO    -                                               
+
+exchange wait per step = step_ms - compute_ms [ms], over the rt reports (each the mean of 100 steps; --rt-every 1 gives per-step values)
+idx node reports   median      p95      max
+  0   56       1   18.994   18.994   18.994
+  1  172       1   19.857   19.857   19.857
+  2  201       1   19.605   19.605   19.605
+  3  232       1   21.462   21.462   21.462
+record: wave2d_out\20261117-194013_2x2_gauss_dirichlet
+FAIL: 0/4 nodes match dyne-sim2d; timeout after 120 s (4 nodes not done)
+sent stop to the nodes that did not finish

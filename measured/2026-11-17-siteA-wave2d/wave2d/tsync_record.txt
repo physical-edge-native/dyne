@@ -1,0 +1,8 @@
+送信: {'cmd': 'timesync', 'server': '192.168.50.1', 'port': 12300, 'report_every': 1} → ['all']
+600 秒記録する
+記録 1380 行: wave2d_out/tsync_rtt_oneway.csv (追記。列は最初の書き込み時のもの)
+node    n rtt_min_us rtt_med_us |resid|med_us |resid|max_us drift_ppm pps_late_max
+  56  286       2560       4108           194           958      2.06            0
+ 172  285       2627       4084           204           987    -12.98            0
+ 201  284       3037       4268            98           870     -5.08            0
+ 232  284       3588       4208           108           583     -0.32            0

@@ -1,0 +1,80 @@
+{"t": 1794914171.205, "topic": "dyne/node/4/status", "msg": {"state": "offline", "reason": "lwt"}}
+{"t": 1794914171.205, "topic": "dyne/node/168/status", "msg": {"state": "offline", "reason": "lwt"}}
+{"t": 1794914171.205, "topic": "dyne/node/244/status", "msg": {"state": "offline", "reason": "lwt"}}
+{"t": 1794914171.205, "topic": "dyne/node/76/status", "msg": {"state": "offline", "reason": "lwt"}}
+{"t": 1794914171.205, "topic": "dyne/node/232/status", "msg": {"state": "done", "idx": 3, "up_s": 96, "wire": 2, "crc32": "0x7B3D7C5C", "sent": 800, "resend": 1, "replay": 4, "echo": 0, "stall_reports": 0, "bad_env": 0, "rejected": 0, "missing": 0, "dropped": 0}}
+{"t": 1794914171.206, "topic": "dyne/node/200/status", "msg": {"state": "offline", "reason": "lwt"}}
+{"t": 1794914171.206, "topic": "dyne/node/124/status", "msg": {"state": "offline", "reason": "lwt"}}
+{"t": 1794914171.206, "topic": "dyne/node/192/status", "msg": {"state": "offline", "reason": "lwt"}}
+{"t": 1794914171.206, "topic": "dyne/node/236/status", "msg": {"state": "offline", "reason": "lwt"}}
+{"t": 1794914171.206, "topic": "dyne/node/140/status", "msg": {"state": "offline", "reason": "lwt"}}
+{"t": 1794914171.206, "topic": "dyne/node/40/status", "msg": {"state": "offline", "reason": "lwt"}}
+{"t": 1794914171.206, "topic": "dyne/node/204/status", "msg": {"state": "offline", "reason": "lwt"}}
+{"t": 1794914171.206, "topic": "dyne/node/84/status", "msg": {"state": "offline", "reason": "lwt"}}
+{"t": 1794914171.206, "topic": "dyne/node/172/status", "msg": {"state": "done", "idx": 1, "up_s": 96, "wire": 2, "crc32": "0xCAB30D63", "sent": 800, "resend": 3, "replay": 2, "echo": 1, "stall_reports": 0, "bad_env": 0, "rejected": 0, "missing": 0, "dropped": 0}}
+{"t": 1794914171.206, "topic": "dyne/node/56/status", "msg": {"state": "done", "idx": 0, "up_s": 96, "wire": 2, "crc32": "0xB3E5371A", "sent": 800, "resend": 4, "replay": 3, "echo": 0, "stall_reports": 0, "bad_env": 0, "rejected": 0, "missing": 0, "dropped": 0}}
+{"t": 1794914171.206, "topic": "dyne/node/201/status", "msg": {"state": "done", "idx": 2, "up_s": 93, "wire": 2, "crc32": "0x234F06AC", "sent": 800, "resend": 2, "replay": 3, "echo": 1, "stall_reports": 0, "bad_env": 0, "rejected": 0, "missing": 0, "dropped": 0}}
+{"t": 1794914172.751, "topic": "dyne/cfg/56/ack", "msg": {"ok": true, "idx": 0, "gen": 1794914172, "crc32": "0x86129703", "wire": 2}}
+{"t": 1794914172.754, "topic": "dyne/cfg/172/ack", "msg": {"ok": true, "idx": 1, "gen": 1794914172, "crc32": "0xC60BCEBC", "wire": 2}}
+{"t": 1794914172.754, "topic": "dyne/cfg/201/ack", "msg": {"ok": true, "idx": 2, "gen": 1794914172, "crc32": "0xBE73B11F", "wire": 2}}
+{"t": 1794914172.754, "topic": "dyne/cfg/232/ack", "msg": {"ok": true, "idx": 3, "gen": 1794914172, "crc32": "0xC0A22046", "wire": 2}}
+{"t": 1794914172.756, "topic": "dyne/node/56/status", "msg": {"state": "configured", "idx": 0, "up_s": 201, "gen": 1794914172}}
+{"t": 1794914172.759, "topic": "dyne/node/172/status", "msg": {"state": "configured", "idx": 1, "up_s": 201, "gen": 1794914172}}
+{"t": 1794914172.759, "topic": "dyne/node/232/status", "msg": {"state": "configured", "idx": 3, "up_s": 201, "gen": 1794914172}}
+{"t": 1794914172.76, "topic": "dyne/node/201/status", "msg": {"state": "configured", "idx": 2, "up_s": 198, "gen": 1794914172}}
+{"t": 1794914173.004, "topic": "dyne/node/172/status", "msg": {"state": "running", "idx": 1, "up_s": 202, "step": 0}}
+{"t": 1794914173.005, "topic": "dyne/node/56/status", "msg": {"state": "running", "idx": 0, "up_s": 202, "step": 0}}
+{"t": 1794914173.006, "topic": "dyne/node/201/status", "msg": {"state": "running", "idx": 2, "up_s": 198, "step": 0}}
+{"t": 1794914173.006, "topic": "dyne/node/232/status", "msg": {"state": "running", "idx": 3, "up_s": 201, "step": 0}}
+{"t": 1794914186.232, "topic": "dyne/node/172/status", "msg": {"state": "running", "idx": 1, "up_s": 215, "step": 100}}
+{"t": 1794914186.232, "topic": "dyne/node/232/status", "msg": {"state": "running", "idx": 3, "up_s": 215, "step": 100}}
+{"t": 1794914186.233, "topic": "dyne/node/201/status", "msg": {"state": "running", "idx": 2, "up_s": 211, "step": 100}}
+{"t": 1794914186.237, "topic": "dyne/node/56/status", "msg": {"state": "running", "idx": 0, "up_s": 215, "step": 100}}
+{"t": 1794914187.248, "topic": "dyne/node/1/field2d", "msg": {"step": 99, "nx": 40, "ny": 41, "ix0": 41, "iy0": 0, "crc32": "0x1EB8B47E", "min": -0.09408678900980763, "max": 0.11288343331366774}}
+{"t": 1794914187.249, "topic": "dyne/node/3/field2d", "msg": {"step": 99, "nx": 40, "ny": 40, "ix0": 41, "iy0": 41, "crc32": "0xAAD53D0C", "min": -0.1755330638124139, "max": 0.10963364189759559}}
+{"t": 1794914187.252, "topic": "dyne/node/0/field2d", "msg": {"step": 99, "nx": 41, "ny": 41, "ix0": 0, "iy0": 0, "crc32": "0x87B60235", "min": -0.2295066131965659, "max": 0.052833223843436784}}
+{"t": 1794914188.255, "topic": "dyne/node/1/rt", "msg": {"step": 99, "window": 100, "step_ms": {"mean": 129.415}, "compute_ms": {"mean": 109.821}, "wire": 2}}
+{"t": 1794914188.26, "topic": "dyne/node/0/rt", "msg": {"step": 99, "window": 100, "step_ms": {"mean": 129.664}, "compute_ms": {"mean": 110.605}, "wire": 2}}
+{"t": 1794914188.262, "topic": "dyne/node/3/rt", "msg": {"step": 99, "window": 100, "step_ms": {"mean": 129.778}, "compute_ms": {"mean": 108.66}, "wire": 2}}
+{"t": 1794914189.265, "topic": "dyne/node/2/field2d", "msg": {"step": 99, "nx": 41, "ny": 40, "ix0": 0, "iy0": 41, "crc32": "0x6D984777", "min": -0.23255350635541183, "max": 0.21899540939272077}}
+{"t": 1794914190.272, "topic": "dyne/node/2/rt", "msg": {"step": 99, "window": 100, "step_ms": {"mean": 129.498}, "compute_ms": {"mean": 109.747}, "wire": 2}}
+{"t": 1794914199.126, "topic": "dyne/node/201/status", "msg": {"state": "running", "idx": 2, "up_s": 224, "step": 200}}
+{"t": 1794914199.127, "topic": "dyne/node/56/status", "msg": {"state": "running", "idx": 0, "up_s": 228, "step": 200}}
+{"t": 1794914199.127, "topic": "dyne/node/172/status", "msg": {"state": "running", "idx": 1, "up_s": 228, "step": 200}}
+{"t": 1794914199.13, "topic": "dyne/node/232/status", "msg": {"state": "running", "idx": 3, "up_s": 228, "step": 200}}
+{"t": 1794914199.145, "topic": "dyne/node/3/field2d", "msg": {"step": 199, "nx": 40, "ny": 40, "ix0": 41, "iy0": 41, "crc32": "0x463A570E", "min": -0.09880863640317597, "max": 0.17272364290103312}}
+{"t": 1794914200.147, "topic": "dyne/node/0/field2d", "msg": {"step": 199, "nx": 41, "ny": 41, "ix0": 0, "iy0": 0, "crc32": "0x813DEF27", "min": -0.17246180800268607, "max": 0.17009506450966866}}
+{"t": 1794914200.147, "topic": "dyne/node/1/field2d", "msg": {"step": 199, "nx": 40, "ny": 41, "ix0": 41, "iy0": 0, "crc32": "0xB9727FC4", "min": -0.17252219301681254, "max": 0.25970025570668387}}
+{"t": 1794914200.151, "topic": "dyne/node/3/rt", "msg": {"step": 199, "window": 100, "step_ms": {"mean": 128.065}, "compute_ms": {"mean": 108.786}, "wire": 2}}
+{"t": 1794914201.153, "topic": "dyne/node/0/rt", "msg": {"step": 199, "window": 100, "step_ms": {"mean": 127.997}, "compute_ms": {"mean": 110.729}, "wire": 2}}
+{"t": 1794914201.153, "topic": "dyne/node/2/field2d", "msg": {"step": 199, "nx": 41, "ny": 40, "ix0": 0, "iy0": 41, "crc32": "0x9BAADFA3", "min": -0.16488910445119023, "max": 0.11523427208335071}}
+{"t": 1794914201.155, "topic": "dyne/node/1/rt", "msg": {"step": 199, "window": 100, "step_ms": {"mean": 128.076}, "compute_ms": {"mean": 110.131}, "wire": 2}}
+{"t": 1794914202.16, "topic": "dyne/node/2/rt", "msg": {"step": 199, "window": 100, "step_ms": {"mean": 128.048}, "compute_ms": {"mean": 109.871}, "wire": 2}}
+{"t": 1794914212.004, "topic": "dyne/node/172/status", "msg": {"state": "running", "idx": 1, "up_s": 241, "step": 300}}
+{"t": 1794914212.009, "topic": "dyne/node/232/status", "msg": {"state": "running", "idx": 3, "up_s": 240, "step": 300}}
+{"t": 1794914212.012, "topic": "dyne/node/201/status", "msg": {"state": "running", "idx": 2, "up_s": 237, "step": 300}}
+{"t": 1794914212.013, "topic": "dyne/node/56/status", "msg": {"state": "running", "idx": 0, "up_s": 241, "step": 300}}
+{"t": 1794914212.02, "topic": "dyne/node/2/field2d", "msg": {"step": 299, "nx": 41, "ny": 40, "ix0": 0, "iy0": 41, "crc32": "0x24FA8970", "min": -0.14086027202069812, "max": 0.14488929309390733}}
+{"t": 1794914212.023, "topic": "dyne/node/0/field2d", "msg": {"step": 299, "nx": 41, "ny": 41, "ix0": 0, "iy0": 0, "crc32": "0xFDDC27BF", "min": -0.12268878391296384, "max": 0.11628308101489368}}
+{"t": 1794914213.022, "topic": "dyne/node/1/field2d", "msg": {"step": 299, "nx": 40, "ny": 41, "ix0": 41, "iy0": 0, "crc32": "0x1C541289", "min": -0.20797929249181582, "max": 0.10676063609666046}}
+{"t": 1794914213.028, "topic": "dyne/node/2/rt", "msg": {"step": 299, "window": 100, "step_ms": {"mean": 127.972}, "compute_ms": {"mean": 110.004}, "wire": 2}}
+{"t": 1794914213.029, "topic": "dyne/node/0/rt", "msg": {"step": 299, "window": 100, "step_ms": {"mean": 127.999}, "compute_ms": {"mean": 110.853}, "wire": 2}}
+{"t": 1794914213.03, "topic": "dyne/node/3/field2d", "msg": {"step": 299, "nx": 40, "ny": 40, "ix0": 41, "iy0": 41, "crc32": "0xD85EA1CA", "min": -0.13255703750192713, "max": 0.06443266821163568}}
+{"t": 1794914214.029, "topic": "dyne/node/1/rt", "msg": {"step": 299, "window": 100, "step_ms": {"mean": 127.915}, "compute_ms": {"mean": 109.989}, "wire": 2}}
+{"t": 1794914214.038, "topic": "dyne/node/3/rt", "msg": {"step": 299, "window": 100, "step_ms": {"mean": 127.949}, "compute_ms": {"mean": 108.553}, "wire": 2}}
+{"t": 1794914224.907, "topic": "dyne/node/232/status", "msg": {"state": "running", "idx": 3, "up_s": 253, "step": 400}}
+{"t": 1794914224.907, "topic": "dyne/node/172/status", "msg": {"state": "running", "idx": 1, "up_s": 253, "step": 400}}
+{"t": 1794914224.908, "topic": "dyne/node/201/status", "msg": {"state": "running", "idx": 2, "up_s": 250, "step": 400}}
+{"t": 1794914224.914, "topic": "dyne/node/56/status", "msg": {"state": "running", "idx": 0, "up_s": 254, "step": 400}}
+{"t": 1794914224.917, "topic": "dyne/node/2/field2d", "msg": {"step": 399, "nx": 41, "ny": 40, "ix0": 0, "iy0": 41, "crc32": "0x234F06AC", "min": -0.09752854826462984, "max": 0.12276203001716568}}
+{"t": 1794914225.922, "topic": "dyne/node/2/rt", "msg": {"step": 399, "window": 100, "step_ms": {"mean": 128.139}, "compute_ms": {"mean": 109.72}, "wire": 2}}
+{"t": 1794914226.925, "topic": "dyne/node/1/field2d", "msg": {"step": 399, "nx": 40, "ny": 41, "ix0": 41, "iy0": 0, "crc32": "0xCAB30D63", "min": -0.2497533750095069, "max": 0.11154969118016958}}
+{"t": 1794914226.931, "topic": "dyne/node/0/field2d", "msg": {"step": 399, "nx": 41, "ny": 41, "ix0": 0, "iy0": 0, "crc32": "0xB3E5371A", "min": -0.14526436560734915, "max": 0.21090703334827637}}
+{"t": 1794914227.93, "topic": "dyne/node/3/field2d", "msg": {"step": 399, "nx": 40, "ny": 40, "ix0": 41, "iy0": 41, "crc32": "0x7B3D7C5C", "min": -0.22050938958210375, "max": 0.15591550661401038}}
+{"t": 1794914227.93, "topic": "dyne/node/1/rt", "msg": {"step": 399, "window": 100, "step_ms": {"mean": 128.193}, "compute_ms": {"mean": 110.255}, "wire": 2}}
+{"t": 1794914227.936, "topic": "dyne/node/0/rt", "msg": {"step": 399, "window": 100, "step_ms": {"mean": 128.114}, "compute_ms": {"mean": 110.81}, "wire": 2}}
+{"t": 1794914228.08, "topic": "dyne/node/232/status", "msg": {"state": "done", "idx": 3, "up_s": 257, "wire": 2, "crc32": "0x7B3D7C5C", "sent": 800, "resend": 4, "replay": 4, "echo": 0, "stall_reports": 0, "bad_env": 0, "rejected": 0, "missing": 0, "dropped": 0}}
+{"t": 1794914228.088, "topic": "dyne/node/172/status", "msg": {"state": "done", "idx": 1, "up_s": 257, "wire": 2, "crc32": "0xCAB30D63", "sent": 800, "resend": 4, "replay": 4, "echo": 0, "stall_reports": 0, "bad_env": 0, "rejected": 0, "missing": 0, "dropped": 0}}
+{"t": 1794914228.088, "topic": "dyne/node/3/rt", "msg": {"step": 399, "window": 100, "step_ms": {"mean": 128.146}, "compute_ms": {"mean": 108.718}, "wire": 2}}
+{"t": 1794914228.089, "topic": "dyne/node/201/status", "msg": {"state": "done", "idx": 2, "up_s": 253, "wire": 2, "crc32": "0x234F06AC", "sent": 800, "resend": 4, "replay": 4, "echo": 0, "stall_reports": 0, "bad_env": 0, "rejected": 0, "missing": 0, "dropped": 0}}
+{"t": 1794914228.094, "topic": "dyne/node/56/status", "msg": {"state": "done", "idx": 0, "up_s": 257, "wire": 2, "crc32": "0xB3E5371A", "sent": 800, "resend": 4, "replay": 4, "echo": 0, "stall_reports": 0, "bad_env": 0, "rejected": 0, "missing": 0, "dropped": 0}}

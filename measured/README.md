@@ -32,3 +32,29 @@
 記録ツール scripts\vl53_log.py が1条件=1つのCSV(1行=1フレーム)と同名の .meta.txt
 (ファームの起動情報・送った設定・メモ)を書く。ファイル名の先頭は評価項目の番号(E0〜E9)。
 CSVの列の意味は scripts\vl53_log.py の冒頭。
+
+## 2026-11-17-siteA-wave2d/ — 最初のUSB書き込み(16台)と2次元の波動方程式の実機(2×2)(場所A)
+
+場所A = 2026-11-27 までの仮の部屋(以後の場所Bとは部屋の形・電波の環境が違うので、遅れ・損失の値は直接比べない)。
+当日のまとめ: docs\2026-11-17-wave2d-hw-day1.md。手順: docs\2026-11-16-wave2d-cluster-runbook.md。
+ESP32-DevKitC-VE ×16、アクセスポイント経由の Wi-Fi、PC が MQTT のブローカーと時刻同期のサーバ(UDP 12300)。
+
+| フォルダ・ファイル | 内容 | 元 |
+|---|---|---|
+| first_flash/first_flash.csv | USB 書き込み1回=1行(16台の初回と、修正版のファームでの書き直し16回) | first_flash_out\ |
+| first_flash/logs/ | 各回の esptool と起動のログ。ファイル名の MAC も仮の値 | first_flash_out\logs\ |
+| wave2d/runs/<日時>_<配置>_<場面>/ | scripts\wave2d_cluster.py run の1回分(expected.json・cfg_node<id>.json・result.json・result.csv・events.jsonl)。19:30:48 の吸収境界の回は結果が無い(node 201 の再起動で中断) | wave2d_out\ |
+| wave2d/nodes.json | 最後に見えたノードの IP・MAC | wave2d_out\ |
+| wave2d/ota_actor.csv・ota_fw.csv | アクター・ファームの OTA(無線での更新)の結果 | wave2d_out\ |
+| wave2d/tsync_*.csv・tsync_record.txt | 時刻同期の記録(warmup=立ち上がり、rtt_oneway=600 秒の記録、record=その集計) | wave2d_out\ |
+| wave2d/stall_run.txt | node 232 の電源を切った回(19:40:13 開始)の画面の出力 | wave2d_out\ |
+
+- 写さなかったもの: wave2d_out\ntp_log.csv(空)だけ。events.jsonl はすべて写した(最大は --rt-every 1 の回の約 430 KB)。
+- 置き換え(写すときに一回限りの処理で実施): 自分の基板の実在の MAC(最後の1バイトを YY として)→ **02:00:00:00:02:YY**
+  (最後の1バイト=MAC 由来のノード番号を保つ)。最後の1バイトが 0xC8 で重なった2台のうち、NVS で 201 にした基板だけ
+  **02:00:00:00:03:C8**(もう1台の node 200 は 02:00:00:00:02:C8)。アクセスポイントの BSSID → 02:00:00:00:00:01。
+  大文字・小文字と区切りの書き方は元のまま。USB 変換チップのシリアル番号 → USBSERIAL01〜16(初出順、基板ごとに一定)。
+  ログの Wi-Fi の SSID → (SSID)。stall_run.txt の手元の絶対パス → 相対パス。
+- IP アドレス(アクセスポイントの内側の 192.168.50.x)は置き換えていない(runbook §8: 置き換えるかはユーザーが決める)。
+- 時刻の列(t・pc_time・ts_us)は UNIX 時刻(秒・マイクロ秒)。events.jsonl の rt のトピックの番号は配置の番号(idx)で、
+  ノード番号ではない(2×2 では idx 0〜3 = node 56・172・201・232)。

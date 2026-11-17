@@ -1,0 +1,8 @@
+job,kind,variant,node,target,result,expect,match,t_total_s,t_download_ms,bytes,err,part_before,part_after,elf_before,elf_after,actor_after,phases
+act-1117-182542,actor,normal,56,esp32,fail,ok,NO,0.01,,,task,ota_0,ota_0,850d96d06,850d96d06,embedded#0,fail@0.0
+act-1117-182542,actor,normal,172,esp32,fail,ok,NO,0.01,,,task,ota_0,ota_0,850d96d06,850d96d06,embedded#0,fail@0.0
+act-1117-182542,actor,normal,201,esp32,fail,ok,NO,0.01,,,task,ota_0,ota_0,850d96d06,850d96d06,embedded#0,fail@0.0
+act-1117-185226,actor,normal,56,esp32,ok,ok,yes,4.07,360,26202,,ota_0,ota_0,117b394e8,117b394e8,slot0.wasm#1,accepted@0.1 downloaded@0.4 ok@4.1
+act-1117-185226,actor,normal,201,esp32,ok,ok,yes,4.09,363,26202,,ota_0,ota_0,117b394e8,117b394e8,slot0.wasm#1,accepted@0.2 downloaded@0.4 ok@4.1
+act-1117-185605,actor,normal,172,esp32,ok,ok,yes,4.33,429,26202,,ota_0,ota_0,117b394e8,117b394e8,slot0.wasm#1,accepted@0.1 downloaded@0.4 ok@4.3
+act-1117-192716,actor,normal,232,esp32,ok,ok,yes,4.05,330,26202,,ota_0,ota_0,117b394e8,117b394e8,slot0.wasm#1,accepted@0.1 downloaded@0.4 ok@4.1
