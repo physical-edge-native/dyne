@@ -1,62 +1,59 @@
-//! 半無限透過境界 (transparent) の指数和係数 (発注3 F1、2026-09-14)。
+//! Coefficients for a transparent face: a boundary through which heat leaves as if the
+//! same material continued without end beyond it.
 //!
-//! 理論: docs/2026-09-13-transparent-boundary-derivation.md (理論ノートT10)。
-//! 未観測領域を「境界の先に同じ材質が無限に続く」と想定すると、境界の流束は
-//! 自ノードの境界温度の履歴のみから決まる (Dirichlet-to-Neumann写像、1/√t核の
-//! 畳み込み)。1/√t 核を指数和で近似し、補助変数 (漏れバケツ) M個の漸化式
+//! For the 1D heat equation, the flux through such a boundary depends only on the history
+//! of the boundary temperature (a convolution with a 1/√t kernel). The kernel is
+//! approximated by a sum of M exponentials, so that M auxiliary variables updated by
 //!
 //! ```text
 //! y_j^{n+1} = e^{-λ_j Δt} · y_j^n + e^{-λ_j Δt/2} · Δg^n
-//! 境界勾配 K^n = (1/√(πα)) Σ_j w_j y_j^n
+//! boundary gradient K^n = (1/√(πα)) Σ_j w_j y_j^n
 //! ```
 //!
-//! で毎ステップ O(M) にする (導出 §5)。本モジュールは節点 λ_j と重み w_j の
-//! 構成 (導出 §4: 対数軸の台形則) を行い、アクターへ渡す係数
-//! (decay_j, half_j, weight_j) を返す。
+//! give the flux in O(M) per step. This module computes the nodes λ_j and weights w_j
+//! (trapezoidal rule on a logarithmic axis) and returns the coefficients (decay_j, half_j,
+//! weight_j) that the host passes to the solver.
 //!
-//! 決定論の規律 (検収仕様 2026-09-14):
-//! - 構成パラメータは下記の定数に**固定** (実行ごとに変えない)。
-//! - 数学関数は libm (純Rust) を使い、OS間でもビット一致を保つ。
-//! - 総和順は j 昇順の逐次加算に固定する (アクター側・複合参照解側とも
-//!   この順で Σ w_j y_j を計算すること)。
-//!
-//! 補助変数はノード内状態であり、可搬状態 u[] (モデルアーキテクチャノートE3)
-//! には含めない。担当替え (handover / ADD に伴う再init) 時はリセット =
-//! 透過境界の再発動として扱う (理論ノートT10、E3注記、2026-09-14決定)。
+//! Determinism: the construction parameters are the fixed constants below; mathematical
+//! functions come from pure-Rust `libm`; sums run over j in increasing order (solvers and
+//! references must use the same order). The auxiliary variables belong to a device and
+//! are reset when a region is handed to another device. Derivation (Japanese):
+//! `docs/2026-09-13-transparent-boundary-derivation.md`.
 
-/// 対数軸の台形則の刻み。導出 §6 の表より、この値で M=32・核の相対誤差 7.7e-4。
+/// Step of the trapezoidal rule on the logarithmic axis (M = 32 terms, relative kernel error
+/// 7.7e-4 for the default scenario).
 pub const SOE_H: f64 = 0.6;
-/// 下限側の裕度: λ_min = 1/(C1·T_REF)。大きいほど長時間側の打ち切り誤差が減る。
+/// Margin at the low end: λ_min = 1/(C1·T_REF); larger values reduce the truncation error
+/// at long times.
 pub const SOE_C1: f64 = 1e9;
-/// 上限側の裕度: λ_max = C2/Δt。短時間側 (t=Δt) の精度を決める。
+/// Margin at the high end: λ_max = C2/Δt; sets the accuracy at short times (t = Δt).
 pub const SOE_C2: f64 = 2e4;
-/// 核近似の設計時間範囲の上限 [仮想秒]。既定シナリオ (2000ステップ×Δt=1e-4) の
-/// T=0.2。これより長い実行でも、λ_min が 1/(C1·T_REF) と極小のため打ち切り誤差は
-/// t=4·T_REF で相対 1e-4 未満に留まる (レポートの長時間実行 (iii) で実測確認)。
+/// Upper end \[virtual seconds\] of the time range the kernel approximation is designed for
+/// (T = 0.2 for the default scenario of 2000 steps × Δt = 1e-4). Longer runs stay below a
+/// relative truncation error of 1e-4 at t = 4·T_REF because λ_min is tiny.
 pub const SOE_T_REF: f64 = 0.2;
-/// 項数の上限 (アクター側の静的確保と揃える)
+/// Largest number of terms (matches the static arrays in the solvers).
 pub const SOE_M_MAX: usize = 64;
 
-/// 透過境界の指数和係数。j 昇順 (λ 昇順 = 遅い忘却が先)。
+/// Coefficients of a transparent face, in increasing j (increasing λ: slow forgetting first).
 pub struct TransparentCoef {
-    /// e^{-λ_j Δt} (補助変数の1ステップ減衰)
+    /// e^{-λ_j Δt}: decay of an auxiliary variable per step.
     pub decay: Vec<f64>,
-    /// e^{-λ_j Δt/2} (当ステップの境界温度変化 Δg の中点補正)
+    /// e^{-λ_j Δt/2}: midpoint factor for this step's change of boundary temperature Δg.
     pub half: Vec<f64>,
-    /// w_j / √(πα) (勾配への重み。1/√(πα) を畳み込み済み)
+    /// w_j / √(πα): weight in the gradient (with 1/√(πα) folded in).
     pub weight: Vec<f64>,
 }
 
-/// 節点・重みの構成 (導出 §4・付録と同一の式)。
-///   x_j = x_lo + j·h  (x_j < x_hi の範囲、j=0,1,…)
-///   λ_j = e^{2 x_j},  w_j = (2/√π)·h·e^{x_j}
-/// 既定 (Δt=1e-4、h=SOE_H=0.6) で M=32。
+/// Nodes and weights for diffusivity `alpha` and time step `dt`:
+/// x_j = x_lo + j·h (while x_j < x_hi), λ_j = e^{2 x_j}, w_j = (2/√π)·h·e^{x_j}.
+/// M = 32 for the defaults (Δt = 1e-4, h = [`SOE_H`] = 0.6).
 pub fn coefficients(alpha: f64, dt: f64) -> TransparentCoef {
     coefficients_with(alpha, dt, SOE_H)
 }
 
-/// 刻み h_soe を指定した構成 (実験用。導出 §6 の表: h=0.6→M=32、h=0.3→M=64)。
-/// 既定運用は coefficients (h=SOE_H) を使うこと。
+/// Like [`coefficients`] with a chosen step `h_soe` (for experiments: h = 0.6 gives M = 32,
+/// h = 0.3 gives M = 64). Normal use is [`coefficients`].
 pub fn coefficients_with(alpha: f64, dt: f64, h_soe: f64) -> TransparentCoef {
     assert!(alpha > 0.0 && dt > 0.0 && h_soe > 0.0);
     let x_lo = 0.5 * libm::log(1.0 / (SOE_C1 * SOE_T_REF));

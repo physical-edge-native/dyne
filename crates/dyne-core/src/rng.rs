@@ -1,14 +1,15 @@
-//! 決定論的乱数 (xorshift64*) と個体シードの導出規則。整数演算のみ。
-//!
-//! `Rng` は dyne-sim 従来実装の移設 (ビット互換。実装を変更してはならない)。
+//! Deterministic random numbers (xorshift64*) and the rule for deriving per-device seeds.
+//! Integer arithmetic only, so every platform produces the same sequence.
 
-/// xorshift64*。シード固定で全プラットフォーム同一系列 (整数演算のみ)
+/// xorshift64* generator: the same sequence on every platform for a given seed.
 pub struct Rng(u64);
 
 impl Rng {
+    /// A generator with `seed` (0 is replaced by 1).
     pub fn new(seed: u64) -> Self {
         Rng(seed.max(1))
     }
+    /// The next 64-bit value.
     pub fn next_u64(&mut self) -> u64 {
         let mut x = self.0;
         x ^= x >> 12;
@@ -17,17 +18,17 @@ impl Rng {
         self.0 = x;
         x.wrapping_mul(0x2545F4914F6CDD1D)
     }
-    /// [0,1) の一様乱数 (53ビット精度)
+    /// Uniform value in \[0, 1) with 53-bit resolution.
     pub fn uniform(&mut self) -> f64 {
         (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
     }
-    /// 0..=2*hi の一様整数 (遅延ジッタ用。従来実装と同一の意味論)
+    /// Uniform integer in 0..=2·hi (used for delay jitter).
     pub fn range_u64(&mut self, hi: u64) -> u64 {
         if hi == 0 { 0 } else { self.next_u64() % (hi * 2 + 1) }
     }
 }
 
-/// splitmix64 の1ステップ (シード導出専用。Rng本体とは独立)
+/// One step of splitmix64 (only for deriving seeds).
 fn splitmix64(x: u64) -> u64 {
     let mut z = x.wrapping_add(0x9E3779B97F4A7C15);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
@@ -35,18 +36,17 @@ fn splitmix64(x: u64) -> u64 {
     z ^ (z >> 31)
 }
 
-/// 個体シードの導出規則 (2026-09-02 ユーザー決定の固定式):
+/// Seed of device (or agent) `id`, derived from a global seed by a fixed rule:
 ///
 /// ```text
 /// seed_i = splitmix64( global_seed XOR (id+1) * 0x9E3779B97F4A7C15 )
-/// (結果が0なら 0x9E3779B97F4A7C15 に置き換える)
+/// (a result of 0 is replaced by 0x9E3779B97F4A7C15)
 /// ```
 ///
-/// - 整数演算のみ。全プラットフォームで同一。
-/// - id+1 とするのは id=0 で global_seed がそのまま通るのを避けるため。
-/// - splitmix64 を挟むのは、近い id 同士のシードの相関 (xorshift系の弱点) を
-///   切るため (慣用的な組み合わせ)。
-/// - 導出されたシードを [`Rng::new`] に渡してアクターへ dyne_cfg で注入する。
+/// - Integer arithmetic only; the same on every platform.
+/// - `id + 1` keeps id 0 from passing the global seed through unchanged.
+/// - splitmix64 removes the correlation between seeds of nearby ids.
+/// - The derived seed is used with [`Rng::new`] or handed to a solver with `dyne_cfg`.
 pub fn derive_seed(global_seed: u64, id: u64) -> u64 {
     let s = splitmix64(global_seed ^ (id.wrapping_add(1)).wrapping_mul(0x9E3779B97F4A7C15));
     if s == 0 { 0x9E3779B97F4A7C15 } else { s }

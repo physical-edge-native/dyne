@@ -69,6 +69,7 @@ const PI: f64 = core::f64::consts::PI;
 /// Initial displacement (the initial velocity is always zero). `x`, `y`, `z` are `i·h`, `j·h`, `k·h`
 /// for the global point indices; products are evaluated left to right as written.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[allow(missing_docs)] // the fields are the parameters in each variant's formula
 pub enum Initial {
     /// `amp · sin(mπx) · sin(nπy) · sin(lπz)`: a standing wave in the unit cube with fixed value 0.
     SinMode { m: f64, n: f64, l: f64, amp: f64 },

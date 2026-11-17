@@ -1,17 +1,24 @@
-//! dyne-core: ホスト側シミュレーション共通基盤
+//! dyne-core: shared parts of Dyne's deterministic simulators.
 //!
-//! 発注6・案B (docs/2026-09-02-swarm-port-options.md、2026-09-02 ユーザー決定) の
-//! 切り出し。dyne-sim からモデル非依存の部品を移設したライブラリで、
-//! dyne-sim (1次元熱伝導) と dyne-swarm-sim (群れ、実装予定) の両ホストが載る。
+//! The simulators (`dyne-sim` for 1D, `dyne-sim2d` for 2D, `dyne-swarm-sim` for the
+//! flocking demo) are built from these model-independent parts:
 //!
-//! - [`rng`] 決定論的乱数 (xorshift64*) と個体シードの導出規則
-//! - [`event`] 離散イベント・仮想時刻のイベントキュー
-//! - [`net`] 仮想ネットワーク (損失・遅延ジッタ・分断)
-//! - [`actor`] WASMアクター (wasmi) の実行ラッパ (Dyne C ABI)
-//! - [`wire`] ワイヤ形式v2 (dyne-wire の再エクスポート。単一定義)
+//! - [`rng`]: deterministic random numbers (xorshift64*) and the rule for deriving
+//!   per-device seeds;
+//! - [`event`]: event queue in virtual time (discrete-event simulation);
+//! - [`net`]: virtual network with loss, delay jitter and partitions;
+//! - [`actor`]: loading and calling a 1D WebAssembly solver ("actor") with wasmi;
+//! - [`transparent`]: coefficients for a boundary that lets heat flow out as if the
+//!   material continued without end;
+//! - [`wire`]: the message format (re-export of `dyne-wire`).
 //!
-//! 移設の規律: dyne-sim の従来実装と**ビット互換** (乱数の消費順・イベントの
-//! 順序決定を含めて変更しない)。切り出しの無変化は既存全回帰のビット一致で証明する。
+//! Everything is deterministic: with the same inputs and seed, every run gives the same
+//! bits on every platform (integer arithmetic for random numbers, a fixed order for
+//! simultaneous events, pure-Rust `libm` for mathematical functions). Changing the order in
+//! which random numbers are drawn or events are delivered changes results, and the
+//! regression suite would report it.
+
+#![warn(missing_docs)]
 
 pub mod actor;
 pub mod event;
@@ -19,4 +26,5 @@ pub mod net;
 pub mod rng;
 pub mod transparent;
 
+/// The message format (re-export of `dyne-wire`).
 pub use dyne_wire as wire;

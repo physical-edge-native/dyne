@@ -1,60 +1,75 @@
-//! WASMアクター (wasmi) の実行ラッパ (dyne-sim 従来実装の移設)。
+//! Loading and calling a 1D WebAssembly solver ("actor") with the wasmi interpreter.
 //!
-//! Dyne C ABI (1次元場アクター) のエクスポート束。dyne_cfg 以降は任意
-//! エクスポート (学習型アクターのみ)。既存の熱伝導アクターの差込口は
-//! 当面不変 (2026-09-02 ユーザー決定。汎用メッセージバッファ方式への移行は
-//! 2次元化の際)。群れアクターの差込口 (dyne_inbox_write / dyne_outbox_read) は
-//! 群れ移植の段で本モジュールに追加する。
+//! [`Actor`] holds the exports of the 1D solver interface. `dyne_init`, `dyne_step`,
+//! `dyne_boundary_value`, `dyne_boundary_grad`, `dyne_set_neighbor`, `dyne_set`, `dyne_get`,
+//! `dyne_x` and `dyne_len` are required; the others are optional and `None` when the module
+//! does not export them. A minimal solver is written step by step in `docs/en/tutorial.md`.
 
-/// 面ID: 左
+/// Face: left (smaller x).
 pub const FACE_LEFT: u32 = 0;
-/// 面ID: 右
+/// Face: right (larger x).
 pub const FACE_RIGHT: u32 = 1;
-/// 境界条件: 値固定 (Dirichlet)。値は既定 0 (dyne_set_bc_value で変更可)
+/// Face condition: fixed value (Dirichlet); 0 unless set with `dyne_set_bc_value`.
 pub const BC_DIRICHLET: u32 = 0;
-/// 境界条件: 界面 (隣接ノードと交換)
+/// Face condition: border shared with a neighbouring region (values exchanged).
 pub const BC_INTERFACE: u32 = 1;
 // ---- F1 (発注3、2026-09-14): 未観測領域境界の設定情報化で追加した3種 ----
-/// 境界条件: ゼロ勾配 (断熱端)。ゴースト点は鏡映 u_{-1} = u_1
+/// Face condition: zero gradient (insulated); mirrored ghost point u₋₁ = u₁.
 pub const BC_ZERO_GRAD: u32 = 2;
-/// 境界条件: 線形外挿。拡散系では端点が時間凍結する (理論ノートT8) — 選択時に警告
+/// Face condition: linear extrapolation. For diffusion the edge point then stays frozen in
+/// time, so the simulator warns when it is chosen.
 pub const BC_LINEAR_EXTRAP: u32 = 3;
-/// 境界条件: 半無限透過境界 (理論ノートT10)。補助変数は transparent モジュール参照
+/// Face condition: transparent, as if the material continued without end (see
+/// [`crate::transparent`]).
 pub const BC_TRANSPARENT: u32 = 4;
 
+/// One instance of a 1D solver module with its exports.
 pub struct Actor {
+    /// The wasmi store that owns the instance.
     pub store: wasmi::Store<()>,
+    /// `dyne_init(n, x0, x1, alpha, dt, bc_left, bc_right) -> i32`: set up a region (0 = success).
     pub init: wasmi::TypedFunc<(u32, f64, f64, f64, f64, u32, u32), i32>,
+    /// `dyne_step()`: advance one time step.
     pub step: wasmi::TypedFunc<(), ()>,
+    /// `dyne_boundary_value(face) -> f64`: the region's value at a face.
     pub bval: wasmi::TypedFunc<u32, f64>,
+    /// `dyne_boundary_grad(face) -> f64`: the region's gradient at a face.
     pub bgrad: wasmi::TypedFunc<u32, f64>,
+    /// `dyne_set_neighbor(face, value, grad)`: the neighbour's border value and gradient.
     pub set_neighbor: wasmi::TypedFunc<(u32, f64, f64), ()>,
+    /// `dyne_set(i, value)`: overwrite local point `i`.
     pub set: wasmi::TypedFunc<(u32, f64), ()>,
+    /// `dyne_get(i) -> f64`: value at local point `i`.
     pub get: wasmi::TypedFunc<u32, f64>,
+    /// `dyne_x(i) -> f64`: position of local point `i`.
     pub x: wasmi::TypedFunc<u32, f64>,
+    /// `dyne_len() -> u32`: number of local points.
     pub len: wasmi::TypedFunc<(), u32>,
-    // ---- 学習型アクター (heat1d-pinn-actor) の任意エクスポート。差分法アクターには無い ----
-    /// ハイパーパラメータ設定 (dyne_init の前に呼ぶ)
+    // ---- optional exports of the learned solver (heat1d-pinn-actor) ----
+    /// `dyne_cfg(key, value)`: hyper-parameters, set before `dyne_init` (learned solvers).
     pub cfg: Option<wasmi::TypedFunc<(u32, f64), ()>>,
-    /// 境界条件の切り替え (重みを保ったまま。無ければ再init+状態復元で代替)
+    /// `dyne_set_bc(face, kind)`: change a face condition keeping the learned weights (without
+    /// it, the host re-initialises and restores the state).
     pub set_bc: Option<wasmi::TypedFunc<(u32, u32), ()>>,
-    /// 隠れ層の幅変更 = GROW/SHRINK
+    /// `dyne_resize(width) -> i32`: change the width of the hidden layer while running.
     pub resize: Option<wasmi::TypedFunc<u32, i32>>,
-    /// 現在のモデルを格子点で評価 (ステップを進めない。機能保存の検査用)
+    /// `dyne_eval(i) -> f64`: evaluate the current model at point `i` without stepping.
     pub eval: Option<wasmi::TypedFunc<u32, f64>>,
-    // ---- F1 (発注3): 未観測領域境界の設定情報化で追加した任意エクスポート ----
-    /// Dirichlet境界の値 (face, value)。既定 0.0。dyne_init の前に呼ぶ
+    // ---- optional exports for outer face conditions ----
+    /// `dyne_set_bc_value(face, value)`: value of a fixed face (default 0), before `dyne_init`.
     pub set_bc_value: Option<wasmi::TypedFunc<(u32, f64), ()>>,
-    /// 透過境界の指数和係数 (j, decay, half, weight) を1項ずつ渡す。
-    /// dyne_init をまたいで保持される (補助変数のみ init でリセット)
+    /// `dyne_transparent_coef(j, decay, half, weight)`: one term of the transparent face's
+    /// coefficients; kept across `dyne_init` (only the auxiliary variables are reset).
     pub transparent_coef: Option<wasmi::TypedFunc<(u32, f64, f64, f64), ()>>,
-    /// 観測点ナッジング (発注8): (i, y, γ) → イノベーション d = y − u_i (適用前)
+    /// `dyne_observe(i, y, gamma) -> f64`: nudge point `i` towards measurement `y` with
+    /// strength γ; returns y − u_i before nudging.
     pub observe: Option<wasmi::TypedFunc<(u32, f64, f64), f64>>,
-    /// wasm宣言の線形メモリ(ページ) — RAM上限チェック用
+    /// Linear memory of the module in 64 KiB pages (to check that it fits a device).
     pub memory_pages: u64,
 }
 
 impl Actor {
+    /// Instantiate `module` and look up its exports (panics if a required one is missing).
     pub fn load(engine: &wasmi::Engine, module: &wasmi::Module) -> Self {
         let mut store = wasmi::Store::new(engine, ());
         let linker: wasmi::Linker<()> = wasmi::Linker::new(engine);
@@ -100,7 +115,8 @@ impl Actor {
         }
     }
 
-    /// load + ハイパーパラメータ適用 (学習型アクターのみ。差分法アクターでは無視)
+    /// [`Actor::load`], then pass `pinn_cfg` to `dyne_cfg` (ignored if the module has no
+    /// `dyne_cfg`).
     pub fn load_with(engine: &wasmi::Engine, module: &wasmi::Module, pinn_cfg: &[(u32, f64)]) -> Self {
         let mut a = Actor::load(engine, module);
         if let Some(f) = a.cfg {
@@ -111,7 +127,7 @@ impl Actor {
         a
     }
 
-    /// 学習型アクターか (dyne_cfg を持つ = heat1d-pinn-actor)
+    /// Whether this is a learned solver (it exports `dyne_cfg`).
     pub fn is_learning(&self) -> bool {
         self.cfg.is_some()
     }

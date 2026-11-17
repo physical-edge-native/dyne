@@ -47,6 +47,8 @@
 #  15. tutorial solver (examples/decay1d-actor, docs/en/tutorial.md): built as written in the tutorial, it must
 #      give "RESULT: PASS (bit-exact)" split over 4 devices, and over 8 devices with 10% loss, delay and one
 #      device replaced while running (issue #7)
+#  16. API documentation of the core crates (dyne-wire, dyne-core, dyne-native, dyne-export): cargo doc with
+#      warnings as errors, so broken links and undocumented public items fail (issue #7)
 #
 # Usage (from the repository root):  bash scripts/ci-check.sh
 set -euo pipefail
@@ -330,6 +332,13 @@ echo "== [15] tutorial solver: decay1d (docs/en/tutorial.md) =="
 WT="examples/decay1d-actor/target/wasm32-unknown-unknown/release/decay1d_actor.wasm"
 expect_pass "tutorial-4" "$SIM1" --wasm "$WT" --nodes 4 --points 65 --steps 2000
 expect_pass "tutorial-faults" "$SIM1" --wasm "$WT" --nodes 8 --points 65 --steps 2000 --loss 0.1 --lat-ms 5 --lat-jitter-ms 3 --handover 3@30000:60000
+
+echo "== [16] API documentation of the core crates (no warnings) =="
+if RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p dyne-wire -p dyne-core -p dyne-native -p dyne-export; then
+  echo "cargo doc        OK"
+else
+  echo "cargo doc        FAIL (warnings in the API documentation)"; fail=1
+fi
 
 if [ "$fail" -ne 0 ]; then echo "CI CHECK FAILED"; exit 1; fi
 echo "ALL CHECKS PASSED"
