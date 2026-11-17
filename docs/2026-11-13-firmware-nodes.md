@@ -763,3 +763,52 @@ PC 上の検査: `sync_test` → PASS(zig cc、`-Wall -Wextra -Wconversion -Wsha
 | scripts/ci-check.sh | [6] に sync の検査を追加(コンパイラの探し方は同じ) |
 | docs/2026-11-15-sim2d-loss-jitter.md | 「同期の受信の規則(シミュレータとファームで共通。正本)」の節 |
 | crates/dyne-sim2d/src/main.rs | 冒頭の説明に、規則がファームと共通で正本がどこかを1行(コードは変えていない) |
+
+---
+
+## 15. 追記(2026-11-17): 計算部品の作業メモリ(線形メモリ)を PSRAM に置く(GitHub issue #82)
+
+### 15.1 起きたこと(実機、場所 A、DevKitC-VE)
+
+16台の最初の書き込み(§9.0.1)はすべて合格したが、そのあと計算部品の OTA(wave2d の縮小版)が3台とも
+`"err":"task"` で失敗した。起動のログの内部RAM(8bit、空き / 一続きの最大):
+
+| 段階 | 空き | 最大 |
+|---|---|---|
+| 起動直後(heap(boot)) | 197,395 | 77,824 |
+| 計算部品を積んだ後(after-wasm) | 106,367 | 47,104 |
+| Wi-Fi の後(after-wifi) | 26,979 | 14,336 |
+| サービスの開始の後(after-services) | **3,903** | **3,712** |
+
+OTA のタスク(スタック 6KB・8KB。フラッシュに書くので内部RAMが必須)を作れなかった。ファームの OTA も同じ理由で
+動かない。first_flash.py は after-wasm までしか見ていないので、書き込みの時点では気づけなかった(GitHub issue #84)。
+
+原因: WAMR の線形メモリ(wave2d の縮小版で 64KB)は、ESP-IDF 版の WAMR の os_mmap が
+`heap_caps_malloc(MALLOC_CAP_8BIT)` で確保し、内部RAMが優先される。main.c の dyne_malloc_int_first(11/13)は
+WAMR の内部の表と計算部品の本体を内部RAMへ寄せるもので、線形メモリはこの経路を通っていなかった。
+
+### 15.2 直したこと
+
+- `node-esp32/CMakeLists.txt`: 全コンポーネントに `WASM_MEM_ALLOC_WITH_USAGE=1` を渡す(ESP-IDF 版の WAMR の
+  Kconfig にはこの項目が無い)。WAMR は確保の関数を「用途(Alloc_For_Runtime / Alloc_For_LinearMemory)つき」で呼ぶ。
+- `node-esp32/main/main.c`: どの基板でも Alloc_With_Allocator を使い、線形メモリだけを PSRAM に置く
+  (8 バイト境界・0 で埋める。この経路では WAMR が 0 で埋めないため)。PSRAM の無い基板では内部RAM(従来の場所)。
+  それ以外の確保は従来どおり内部RAMを先に使う。計算の結果(ビット)は置き場所に依らない。
+
+### 15.3 確認(2026-11-17、実機)
+
+| 確かめたこと | 結果 |
+|---|---|
+| after-services の内部RAM | 空き 46,951〜47,303、最大 45,056(4台) |
+| 計算部品の OTA(wave2d の縮小版) | 4台とも ok(約4秒) |
+| ファームの OTA | 3台とも ok(14〜19秒) |
+| 2×2 の波動(gauss_dirichlet・損失 30%・gauss_absorb) | すべて PASS (bit-exact) |
+| 1ステップの計算の時間(41×41 点の区画、インタプリタ、`--rt-every 1` の rt の compute_ms) | 中央値 110〜117 ms |
+
+**未確認**: 線形メモリを内部RAMに置いていたときの、同じ条件の計算の時間(DevKitC-VE で wave2d を動かした記録が
+修正前に無い)。遅くなった分を数字で示すには、修正前のファームで1台を測る必要がある(GitHub issue #82 に残す)。
+
+### 15.4 この版で残っている問題
+
+- 2×2 の実行中に1台の電源を切った後、全台を再起動しないと次の実行の結果が全台でずれる(GitHub issue #86)。
+- 吸収境界の実行の開始直後に、1台が1回だけ異常終了で再起動した(再現せず。GitHub issue #85)。
