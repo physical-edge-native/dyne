@@ -2,6 +2,9 @@
 """【未検証 UNTESTED】Dyne の部屋の USD で、Jetbot(Isaac の標準の車輪 2 つの台車)が目標地点へ進む RL の課題の
 骨組み(Isaac Lab の DirectRLEnv)。CPU 版 scripts/rl_room_env.py と同じ観測・行動・報酬にそろえてある。2026-11-13。
 
+2026-11-18: 発表では車輪の台車の代わりに 4 脚ロボット Go2 を使う(ユーザー決定)。Go2 版は scripts/isaaclab_go2_room.py
+(手順は docs/2026-11-18-isaac-go2-procedure.md)。この台本は、自分で学習する課題の骨組みとして残す。
+
 この PC には GPU が無いので一度も実行していない。借りた GPU の計算機で、まず
 scripts/isaaclab_room.py(取り込みの確認)を通してから使う。直すことになりそうな所に「要確認」を付けた。
 想定する版: Isaac Lab 2.x(isaaclab.* の名前空間)。
