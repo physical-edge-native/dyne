@@ -96,8 +96,11 @@ if (-not $SimOnly) {
 $env:PYTHONIOENCODING = "utf-8"
 
 if ($py) {
-    Write-Host "== [2c] check: Dyne's temperature against the readings (tolerance 0.5 C) and the made-up field (reported)"
-    Invoke-Checked "tutorial_room.py check" { & $py scripts\tutorial_room.py check --scene $scene --heat-vti $tempVti --readings $readings }
+    Write-Host "== [2c] check: leave each thermometer out, rerun, predict it (tolerance 0.5 C); 12 more runs"
+    & $py scripts\tutorial_room.py check --scene $scene --heat-vti $tempVti --readings $readings `
+        --sim $sim2 --wasm $wh --gamma 0.8 --work $OutDir
+    # FAIL is the expected result with this model (no heater, no window): see docs/en/tutorial-room.md
+    if ($LASTEXITCODE -ne 0) { Write-Host "(expected with this model: it has no heater and no window; see docs/en/tutorial-room.md)" }
 }
 
 Write-Host "== [3a] OpenFOAM case from Dyne's temperature field (OpenFOAM itself is not needed for this)"

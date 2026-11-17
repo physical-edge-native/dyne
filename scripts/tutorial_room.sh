@@ -69,8 +69,11 @@ fi
 export PYTHONIOENCODING=utf-8
 
 if [ -n "$PY" ]; then
-  echo "== [2c] check: Dyne's temperature against the readings (tolerance 0.5 C) and the made-up field (reported)"
-  "$PY" scripts/tutorial_room.py check --scene "$SCENE" --heat-vti "$OUT/temperature.vti" --readings "$READINGS"
+  echo "== [2c] check: leave each thermometer out, rerun, predict it (tolerance 0.5 C); 12 more runs"
+  # FAIL is the expected result with this model (no heater, no window): see docs/en/tutorial-room.md
+  "$PY" scripts/tutorial_room.py check --scene "$SCENE" --heat-vti "$OUT/temperature.vti" --readings "$READINGS" \
+    --sim "$SIM2" --wasm "$WH" --gamma 0.8 --work "$OUT" \
+    || echo "(expected with this model: it has no heater and no window; see docs/en/tutorial-room.md)"
 fi
 
 echo "== [3a] OpenFOAM case from Dyne's temperature field (OpenFOAM itself is not needed for this)"

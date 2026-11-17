@@ -120,22 +120,45 @@ estimate, **not the true temperature**:
 - The heat model treats furniture as air, and its "time" is not physical time:
   the model is only run until it settles.
 
-The script prints how close the model is to the readings and to the made-up
-field:
+### Checking the field: leave one thermometer out
+
+A model that is nudged to a thermometer will agree with that thermometer: with
+gamma = 1 it simply copies the reading. Agreement at the nudged points
+therefore says nothing about the field between them. The check instead leaves
+each thermometer out in turn, reruns the model with the other 11, and compares
+the model with the reading it was not given (a **hold-out** check). The
+tolerance, 0.5 C, is the accuracy of common room thermometers.
 
 ```
-check: at the 12 reading points |reading - Dyne| mean 0.100 C, max 0.314 C (tolerance 0.5 C)
-check: over the free floor (714 grid points) |Dyne - made-up field| mean 0.91 C, 95% 3.25 C, max 6.11 C (reported, not a pass criterion)
-check: PASS
+check: at the 12 reading points (nudged there) |reading - Dyne| mean 0.100 C, max 0.314 C (reported)
+check: over the free floor (714 grid points) |Dyne - made-up field| mean 0.91 C, 95% 3.25 C, max 6.11 C (reported)
+check: hold-out (each thermometer left out, then predicted) |reading - Dyne| mean 1.68 C, max 6.16 C (tolerance 0.5 C)
+check: hold-out per thermometer: D1 1.67 D2 0.33 D3 0.36 D4 1.82 D5 0.11 D6 0.23 D7 3.28 D8 0.98 D9 1.32 W1 6.16 W2 3.43 W3 0.52
+check: FAIL
 ```
 
-The tolerance at the thermometers, 0.5 C, was fixed before the first run: it
-is the accuracy of common room thermometers, so a model further from a reading
-than that would contradict it. The first value tried for gamma, 0.5, failed
-this check (max 1.12 C, near the heater: one grid point cannot hold a hot
-reading against the diffusion around it); gamma = 0.8 passes. The difference
-from the made-up field is reported only: with 12 thermometers it is not
-expected to be small.
+**This model fails the check, and that is the expected result.** The model
+has no heater and no window, so it cannot predict a thermometer next to them
+(W1, beside the heater, is 6.2 C off). We checked where the error comes from
+(details and the script: [docs/design/2026-11-18-room-temperature-check.md](../design/2026-11-18-room-temperature-check.md)):
+
+| What was changed | Hold-out error, mean / max |
+|---|---|
+| This tutorial (no heater, no window), gamma = 0.8 | 1.68 / 6.16 C |
+| Same, gamma = 0.5 | 1.87 / 6.57 C |
+| Model with the heater and window given (same equation as the made-up field; PC calculation) | 0.13 / 0.29 C |
+| Heat input along the walls learned from the readings (24 thermometers, nothing about the heater or window given; PC calculation) | 0.14 / 0.47 C |
+
+- **Splitting the room over 32 devices adds no error**: the split field is
+  bit-identical to a single-device run (next section).
+- **Running longer does not help**: 2000 and 20000 steps give the same field.
+- **Changing gamma does not help**: it only changes how hard the model is
+  pulled at the thermometers. An earlier version of this tutorial checked the
+  model at the nudged points and passed by raising gamma from 0.5 to 0.8; that
+  check was withdrawn.
+- **The missing heat sources are the cause.** Learning them from the readings
+  is the next step (issue #100): the last two rows were computed on a PC, not yet by the
+  simulated devices.
 
 ### The check that matters: splitting changes no bit
 

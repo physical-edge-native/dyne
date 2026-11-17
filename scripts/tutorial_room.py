@@ -9,8 +9,8 @@ tutorial (that is Dyne's heat model, run by dyne-sim2d).
                 crates/dyne-sim2d/scenes/room6_temp.csv was made with this)
   coarse-shape  take the room shape (.vti of the shape grid actor) at the points of the heat grid,
                 so that the OpenFOAM export can use it for walls (both grids share their points)
-  check         compare Dyne's temperature field with the readings (pass/fail) and with the made-up
-                field the readings were sampled from (reported only)
+  check         hold-out check: leave each thermometer out, rerun Dyne, predict it (pass/fail); also
+                reports the field against the readings and the made-up field
   figures       draw the tutorial's pictures (PNG) with matplotlib
   screenshot    take a picture of the 3D dashboard (HTML) with a headless Edge or Chrome
 
@@ -45,10 +45,13 @@ import twin_demo  # noqa: E402
 # field changes most (near the heater and the window) and one in the far corner. (id, x, y)
 WALL_THERMOMETERS = [("W1", 0.10, 1.30), ("W2", 2.10, 2.60), ("W3", 3.50, 2.30)]
 
-# Tolerance of the check, written before the first run (CLAUDE.md rule 6). See docs/en/tutorial-room.md.
-#   At the reading points the nudged model must stay within 0.5 C of the reading: the accuracy class of
-#   common room thermometers (for example +-0.5 C), so a model further away than that would contradict
-#   the readings it was given.
+# Tolerance of the check (CLAUDE.md rule 6). See docs/en/tutorial-room.md and
+# docs/design/2026-11-18-room-temperature-check.md.
+#   Hold-out: each thermometer in turn is left out of the run, and the model must predict its reading
+#   within 0.5 C (the accuracy class of common room thermometers, for example +-0.5 C). The model is not
+#   judged at the points it was nudged to: there, a large enough gamma always "passes" (gamma = 1 copies
+#   the reading), so that check says nothing about the field. It was the check of the first version of
+#   this tutorial, and it was passed by raising gamma from 0.5 to 0.8 (2026-11-18, withdrawn).
 READING_TOL_C = 0.5
 
 
@@ -213,14 +216,44 @@ def compare(a):
     return np.array(res), np.array(errs), u
 
 
+def run_heat(a, readings_path, vti):
+    """One run of the tutorial's heat model (same options as scripts/tutorial_room.sh step 2b)."""
+    cmd = [os.path.abspath(a.sim), "--wasm", a.wasm, "--scene", a.scene, "--h", "0.1", "--px", "8", "--py", "4", "--alpha", "1",
+           "--dt", "0.002", "--outer-bc", "zero_grad", "--init-value", "20", "--temp-sensors", readings_path,
+           "--nudge-gamma", str(a.gamma), "--steps", "2000", "--vti", vti, "--quiet"]
+    out = subprocess.run(cmd, capture_output=True, text=True)
+    if out.returncode != 0 or "PASS (bit-exact)" not in out.stdout:
+        raise SystemExit("dyne-sim2d failed:\n" + out.stdout + out.stderr)
+    return read_vti(vti)
+
+
 def cmd_check(a):
     res, errs, u = compare(a)
     print("check: Dyne field %.2f..%.2f C" % (u.min(), u.max()))
-    print("check: at the %d reading points |reading - Dyne| mean %.3f C, max %.3f C (tolerance %.1f C)"
-          % (len(res), res.mean(), res.max(), READING_TOL_C))
+    print("check: at the %d reading points (nudged there) |reading - Dyne| mean %.3f C, max %.3f C (reported)"
+          % (len(res), res.mean(), res.max()))
     print("check: over the free floor (%d grid points) |Dyne - made-up field| mean %.2f C, 95%% %.2f C, max %.2f C "
-          "(reported, not a pass criterion)" % (len(errs), errs.mean(), np.percentile(errs, 95), errs.max()))
-    ok = bool(res.max() <= READING_TOL_C) and np.isfinite(u).all()
+          "(reported)" % (len(errs), errs.mean(), np.percentile(errs, 95), errs.max()))
+    # hold-out: leave each thermometer out in turn and predict it
+    with open(a.readings, encoding="utf-8") as f:
+        lines = f.read().splitlines()
+    head = [l for l in lines if l.strip() and not l.startswith("#")][0]
+    rows = [l for l in lines if l.strip() and not l.startswith("#")][1:]
+    tmp = os.path.join(a.work, "holdout")
+    os.makedirs(tmp, exist_ok=True)
+    rd = read_readings(a.readings)
+    ho = []
+    for k, r in enumerate(rd):
+        path = os.path.join(tmp, "without_%s.csv" % r["id"])
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write("\n".join([head] + rows[:k] + rows[k + 1:]) + "\n")
+        v = run_heat(a, path, os.path.join(tmp, "without_%s.vti" % r["id"]))
+        ho.append((r["id"], abs(float(r["T"]) - field_at(v, float(r["x"]), float(r["y"])))))
+    e = np.array([d for _, d in ho])
+    print("check: hold-out (each thermometer left out, then predicted) |reading - Dyne| mean %.2f C, max %.2f C "
+          "(tolerance %.1f C)" % (e.mean(), e.max(), READING_TOL_C))
+    print("check: hold-out per thermometer: " + " ".join("%s %.2f" % h for h in ho))
+    ok = bool(e.max() <= READING_TOL_C) and np.isfinite(u).all()
     print("check: %s" % ("PASS" if ok else "FAIL"))
     sys.exit(0 if ok else 1)
 
@@ -497,10 +530,14 @@ def main(argv=None):
     p.add_argument("--heat-vti", required=True)
     p.add_argument("--out", required=True)
     p.set_defaults(fn=cmd_coarse_shape)
-    p = sub.add_parser("check", help="compare Dyne's field with the readings and the made-up field")
+    p = sub.add_parser("check", help="hold-out check of Dyne's field (reruns dyne-sim2d once per thermometer)")
     p.add_argument("--scene", required=True)
     p.add_argument("--heat-vti", required=True)
     p.add_argument("--readings", required=True)
+    p.add_argument("--sim", required=True, help="dyne-sim2d executable")
+    p.add_argument("--wasm", required=True, help="heat2d_actor.wasm")
+    p.add_argument("--gamma", type=float, default=0.8, help="the --nudge-gamma of the run being checked")
+    p.add_argument("--work", required=True, help="directory for the hold-out runs")
     p.set_defaults(fn=cmd_check)
     p = sub.add_parser("figures", help="draw the tutorial's pictures")
     p.add_argument("--scene", required=True)
