@@ -56,7 +56,8 @@ real space that the devices keep up to date.
 |---|---|---|---|
 | USD (Isaac Sim / Isaac Lab and other USD-based tools) | room shape and objects, with collision information | robot learning and simulation in a scene that matches the real room | implemented, awaiting hardware verification |
 | VTK image data (ParaView, PyVista) | 2D/3D field state | inspection and post-processing without licences; checked bit for bit in CI | implemented (`--vti PATH`) |
-| OpenFOAM case | grid, initial field and boundary conditions | detailed what-if studies with an established CFD package | planned (#57) |
+| OpenFOAM case (scalarTransportFoam) | grid, initial field, boundary conditions, given velocity and diffusivity | detailed what-if studies with an established CFD package; format and read-back checked in CI (OpenFOAM itself is not run there) | implemented (`dyne-foam case`) |
+| OpenFOAM velocity field (import) | airflow computed by OpenFOAM, mapped onto Dyne's grid | the given airflow that carries temperature, CO2 and humidity | implemented (`dyne-foam velocity`) |
 
 ```sh
 # write the final field of a run as VTK image data (open it in ParaView), then print each array's CRC-32
@@ -66,6 +67,29 @@ cargo run --release -p dyne-export --bin dyne-vti -- info wave2d.vti
 
 Values are stored losslessly (raw little-endian 64-bit floats), so the file reads back bit for bit;
 `dyne-sim2d --vti PATH` writes the field of a split simulator run in the same way.
+
+OpenFOAM works with cells rather than points: each point of Dyne's grid becomes the centre of one
+cell of a single `blockMesh` block, so the values carry over one to one (the domain extends half a
+spacing beyond the outer points). Numbers are written in the shortest decimal form that reads back to
+the same 64-bit float.
+
+```sh
+# Dyne -> OpenFOAM: a scalarTransportFoam case from a .vti field
+# (faces west,east,south,north[,bottom,top]; diffusivity --diffusivity, default 2.2e-5 m^2/s)
+cargo run --release -p dyne-export --bin dyne-foam -- case --vti wave2d.vti --out wave2dCase --velocity 0.1,0,0 --faces fixed:0,zero-gradient,zero-gradient,zero-gradient
+cargo run --release -p dyne-export --bin dyne-foam -- info wave2dCase   # reads it back, prints the CRC-32 of T
+# then, with OpenFOAM (OpenFOAM.com v2xxx): cd wave2dCase && blockMesh && scalarTransportFoam
+
+# OpenFOAM -> Dyne: map the velocity of a CFD case (roomFlow) onto Dyne's grid, then read it
+cargo run --release -p dyne-export --bin dyne-foam -- case --vti wave2d.vti --out flowGrid
+(cd flowGrid && blockMesh && mapFields ../roomFlow -sourceTime latestTime)
+cargo run --release -p dyne-export --bin dyne-foam -- velocity flowGrid 0 --vti flow.vti
+```
+
+The OpenFOAM steps have not been run in Dyne's own tests; the details, the mapping of boundary
+types and the differences in the Foundation releases (openfoam.org) are in the documentation of
+`dyne_export::foam` (`cargo doc -p dyne-export --open`). Results of OpenFOAM and Dyne differ by their
+discretisation, so comparing them needs a stated tolerance.
 
 ## Limits stated up front
 
@@ -179,6 +203,7 @@ these solvers are recorded in
 | `crates/dyne-core` | deterministic RNG, discrete-event clock, virtual network, WebAssembly loader |
 | `crates/dyne-sim`, `crates/dyne-sim2d` | N-device simulators (1D / 2D) |
 | `crates/dyne-native` | native PC solvers (2D/3D wave), bit-exact with the WebAssembly solvers; reference and fast backend |
+| `crates/dyne-export` | connections to other tools: VTK image data, OpenFOAM cases and velocity import (`dyne-vti`, `dyne-foam`) |
 | `crates/heat1d-actor`, `crates/heat2d-actor` | finite-difference solvers compiled to WebAssembly |
 | `crates/heat1d-pinn-actor` | learned solver (time-discrete physics-informed network) |
 | `crates/sdf2d-grid-actor` | room-shape reconstruction from range sensors (simulator stage) |
@@ -205,8 +230,7 @@ a slow indoor field (temperature, CO2 and humidity carried by a given airflow) a
 the first assimilated 3D field; forecasting by handing the devices' state to a PC
 with identical bits; simulation of many devices with device capabilities (speed,
 memory, radio delay and loss) as parameters, calibrated by hardware
-measurements; export of the field state to VTK and OpenFOAM (see
-[Connecting to other tools](#connecting-to-other-tools)).
+measurements.
 
 ## Contributing
 
