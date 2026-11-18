@@ -1,0 +1,17 @@
+# Dummy temperature readings for the room tutorial (docs/en/tutorial-room.md, issue #96).
+# Made by: python scripts/tutorial_room.py readings --scene crates/dyne-sim2d/scenes/room6.txt --sigma 0.1 --seed 96
+# T = made-up field (scripts/twin_demo.py dummy_temperature) + normal error, rounded to 0.01 C.
+# truth = the made-up field at the point (for the comparison only; Dyne reads id, x, y, T).
+id,x,y,T,truth
+D1,0.55,1.05,24.84,24.929
+D2,1.35,1.05,21.09,20.943
+D3,2.15,0.75,19.73,19.813
+D4,0.55,1.85,23.44,23.619
+D5,1.35,1.85,18.96,19.006
+D6,2.15,1.6,18.22,18.052
+D7,1.45,2.35,15.63,15.715
+D8,2.25,2.3,14.81,14.704
+D9,3.1,2.3,14.64,14.694
+W1,0.1,1.3,28.78,28.861
+W2,2.1,2.6,12.86,12.793
+W3,3.5,2.3,15.12,15.049

@@ -85,14 +85,14 @@ html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font:12px/
     <button class="tb on" id="b-rays" data-act="rays">光線</button>
     <button class="tb on" id="b-grid" data-act="grid">目盛り</button><button class="tb on" id="b-cut" data-act="cut">手前の壁を隠す</button>
     <span class="sep"></span>
-    <span style="color:var(--dim)">形 = Dyne の分担計算の結果 / 測距 = 理想化した模擬入力 / 温度 = ダミー</span>
+    <span id="srcnote" style="color:var(--dim)">形 = Dyne の分担計算の結果 / 測距 = 理想化した模擬入力 / 温度 = ダミー</span>
     <span class="badge" id="badge"></span>
   </div>
   <div id="stage" class="panel"><div class="ph">ステージ</div><div id="tree"></div></div>
   <div id="view">
     <canvas id="gl"></canvas><canvas id="overlay"></canvas>
     <div id="vplabel">透視投影 | Z 軸が上 | 1 目盛り = 0.5 m</div>
-    <div id="legend"><div class="t">床の温度 [度]</div><canvas id="lg" width="190" height="34"></canvas><div class="n">ダミー(架空の熱拡散の解)</div></div>
+    <div id="legend"><div class="t">床の温度 [度]</div><canvas id="lg" width="190" height="34"></canvas><div class="n" id="lgnote">ダミー(架空の熱拡散の解)</div></div>
     <div id="hint">左ドラッグ: 回転 / 右・中ドラッグ または Shift+左: 平行移動 / ホイール: 拡大縮小 / クリック: 選択</div>
   </div>
   <div id="props" class="panel"><div class="ph">プロパティ</div><div id="ptab"></div></div>
@@ -192,7 +192,7 @@ function showTab() {
     el.innerHTML = '<div style="font-family:Segoe UI,Yu Gothic UI,sans-serif;font-size:12.5px;max-width:1100px">' +
       '<p><b>本物の計算:</b> 部屋の形。多数のマイコン(ノード)がそれぞれ自分の区画の「最寄りの表面までの符号つき距離」を測距から計算し、隣のノードと境目の値と光線を受け渡して合わせた結果を、ゼロの等値線として取り出し高さ方向に押し出しています。分割して計算した結果は、1 台でまとめて計算した結果と全桁一致します。</p>' +
       '<p class="note"><b>理想化した入力:</b> 測距の値はシミュレータが正解の部屋から作った模擬データ(雑音は小さく、方向の数は多め)です。実機の測距ではありません。</p>' +
-      '<p class="note"><b>ダミー:</b> 温度場。暖房(西の壁)と窓(北の壁)を置いた定常の熱拡散を解いた架空の場で、ノードの温度の読み値はその値を取っただけです。Dyne の計算ではありません。家具の高さは場面ファイルの値です(平面の計算なので高さは推定していません)。</p></div>';
+      (D.tempAbout || '<p class="note"><b>ダミー:</b> 温度場。暖房(西の壁)と窓(北の壁)を置いた定常の熱拡散を解いた架空の場で、ノードの温度の読み値はその値を取っただけです。Dyne の計算ではありません。家具の高さは場面ファイルの値です(平面の計算なので高さは推定していません)。</p>') + '</div>';
     return;
   }
   el.style.fontFamily = '';
@@ -447,6 +447,9 @@ function legend() {
   x.fillStyle = g; x.fillRect(0, 0, 190, 14);
   x.fillStyle = '#d7d8dc'; x.font = '11px Segoe UI';
   const n = 4; for (let k = 0; k <= n; k++) { const t = D.tmin + (D.tmax - D.tmin) * k / n, px = k * 190 / n; x.fillRect(Math.min(px, 189), 14, 1, 4); x.textAlign = k === 0 ? 'left' : k === n ? 'right' : 'center'; x.fillText(t.toFixed(0), px, 31); }
+  // 温度場の出所の表記 (issue #96: Dyne の温度場のときは twin_demo.py が tempNote / tempLegend を渡す)
+  if (D.tempNote) document.getElementById('srcnote').textContent = D.tempNote;
+  if (D.tempLegend) document.getElementById('lgnote').textContent = D.tempLegend;
 }
 legend();
 

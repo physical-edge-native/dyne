@@ -62,6 +62,11 @@
 #      the initial T of the walled room of step 17, on the grid of the CSV shape and on the grid of the .vti
 #      file; both must give the pinned CRC-32 of T, and T must stay within the range of the readings
 #      (20.9 to 23.1) (issue #92)
+#  19. room tutorial, simulator part (scripts/tutorial_room.sh --sim-only, docs/en/tutorial-room.md): the shape of
+#      the dummy room on 32 simulated devices and the 2D heat model nudged to the 12 dummy thermometer readings
+#      (crates/dyne-sim2d/scenes/room6_temp.csv) must both print "PASS (bit-exact)" with the pinned CRC-32
+#      (shape phi 9a16e389 d ba49ba95 w fc4d6fa3, temperature b9bf5cb8), and the OpenFOAM case written from the
+#      temperature must carry the same CRC-32; OpenFOAM and Isaac Lab are not run (issue #96).
 #
 # Usage (from the repository root):  bash scripts/ci-check.sh
 set -euo pipefail
@@ -391,6 +396,27 @@ elif out=$("$FOAM" case --sensors "$SENS" --shape "$RD/room6.csv" --out "$RD/sen
   echo "foam sensors     OK (5 readings, $ROOM_CELLS cells, T in [20.9, 23.1], crc32 $SENS_T_CRC on both grids)"
 else
   echo "$out"; echo "${out2:-}"; echo "foam sensors     FAIL (expected T crc32 $SENS_T_CRC, range 20.9 to 23.1)"; fail=1
+fi
+
+echo "== [19] room tutorial, simulator part: shape and nudged temperature, pinned bits (issue #96) =="
+TL="target/ci-tutorial-room"
+rm -rf "$TL"; mkdir -p "$TL"
+if bash scripts/tutorial_room.sh --sim-only --out "$TL/out" > "$TL/run.log" 2>&1; then
+  tut_ok=1
+  for pat in "^crc32: split phi 9a16e389 d ba49ba95 w fc4d6fa3 \| single phi 9a16e389 d ba49ba95 w fc4d6fa3$" \
+             "^crc32: split b9bf5cb8 single b9bf5cb8$" \
+             "^PASS \(bit-exact\): 15805 points$" \
+             "^PASS \(bit-exact\): 1036 points$" \
+             "^T: 1036 values, crc32 b9bf5cb8$"; do
+    grep -qE "$pat" "$TL/run.log" || { echo "tutorial-room    missing /$pat/"; tut_ok=0; }
+  done
+  if [ "$tut_ok" -eq 1 ]; then
+    echo "tutorial-room    OK (shape phi 9a16e389, temperature b9bf5cb8, OpenFOAM case T b9bf5cb8)"
+  else
+    echo "tutorial-room    FAIL (see $TL/run.log)"; fail=1
+  fi
+else
+  tail -n 20 "$TL/run.log"; echo "tutorial-room    FAIL (run)"; fail=1
 fi
 
 if [ "$fail" -ne 0 ]; then echo "CI CHECK FAILED"; exit 1; fi

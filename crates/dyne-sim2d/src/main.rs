@@ -48,6 +48,18 @@
 //!     (origin 0 and h = 1/(nx − 1), or the scene's corner and --h). `dyne-vti info PATH` reads it back
 //!     and prints the CRC-32 of each array, equal to the `crc32: split` values.
 //!
+//! Temperature from point readings (2026-11-18, GitHub issue #96, docs/en/tutorial-room.md; nothing changes
+//! without --temp-sensors / --init-value):
+//!   --scene PATH --h H … with the heat solver: the grid covers the scene's bounding rectangle with spacing H
+//!     (only the extent is used; walls, furniture and distance sensors are ignored by the heat solver)
+//!   --init-value T0 … every grid point starts at T0 (written with dyne_set after dyne_init2d)
+//!   --temp-sensors CSV … point readings (columns id, x, y, T). Each reading goes to the node owning its nearest
+//!     grid point; after every --obs-period K-th step (default 1) that node calls dyne_observe(k, T, gamma), i.e.
+//!     u_k ← u_k + gamma·(T − u_k) (nudging, gamma = --nudge-gamma, default 0.5, 0 < gamma ≤ 1). The single-node
+//!     solution applies the same readings at the same steps in the same order, so the PASS (bit-exact) check still
+//!     holds. The line "nudging: ..." reports |T − u| at the reading points after the last step. The result is a
+//!     model state kept close to the readings, not a measured field: the model has no heat sources.
+//!
 //! 形の変化への追従 (2026-11-11、docs/2026-11-11-dynamic-shape.md):
 //!   --decay λ --w-forget w --disagree τ --disagree-w w … 古い観測を忘れる仕組みの設定
 //!   --sweep-every n … 形の格子型アクターの距離の反復を n ステップに1回にする (既定 毎ステップ)
@@ -167,6 +179,15 @@ struct Config {
     replay_hash_every: u64,
     /// --replay-single: 再生のときも単一ノード解を解いて比べる (既定は比べない)
     replay_single: bool,
+    // ---- Temperature readings for the heat solver (issue #96; nothing changes without --temp-sensors) ----
+    /// --temp-sensors PATH: CSV of point readings (columns id,x,y,T; extra columns ignored)
+    temp_sensors: Option<String>,
+    /// --nudge-gamma γ: strength of the nudging towards the readings (0 < γ ≤ 1)
+    nudge_gamma: f64,
+    /// --obs-period k: nudge after every k-th step
+    obs_period: u64,
+    /// --init-value T0: uniform initial value written with dyne_set after dyne_init2d
+    init_value: Option<f64>,
 }
 
 fn parse_ms(s: &str) -> u64 {
@@ -228,6 +249,10 @@ fn parse_args() -> Config {
         replay_record: None,
         replay_hash_every: 50,
         replay_single: false,
+        temp_sensors: None,
+        nudge_gamma: 0.5,
+        obs_period: 1,
+        init_value: None,
     };
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -324,6 +349,10 @@ fn parse_args() -> Config {
                 c.replay_single = true;
                 used = false;
             }
+            "--temp-sensors" => c.temp_sensors = Some(val),
+            "--nudge-gamma" => c.nudge_gamma = val.parse().expect("--nudge-gamma <gamma>"),
+            "--obs-period" => c.obs_period = val.parse().expect("--obs-period <steps>"),
+            "--init-value" => c.init_value = Some(val.parse().expect("--init-value <value>")),
             "--cfg" => {
                 let (k, v) = val.split_once('=').expect("--cfg キー=値");
                 c.extra_cfg.push((k.parse().unwrap(), v.parse().unwrap()));
@@ -369,6 +398,11 @@ struct Actor2d {
     len: Option<wasmi::TypedFunc<(), u32>>,
     /// IMU の融合のアクター (imu-fusion-actor) のみ
     imu_push: Option<wasmi::TypedFunc<(i64, f64, f64, f64, f64, f64, f64), i32>>,
+    // ---- Heat solver with readings (issue #96) ----
+    /// dyne_set(k, v): write one grid point (uniform initial value)
+    set: Option<wasmi::TypedFunc<(u32, f64), ()>>,
+    /// dyne_observe(k, y, gamma) -> y - u before nudging
+    observe: Option<wasmi::TypedFunc<(u32, f64, f64), f64>>,
     /// dyne_cfg の呼び出しの控え (--replay-record の actor_setup 用)
     cfg_trace: Vec<(u32, f64)>,
     buf: u32,
@@ -438,6 +472,8 @@ impl Actor2d {
             model_init: opt!("dyne_model_init_field", (), i32),
             len: opt!("dyne_len", (), u32),
             imu_push: opt!("dyne_imu_push", (i64, f64, f64, f64, f64, f64, f64), i32),
+            set: opt!("dyne_set", (u32, f64), ()),
+            observe: opt!("dyne_observe", (u32, f64, f64), f64),
             cfg_trace: Vec::new(),
             memory,
             store,
@@ -713,6 +749,52 @@ fn setup_faces_init(a: &mut Actor2d, b: &Block, cfg: &Config, g: &GridGeom) {
         let rc = a.model_init.expect("dyne_model_init_field が無い").call(&mut a.store, ()).unwrap();
         assert_eq!(rc, 0, "dyne_model_init_field が失敗 (rc={rc}, 区画 {:?})", b);
     }
+    if let Some(v) = cfg.init_value {
+        // Uniform initial value (issue #96): every grid point of the block, written after dyne_init2d
+        let f = a.set.expect("--init-value needs an actor with dyne_set (heat2d-actor)");
+        for k in 0..(b.nx * b.ny) as u32 {
+            f.call(&mut a.store, (k, v)).unwrap();
+        }
+    }
+}
+
+/// A temperature reading at a point (issue #96): one row of --temp-sensors
+#[derive(Clone, Debug)]
+struct TempSensor {
+    id: String,
+    x: f64,
+    y: f64,
+    value: f64,
+    /// Nearest grid point (global indices)
+    gi: usize,
+    gj: usize,
+}
+
+/// Reads --temp-sensors: a CSV with a header line that has the columns id, x, y and T
+/// (any order, extra columns ignored; lines starting with # are comments)
+fn read_temp_sensors(path: &str, g: &GridGeom, nx: usize, ny: usize) -> Vec<TempSensor> {
+    let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("--temp-sensors {path}: {e}"));
+    let mut lines = text.lines().map(|l| l.trim()).filter(|l| !l.is_empty() && !l.starts_with('#'));
+    let head: Vec<&str> = lines.next().expect("--temp-sensors: empty file").split(',').map(|c| c.trim()).collect();
+    let col = |name: &str| head.iter().position(|c| *c == name).unwrap_or_else(|| panic!("--temp-sensors: no column {name} (header {head:?})"));
+    let (ci, cx, cy, ct) = (col("id"), col("x"), col("y"), col("T"));
+    let mut out = Vec::new();
+    for l in lines {
+        let v: Vec<&str> = l.split(',').map(|c| c.trim()).collect();
+        let num = |k: usize| v.get(k).and_then(|t| t.parse::<f64>().ok()).unwrap_or_else(|| panic!("--temp-sensors: bad line {l:?}"));
+        let (x, y, value) = (num(cx), num(cy), num(ct));
+        let gi = ((x - g.x0) / g.h + 0.5).floor();
+        let gj = ((y - g.y0) / g.h + 0.5).floor();
+        assert!(
+            gi >= 0.0 && gj >= 0.0 && (gi as usize) < nx && (gj as usize) < ny,
+            "--temp-sensors: reading {} at ({x}, {y}) is outside the grid",
+            v[ci]
+        );
+        assert!(value.is_finite(), "--temp-sensors: reading {} is not finite", v[ci]);
+        out.push(TempSensor { id: v[ci].to_string(), x, y, value, gi: gi as usize, gj: gj as usize });
+    }
+    assert!(!out.is_empty(), "--temp-sensors: no readings");
+    out
 }
 
 /// 1メッセージを枠 ([u32 len][メッセージ]) に入れて追記する
@@ -784,6 +866,8 @@ struct Node {
     ifaces: Vec<usize>,
     /// このノードに付いているセンサ (場面のセンサ一覧の添字)
     sensors: Vec<usize>,
+    /// Temperature readings on this node (issue #96): (index in Sim::temp, local grid point k)
+    obs: Vec<(usize, u32)>,
     phase: Phase,
     cur_step: u64,
     got: Vec<bool>,
@@ -828,6 +912,10 @@ struct Sim {
     rcheck_bad: usize,
     /// 最後にどれかのノードが計算を始めた仮想時刻 (進まないことの検出。issue #26)
     last_progress_us: u64,
+    /// Temperature readings (issue #96; empty without --temp-sensors)
+    temp: Vec<TempSensor>,
+    /// Last innovation y - u (before nudging) of each reading
+    innov: Vec<f64>,
 }
 
 /// 進まないことの検出の猶予 (仮想時刻)。最後の計算の開始と、最後の一時停止・分断の終わりの
@@ -1021,6 +1109,15 @@ impl Sim {
         }
         let rc = n.actor.step.call(&mut n.actor.store, ()).unwrap();
         assert_eq!(rc, STEP_OK, "未受領の界面を抱えて計算した (ノード{node})");
+        // Nudging towards the temperature readings (issue #96): right after the step, before the next
+        // exchange, in the order of the readings file (the single-node solution does the same)
+        if !n.obs.is_empty() && (n.cur_step + 1) % self.cfg.obs_period == 0 {
+            let f = n.actor.observe.expect("--temp-sensors needs an actor with dyne_observe (heat2d-actor)");
+            for &(si, k) in &n.obs {
+                let d = f.call(&mut n.actor.store, (k, self.temp[si].value, self.cfg.nudge_gamma)).unwrap();
+                self.innov[si] = d;
+            }
+        }
         n.phase = Phase::Computing;
         if self.replay.is_some() || self.rec.is_some() {
             self.after_step_replay(node);
@@ -1511,18 +1608,50 @@ fn main() {
             delay: cfg.delay.unwrap_or((px + py - 1) as u64),
         };
         (GridGeom { x0, y0, h: cfg.h }, Some(sc), Some(shape))
+    } else if let Some(path) = cfg.scene.clone() {
+        // Heat solver in a room (issue #96): the grid covers the scene's bounding rectangle with spacing
+        // --h, like the shape grid actor. Only the room's extent is used (not the walls, furniture or
+        // distance sensors): the heat solver diffuses over the whole rectangle
+        assert!(cfg.temp_sensors.is_some(), "--scene with a heat solver is for --temp-sensors (issue #96)");
+        assert!(!is_wave && !is_imu && cfg.model.is_none(), "--temp-sensors is for the heat solver (heat2d-actor)");
+        let sc = Scene::parse(&std::fs::read_to_string(&path).expect("場面ファイルの読み込み"));
+        let (x0, y0, x1, y1) = sc.bounds();
+        cfg.nx = ((x1 - x0) / cfg.h).round() as usize + 1;
+        cfg.ny = ((y1 - y0) / cfg.h).round() as usize + 1;
+        let r = cfg.alpha * cfg.dt / (cfg.h * cfg.h);
+        assert!(r <= 0.25, "陽解法の安定条件 r = α·dt/h² ≤ 1/4 を満たさない (r = {r})");
+        (GridGeom { x0, y0, h: cfg.h }, None, None)
     } else {
-        assert!(cfg.scene.is_none(), "--scene は格子型アクター用");
         let h = 1.0 / ((cfg.nx - 1) as f64);
         let r = cfg.alpha * cfg.dt / (h * h);
         assert!(is_wave || is_imu || r <= 0.25, "陽解法の安定条件 r = α·dt/h² ≤ 1/4 を満たさない (r = {r})");
         (GridGeom { x0: 0.0, y0: 0.0, h }, None, None)
     };
+    if cfg.temp_sensors.is_some() {
+        assert!(!is_shape && !is_wave && !is_imu, "--temp-sensors is for the heat solver (heat2d-actor)");
+        assert!(cfg.nudge_gamma > 0.0 && cfg.nudge_gamma <= 1.0, "--nudge-gamma must be in (0, 1]");
+        assert!(cfg.obs_period >= 1, "--obs-period must be at least 1");
+        assert!(cfg.replay.is_none() && cfg.dump_node.is_none(), "--temp-sensors cannot be used with --replay or --dump-node");
+    }
+    assert!(cfg.init_value.is_none() || cfg.dump_node.is_none(), "--init-value cannot be used with --dump-node");
     assert!(cfg.nx >= 3 && cfg.ny >= 3, "格子は3×3点以上");
 
     let blocks = build_blocks(&cfg);
     for (i, b) in blocks.iter().enumerate() {
         assert!(b.nx >= 3 && b.ny >= 3, "ノード{i}の区画が3×3点未満 ({}×{})", b.nx, b.ny);
+    }
+    // Temperature readings (issue #96): each one goes to the node that owns its nearest grid point
+    let temp = match &cfg.temp_sensors {
+        Some(p) => read_temp_sensors(p, &geom, cfg.nx, cfg.ny),
+        None => Vec::new(),
+    };
+    let mut node_obs: Vec<Vec<(usize, u32)>> = vec![Vec::new(); n_nodes];
+    let mut temp_owner = Vec::new();
+    for (si, t) in temp.iter().enumerate() {
+        let owner = blocks.iter().position(|b| b.owns(t.gi as i64, t.gj as i64)).expect("reading outside the grid");
+        let b = &blocks[owner];
+        node_obs[owner].push((si, ((t.gj - b.iy0) * b.nx + (t.gi - b.ix0)) as u32));
+        temp_owner.push(owner);
     }
     let mut iface_nodes: HashMap<usize, (usize, usize)> = HashMap::new();
     for (node, b) in blocks.iter().enumerate() {
@@ -1590,6 +1719,7 @@ fn main() {
             got: vec![false; ifaces.len()],
             ifaces,
             sensors: node_sensors[ni].clone(),
+            obs: node_obs[ni].clone(),
             phase: Phase::Waiting { step: 0 },
             cur_step: 0,
             pending: HashMap::new(),
@@ -1630,6 +1760,8 @@ fn main() {
         rchecks: Vec::new(),
         rcheck_bad: 0,
         last_progress_us: 0,
+        innov: vec![f64::NAN; temp.len()],
+        temp: temp.clone(),
     };
     sim.run();
     if let Some(w) = &sim.rec {
@@ -1715,6 +1847,13 @@ fn main() {
             }
             let rc = single.step.call(&mut single.store, ()).unwrap();
             assert_eq!(rc, STEP_OK);
+            // Nudging (issue #96): the same readings, the same steps, the same order as the split run
+            if !temp.is_empty() && (s + 1) % cfg.obs_period == 0 {
+                let f = single.observe.expect("dyne_observe");
+                for t in &temp {
+                    f.call(&mut single.store, ((t.gj * cfg.nx + t.gi) as u32, t.value, cfg.nudge_gamma)).unwrap();
+                }
+            }
             if cfg.track_csv.is_some() && (s + 1) % cfg.track_every == 0 {
                 let mut tf = blank();
                 read_block(&mut single, &whole, cfg.nx, &mut tf);
@@ -1749,7 +1888,7 @@ fn main() {
     // 領域が正方形 (nx=ny) のときだけ厳密解になる
     let pi = std::f64::consts::PI;
     let t_end = cfg.steps as f64 * cfg.dt;
-    let analytic_linf = if !is_shape && !is_wave && !is_imu && cfg.outer_kind == BC_DIRICHLET && cfg.outer_value == 0.0 && cfg.nx == cfg.ny {
+    let analytic_linf = if !is_shape && !is_wave && !is_imu && temp.is_empty() && cfg.init_value.is_none() && cfg.outer_kind == BC_DIRICHLET && cfg.outer_value == 0.0 && cfg.nx == cfg.ny {
         let h = geom.h;
         let decay = libm::exp(-2.0 * pi * pi * cfg.alpha * t_end);
         let mut e = 0.0f64;
@@ -1847,6 +1986,35 @@ fn main() {
         if let (Some(path), Some(m)) = (&cfg.model, &cfg.model_bytes) {
             writeln!(out, "model: {} ({} bytes), initial field = model(x, y) evaluated on each node", path, m.len()).unwrap();
         }
+        if let Some(v) = cfg.init_value {
+            writeln!(out, "initial value: {} everywhere", v).unwrap();
+        }
+        if !temp.is_empty() {
+            writeln!(
+                out,
+                "temp-sensors: {} readings from {} | grid h = {} m origin ({}, {}) | nudging gamma {} every {} steps | alpha {} dt {}",
+                temp.len(),
+                cfg.temp_sensors.as_deref().unwrap_or(""),
+                geom.h,
+                geom.x0,
+                geom.y0,
+                cfg.nudge_gamma,
+                cfg.obs_period,
+                cfg.alpha,
+                cfg.dt
+            )
+            .unwrap();
+            if !cfg.quiet {
+                for (si, t) in temp.iter().enumerate() {
+                    writeln!(
+                        out,
+                        "temp-sensor {}: at ({}, {}) -> grid ({}, {}) node {} reading {}",
+                        t.id, t.x, t.y, t.gi, t.gj, temp_owner[si], t.value
+                    )
+                    .unwrap();
+                }
+            }
+        }
     }
     writeln!(
         out,
@@ -1908,6 +2076,24 @@ fn main() {
         }
     }
     writeln!(out, "virtual time: {:.3} s", sim.now_us as f64 / 1e6).unwrap();
+    if !temp.is_empty() {
+        // How close the model state is to the readings at the reading points (after the last nudge),
+        // and the last innovation (before that nudge)
+        let res: Vec<f64> = temp.iter().map(|t| (t.value - split_f.phi[t.gj * cfg.nx + t.gi]).abs()).collect();
+        let inn: Vec<f64> = sim.innov.iter().map(|d| d.abs()).collect();
+        let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
+        let max = |v: &[f64]| v.iter().fold(0.0f64, |m, &x| if x.is_nan() || m.is_nan() { f64::NAN } else { m.max(x) });
+        writeln!(
+            out,
+            "nudging: |reading - model| at the {} reading points after the last step: mean {:.4e} max {:.4e} | last innovation |y - u| before nudging: mean {:.4e} max {:.4e}",
+            temp.len(),
+            mean(&res),
+            max(&res),
+            mean(&inn),
+            max(&inn)
+        )
+        .unwrap();
+    }
     if let Some(e) = analytic_linf {
         writeln!(out, "analytic: Linf = {:.3e} (t = {})", e, t_end).unwrap();
     }
@@ -2036,7 +2222,12 @@ fn main() {
                     writeln!(
                         s,
                         "{},{},{},{},{:e},{:e}",
-                        gx, gy, gx as f64 * geom.h, gy as f64 * geom.h, split_f.phi[k], single_f.phi[k]
+                        gx,
+                        gy,
+                        geom.x0 + gx as f64 * geom.h,
+                        geom.y0 + gy as f64 * geom.h,
+                        split_f.phi[k],
+                        single_f.phi[k]
                     )
                     .unwrap();
                 }

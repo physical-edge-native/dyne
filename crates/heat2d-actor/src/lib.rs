@@ -32,6 +32,9 @@
 //!   dyne_step() -> i32 … 1ステップ進める (STEP_*)
 //!   dyne_len / dyne_nx / dyne_ny / dyne_get(k) … 状態の観測 (k = j·nx + i)
 //!   dyne_steps_done / dyne_dropped / dyne_rejected … 計数
+//!   dyne_set(k, v) … 格子点 k の値の書き込み (一様な初期温度から始めるため。issue #96)
+//!   dyne_observe(k, y, γ) -> d … 観測点ナッジング u_k ← u_k + γ(y − u_k)、戻り値は適用前の y − u_k
+//!       (1次元の heat1d-actor と同じ式。issue #96、docs/2026-09-18-nudging-report.md)
 //!
 //! メールボックスの中のメッセージはワイヤ形式v2 (dyne-wire) の KIND_IFACE_BAND。
 //! ホストはヘッダ (界面ID=src、ステップ) だけを見て配送し、中身は解釈しない。
@@ -360,7 +363,14 @@ impl Field {
                 self.u_next[c] = u + r * lap;
             }
         }
-        core::mem::swap(&mut self.u, &mut self.u_next);
+        // Copy only the block's own points back (issue #96). Swapping the two whole arrays moved
+        // 2 × PAD_MAX values per step whatever the block size, which made a small block cost about
+        // 1.5 ms per step in the simulator. The halo is refilled by fill_halo before it is read, so
+        // the values computed are the same bit for bit.
+        for j in 0..self.ny {
+            let row = (j + 1) * w + 1;
+            self.u[row..row + self.nx].copy_from_slice(&self.u_next[row..row + self.nx]);
+        }
         self.apply_dirichlet();
         self.step += 1;
         self.got = [false; 4];
@@ -486,6 +496,40 @@ pub extern "C" fn dyne_ny() -> u32 {
 #[no_mangle]
 pub extern "C" fn dyne_get(k: u32) -> f64 {
     state().get(k as usize)
+}
+
+/// Writes the value of grid point k = j·nx + i (issue #96). Used by the host after `dyne_init2d` to
+/// start from a uniform temperature instead of the built-in test field. It only overwrites the state;
+/// the numerical method and the faces are unchanged. Out of range: no effect.
+#[no_mangle]
+pub extern "C" fn dyne_set(k: u32, value: f64) {
+    let s = state();
+    let k = k as usize;
+    if s.nx == 0 || k >= s.nx * s.ny {
+        return;
+    }
+    let (i, j) = (k % s.nx, k / s.nx);
+    let idx = s.at(i as isize, j as isize);
+    s.u[idx] = value;
+}
+
+/// Nudges grid point k = j·nx + i towards a reading y (issue #96; the same rule as the 1D actor,
+/// docs/2026-09-18-nudging-report.md): u_k ← u_k + γ·(y − u_k). Returns d = y − u_k before nudging
+/// (the innovation), or NaN when k is out of range. γ (0 < γ ≤ 1) and how often to observe are
+/// chosen by the host; the actor keeps no state for them. The rule is pointwise, so a split solution
+/// and a single-node solution that receive the same readings at the same steps stay bit-identical.
+#[no_mangle]
+pub extern "C" fn dyne_observe(k: u32, y: f64, gamma: f64) -> f64 {
+    let s = state();
+    let k = k as usize;
+    if s.nx == 0 || k >= s.nx * s.ny {
+        return f64::NAN;
+    }
+    let (i, j) = (k % s.nx, k / s.nx);
+    let idx = s.at(i as isize, j as isize);
+    let d = y - s.u[idx];
+    s.u[idx] += gamma * d;
+    d
 }
 
 #[no_mangle]
