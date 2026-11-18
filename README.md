@@ -2,13 +2,62 @@
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24241009.svg)](https://doi.org/10.5281/zenodo.24241009)
 
-**Dyne splits a physical model across networked devices, runs the same
-WebAssembly solver in a deterministic network simulator and on real devices,
-and checks the result bit for bit against a single-solver reference** —
+**Dyne turns a room into a digital twin that small devices keep up to date.**
+Devices spread through the space measure its shape and its physical fields, and
+keep a model of both on the devices themselves; Dyne hands the result to the
+tools you already use.
+
+<!-- Photo of a hardware twin experiment goes here (a room that may be published; planned). -->
+
+## What you can do with Dyne
+
+**Build a digital twin of a room and train robots in it.**
+Devices with distance sensors build the room's walls and furniture together.
+Dyne writes the room as USD with collision shapes, so it loads directly into a
+robot simulator such as Isaac Lab. A walking task for a Unitree Go2 quadruped in
+the measured room is included.
+
+**Keep physical fields in the twin in step with the real room.**
+Each device runs a physics model of its part of the room and keeps it fitted to
+its sensors (by nudging, a simple form of data assimilation). Neighbouring
+devices exchange only the values at their borders. When a detailed simulation is
+needed, the state is exported as initial and boundary conditions, for example as
+an OpenFOAM case with the room's walls.
+
+**Develop and verify field solvers for networks of microcontrollers.**
+The same WebAssembly solver runs split over simulated devices (with message
+loss, delay, devices joining or leaving) and on ESP32 devices. In both cases,
+the split result must equal a single-solver run bit for bit.
+
+![A dummy room: walls and furniture computed by 32 simulated devices from simulated distance sensors (red), on top of the true room (light blue)](docs/demo/tutorial/02-shape.png)
+
+**Try it without hardware:** the [room tutorial](docs/en/tutorial-room.md) goes
+from dummy sensors in a simulated room to the devices' shape and temperature, a
+USD file for Isaac Lab and an OpenFOAM case, with screenshots of each step.
+
+### Fields supported today and planned
+
+| Field | Status |
+|---|---|
+| Temperature (heat diffusion) | Fitted to thermometers in the simulator; exported to OpenFOAM. Learning heat sources such as heaters and windows from the readings is in progress ([#100](https://github.com/physical-edge-native/dyne/issues/100)) |
+| Waves (vibration, sound) | The 2D wave equation runs on ESP32 devices, bit-identical to the simulator; fitting to sensors is planned ([#102](https://github.com/physical-edge-native/dyne/issues/102)) |
+| Stress and strain | Planned ([#103](https://github.com/physical-edge-native/dyne/issues/103)) |
+
+| Part | Status |
+|---|---|
+| Room shape → USD → Isaac Lab | Simulator: works (tutorial). Real devices: first run planned. Isaac Lab training: procedure ready, not yet run on a GPU machine |
+
+Dyne does not replace OpenFOAM or other field solvers: it keeps a coarse model
+fitted to the sensors on the devices, and hands the state to those tools when a
+detailed simulation is needed.
+
+## How you work with Dyne
+
+Under the hood, **Dyne splits a physical model across networked devices, runs
+the same WebAssembly solver in a deterministic network simulator and on real
+devices, and checks the result bit for bit against a single-solver reference** —
 including under message loss, delay and devices joining or leaving, with
 recorded sensor input that can be replayed.
-
-## What you do with Dyne
 
 Commands are run from the repository root. Steps 1, 2 and 5 need no hardware.
 
