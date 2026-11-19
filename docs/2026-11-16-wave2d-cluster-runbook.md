@@ -385,6 +385,8 @@ dyne-sim2d の `--loss` に当たる)。1 以上は設定を断られる(`mode.t
 
 ## 8. 記録の扱い(公開リポジトリ)
 
+- 写真・画面・録画(1 台の電源を切る試験 §4.4 の録画を含む)の撮り方と置き場所は
+  docs/2026-11-19-capture-procedure.md(GitHub issue #94)に従う。
 - wave2d_out\ は git 管理外。残す記録は measured\ へ写す。
 - **events.jsonl と nodes.json には実在の MAC アドレス(online の status の mac)と、アクセスポイントの LAN の
   IP アドレスが入る**。measured\ へ写すときは、MAC を既存の規則どおり仮の値(02:00:00:00:…)に置き換える
