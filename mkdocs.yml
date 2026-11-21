@@ -33,5 +33,6 @@ nav:
   - Concepts: concepts.md
   - Tutorials:
       - A real room, end to end: tutorials/real-room.md
+      - The 2D wave equation: tutorials/wave-equation.md
   - Hardware: hardware.md
   - Contributing: contributing.md
