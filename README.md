@@ -487,7 +487,7 @@ is in [docs/design/2026-11-17-state-of-the-field.md](docs/design/2026-11-17-stat
 
 ## Roadmap
 
-Used on 16 devices in the hardware run of 2026-11-21: time synchronisation over
+Used in the hardware run of 2026-11-21 (up to 16 devices): time synchronisation over
 Wi-Fi, over-the-air deployment of WebAssembly modules to all devices, the 2D wave
 equation on a device cluster, room-shape reconstruction from range sensors with
 USD and OpenFOAM export, and recording of inertial sensors (IMU) for fusion.
