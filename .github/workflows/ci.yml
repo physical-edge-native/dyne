@@ -35,4 +35,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - run: python -m pip install --quiet numpy matplotlib
       - run: bash scripts/ci-check.sh
+        env:
+          REQUIRE_NUMPY: "1"

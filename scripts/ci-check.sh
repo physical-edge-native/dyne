@@ -67,6 +67,12 @@
 #      (crates/dyne-sim2d/scenes/room6_temp.csv) must both print "PASS (bit-exact)" with the pinned CRC-32
 #      (shape phi 9a16e389 d ba49ba95 w fc4d6fa3, temperature b9bf5cb8), and the OpenFOAM case written from the
 #      temperature must carry the same CRC-32; OpenFOAM and Isaac Lab are not run (issue #96).
+#  20. IMU analysis on a low-rate record (scripts/imu_analyze_check.py): a deterministic synthetic record at
+#      12.5 Hz with per-device zero offsets, mounting yaw up to 10 degrees, dropped samples and an empty
+#      imu_fused.csv; scripts/imu_analyze.py must pick a 1 s epoch, reduce the static noise by about sqrt(4)
+#      on every accelerometer axis once offsets are removed, and estimate a 10-degree tilt within 0.2 degrees.
+#      Needs numpy and matplotlib: skipped locally when they are missing, required when REQUIRE_NUMPY=1 (CI)
+#      (issue #121).
 #
 # Usage (from the repository root):  bash scripts/ci-check.sh
 set -euo pipefail
@@ -417,6 +423,19 @@ if bash scripts/tutorial_room.sh --sim-only --out "$TL/out" > "$TL/run.log" 2>&1
   fi
 else
   tail -n 20 "$TL/run.log"; echo "tutorial-room    FAIL (run)"; fail=1
+fi
+
+echo "== [20] IMU analysis on a low-rate synthetic record (issue #121) =="
+if [ -n "$PY" ] && "$PY" -c "import numpy, matplotlib" > /dev/null 2>&1; then
+  if "$PY" scripts/imu_analyze_check.py target/ci-imu-analyze > target/ci-imu-analyze.log 2>&1; then
+    cat target/ci-imu-analyze.log
+  else
+    cat target/ci-imu-analyze.log; echo "imu-analyze      FAIL"; fail=1
+  fi
+elif [ "${REQUIRE_NUMPY:-0}" = "1" ]; then
+  echo "imu-analyze      FAIL (numpy and matplotlib are required here: pip install numpy matplotlib)"; fail=1
+else
+  echo "imu-analyze      SKIP (numpy or matplotlib not installed)"
 fi
 
 if [ "$fail" -ne 0 ]; then echo "CI CHECK FAILED"; exit 1; fi

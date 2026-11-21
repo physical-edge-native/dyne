@@ -8,6 +8,13 @@
 # 記録のディレクトリ: imu_raw.csv (必須)、imu_fused.csv・level.csv・meta.json (あれば使う)。
 # 出力: <最初のディレクトリ>/analysis/ に summary.json と図。表は画面に Markdown で出す。
 #
+# 2026-11-21 (Issue #121): 出力の周期を記録から読む (区間の長さ・アラン偏差の箱・隣だけの融合の再生を周期に
+# 合わせて決める。12.5 Hz の実機の記録で、0.2 s の区間に標本が 2〜3 個しか入らず、台の抜けた区間で平均が
+# その台のゼロ点のずれだけ跳ね、「台数を増やすとノイズが増える」と見えていた)。静止の統計は台ごとのゼロ点の
+# ずれ (静止の範囲の平均) を引いてから出す。台を1台ずつ抜いたときの標準偏差 (悪くしている台の特定)。
+# 傾きは、各台の 0° の区間からの重力の向きの変化の角度 (板の上での台の向きのずれ ±10° に依らない) も出す。
+# imu_fused.csv が空 (見出しだけ) でも止まらない。
+#
 # 基準: 時刻同期した時刻印で全ノードの標本を区間ごとに PC で平均したもの (「中央の融合」)。
 # 動いている間の真値は無いので、時刻同期なしの条件の誤差はこの基準との差で測る (同じ記録の生の標本は
 # 同期した時刻印つきなので、アクターの入力をずらしても基準は正しいまま)。
@@ -16,6 +23,7 @@ import json
 import math
 import os
 import sys
+import warnings
 
 import numpy as np
 
@@ -45,7 +53,13 @@ def load_raw(path):
 def load_fused(path):
     if not os.path.exists(path):
         return None
-    d = np.genfromtxt(path, delimiter=',', skip_header=1)
+    if os.path.getsize(path) == 0:
+        return None
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')  # 見出しだけのファイル: genfromtxt の「空の入力」の警告
+        d = np.genfromtxt(path, delimiter=',', skip_header=1)
+    if d.size == 0:
+        return None
     if d.ndim == 1:
         d = d[None]
     out = {}
@@ -68,6 +82,31 @@ def load_level(path):
                 rows.append(dict(t0=int(p[0]), t1=int(p[1]), roll=float(p[2]), pitch=float(p[3]),
                                  label=p[4] if len(p) > 4 else ''))
     return rows
+
+
+def odr_of(nodes):
+    """記録の出力の周期 [Hz] (ノードごとの時刻印の間隔の中央値の、ノードの間の中央値)"""
+    r = [1e6 / np.median(np.diff(nd['ts'])) for nd in nodes.values() if len(nd['ts']) > 1]
+    return float(np.median(r)) if r else 0.0
+
+
+def auto_epoch_s(odr, min_samples=8):
+    """区間の長さ: 1区間に min_samples 個以上の標本が入る、最も短い 0.2/0.5/1/2 s"""
+    for e in (0.2, 0.5, 1.0, 2.0):
+        if odr * e >= min_samples:
+            return e
+    return 2.0
+
+
+def remove_offsets(nodes, t_lo, t_hi):
+    """台ごとのゼロ点のずれ (t_lo〜t_hi の平均) を引いたノードの写しと、ずれ (node → 6成分)"""
+    out, offs = {}, {}
+    for i, nd in nodes.items():
+        m = (nd['ts'] > t_lo) & (nd['ts'] <= t_hi)
+        off = nd['v'][m].mean(axis=0) if m.any() else np.zeros(6)
+        offs[i] = off
+        out[i] = dict(nd, v=nd['v'] - off)
+    return out, offs
 
 
 def epoch_index(ts, t0, E_us):
@@ -184,16 +223,19 @@ def analyze(dirs, a):
     if os.path.exists(os.path.join(main, 'meta.json')):
         with open(os.path.join(main, 'meta.json')) as f:
             meta = json.load(f)
-    E_s = meta.get('epoch_s', a.epoch)
+    nodes = load_raw(os.path.join(main, 'imu_raw.csv'))
+    ids = sorted(nodes)
+    odr = odr_of(nodes)
+    E_s = meta.get('epoch_s', a.epoch if a.epoch else auto_epoch_s(odr))
     M = meta.get('epoch_steps', a.m)
     dt = E_s / M
     E_us = int(dt * 1e6 + 0.5) * M
-    nodes = load_raw(os.path.join(main, 'imu_raw.csv'))
-    ids = sorted(nodes)
+    print('出力の周期 %.2f Hz、区間 %.2f s (1区間あたり約 %.1f 標本)' % (odr, E_s, odr * E_s))
     t_first = min(nd['ts'][0] for nd in nodes.values())
     t_last = min(nd['ts'][-1] for nd in nodes.values())
     t0 = meta.get('t0_us', (t_first // E_us) * E_us)
-    summary = dict(dirs=dirs, health=health(nodes, load_batches(os.path.join(main, 'imu_batches.csv'))), epoch_s=E_s)
+    summary = dict(dirs=dirs, health=health(nodes, load_batches(os.path.join(main, 'imu_batches.csv'))), epoch_s=E_s,
+                   odr_hz=odr)
     print('## 記録の健全性')
     print('| node | samples | ODR [Hz] | seq の飛び | バッチの飛び | FIFO あふれ | 未同期の標本 | 時刻印の逆行 | 長さ [s] |')
     print('|---|---|---|---|---|---|---|---|---|')
@@ -223,6 +265,12 @@ def analyze(dirs, a):
         hi = (tcen[r1 - 1] + E_us / 2 - t_first) / 1e6 if r1 > r0 else 0.0
         print('\n静止の範囲 (動きの検出): 最初の標本から %.1f〜%.1f s' % (lo, hi))
     summary['static_range_s'] = [lo, hi]
+    raw_nodes = nodes
+    if a.offsets:
+        nodes, offs = remove_offsets(raw_nodes, t_first + lo * 1e6, t_first + hi * 1e6)
+        summary['offsets'] = {str(i): [float(x) for x in o] for i, o in offs.items()}
+        print('台ごとのゼロ点のずれを引いた (静止の範囲の平均)。ずれの台の間の幅: ax %.3f、ay %.3f、az %.3f m/s²' % tuple(
+            np.ptp(np.array(list(offs.values()))[:, :3], axis=0)))
     Ns = [k for k in (1, 2, 4, 8, 16) if k <= len(ids)]
     if len(ids) not in Ns:
         Ns.append(len(ids))
@@ -240,12 +288,42 @@ def analyze(dirs, a):
     for r in rows:
         print('| %d | %d | %s | %.2e | %.2e |' % (r['N'], r['epochs'], ' | '.join('%.2e' % x for x in r['std']),
                                                r['short_std'][2], rows[0]['short_std'][2] / math.sqrt(r['N'])))
+    names6 = ('ax', 'ay', 'az', 'gx', 'gy', 'gz')
+    # 1台のときの標準偏差は台ごとに違うので、全台それぞれの1台の標準偏差の平均と比べる
+    single = []
+    for i in ids:
+        Sx, nx = epoch_sums(nodes, [i], t0, E_us, e_lo, e_hi)
+        with np.errstate(invalid='ignore'):
+            single.append([float(np.nanstd((Sx / nx[:, None])[sm][:, k])) for k in range(6)])
+    single = np.array(single)
+    gain = (single.mean(axis=0) / np.array(rows[-1]['std'])).tolist()
+    summary['static_single_std'] = {str(i): s_.tolist() for i, s_ in zip(ids, single)}
+    summary['static_gain_all'] = dict(zip(names6, gain))
+    print('\n全 %d 台: 1台の標準偏差の平均 ÷ 全台の平均の標準偏差 (目安 √N = %.2f)' % (len(ids), math.sqrt(len(ids))))
+    print('| ' + ' | '.join(names6) + ' |\n|' + '---|' * 6)
+    print('| ' + ' | '.join('%.2f' % g for g in gain) + ' |')
+    if len(ids) > 2:
+        loo = {}
+        for i in ids:
+            rest = [j for j in ids if j != i]
+            Sx, nx = epoch_sums(nodes, rest, t0, E_us, e_lo, e_hi)
+            with np.errstate(invalid='ignore'):
+                c = (Sx / nx[:, None])[sm]
+            loo[i] = [float(np.nanstd(c[:, k])) for k in range(6)]
+        summary['static_leave_one_out'] = {str(i): v for i, v in loo.items()}
+        print('\n1台を抜いた全台の平均の標準偏差 (抜くと大きく下がる台が、その成分を悪くしている)')
+        print('| 抜いた台 | ' + ' | '.join(names6) + ' |\n|---|' + '---|' * 6)
+        for i in ids:
+            print('| %d | %s |' % (i, ' | '.join('%.2e' % x for x in loo[i])))
 
     # 隣だけの融合 (参照モデルで再生)
-    if a.replay > 0 and sm.any():
+    replay_s = a.replay if a.replay is not None else (120.0 if odr >= 50 else 0.0)
+    if a.replay is None and replay_s == 0.0:
+        print('\n(隣だけの融合の再生は省いた: 出力の周期 %.1f Hz では区間あたりの標本が少ない。--replay で指定できる)' % odr)
+    if replay_s > 0 and sm.any():
         idx = np.where(sm)[0]
         t_lo = int(tcen[idx[0]] - E_us // 2)
-        t_hi = int(min(tcen[idx[-1]], t_lo + a.replay * 1e6))
+        t_hi = int(min(tcen[idx[-1]], t_lo + replay_s * 1e6))
         rep_rows = []
         for N in Ns:
             out, e0 = replay(nodes, ids[:N], a.topo, t0, E_us, dt, M, t_lo, t_hi)
@@ -264,7 +342,7 @@ def analyze(dirs, a):
                                                        r['rms_minus_central'][2], r['rms_minus_central'][3]))
 
     # アラン偏差 (10ms の箱で揃えた中央の平均)
-    bin_us = a.allan_bin_us
+    bin_us = max(a.allan_bin_us, int(1e6 / odr + 0.5) if odr else a.allan_bin_us)
     fs = 1e6 / bin_us
     b_lo = (t_first - t0) // bin_us + 1
     b_hi = (t_last - t0) // bin_us
@@ -327,7 +405,7 @@ def analyze(dirs, a):
                 tot = np.zeros(6)
                 cnt = 0
                 for i in ids[:N]:
-                    nd = nodes[i]
+                    nd = raw_nodes[i]
                     m = (nd['ts'] > lv['t0']) & (nd['ts'] <= lv['t1'])
                     tot += nd['v'][m].sum(axis=0)
                     cnt += int(m.sum())
@@ -346,8 +424,32 @@ def analyze(dirs, a):
                     vv = np.mean(vals, axis=0)
                     r['actor_roll'] = math.degrees(vv[0])
                     r['actor_pitch'] = math.degrees(vv[1])
+            # 台ごとの重力の向き (区間の加速度の平均の単位ベクトル)
+            r['gdir'] = {}
+            for i in ids:
+                nd = raw_nodes[i]
+                m = (nd['ts'] > lv['t0']) & (nd['ts'] <= lv['t1'])
+                if m.any():
+                    g = nd['v'][m][:, :3].mean(axis=0)
+                    r['gdir'][i] = g / np.linalg.norm(g)
             tilt_rows.append(r)
         z = next((r for r in tilt_rows if r['level_roll'] == 0.0 and r['level_pitch'] == 0.0), None)
+        if z:
+            # 0° の区間からの重力の向きの変化の角度: 台の向き (板の上の回転) に依らない傾きの大きさ
+            print('\n## ② 傾き: 0° の区間からの重力の向きの変化の角度 [度] (台の向きのずれに依らない) − 角度計の差')
+            print('| 区間 | 角度計 | 台ごとの平均 | 台の間の幅 | 平均 − 角度計 |\n|---|---|---|---|---|')
+            for r in tilt_rows:
+                angs = [math.degrees(math.acos(max(-1.0, min(1.0, float(np.dot(r['gdir'][i], z['gdir'][i]))))))
+                        for i in ids if i in r['gdir'] and i in z['gdir']]
+                ref = math.hypot(r['level_roll'], r['level_pitch']) - math.hypot(z['level_roll'], z['level_pitch'])
+                if angs:
+                    r['tilt_change_mean'] = float(np.mean(angs))
+                    r['tilt_change_spread'] = float(np.ptp(angs))
+                    r['tilt_change_err'] = float(np.mean(angs) - abs(ref))
+                    print('| %s | %.2f | %.3f | %.3f | %+.3f |' % (r['label'], abs(ref), np.mean(angs), np.ptp(angs),
+                                                                 np.mean(angs) - abs(ref)))
+        for r in tilt_rows:
+            r.pop('gdir', None)
         print('\n## ② 傾き: 推定 − 水平器 [度] (加速度の平均から。括弧内は 0° の行で零点を合わせた後)')
         print('| 区間 | 水平器 roll | ' + ' | '.join('N=%d' % N for N in Ns) + ' | アクター (相補フィルタ) |\n|---|---|' + '---|' * (len(Ns) + 1))
         for r in tilt_rows:
@@ -427,9 +529,13 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('dirs', nargs='+')
     ap.add_argument('--static', help='静止とみなす範囲 (最初の標本からの秒) "A,B"。省くと動きの検出で決める')
-    ap.add_argument('--replay', type=float, default=120.0, help='隣だけの融合を再生する長さ [s] (0 で省く)')
+    ap.add_argument('--replay', type=float, default=None,
+                    help='隣だけの融合を再生する長さ [s] (0 で省く。省くと、出力が 50 Hz 以上なら 120 s、未満なら省く)')
     ap.add_argument('--topo', default='grid', choices=['line', 'ring', 'grid'])
-    ap.add_argument('--epoch', type=float, default=0.2, help='meta.json が無いときの区間の長さ [s]')
+    ap.add_argument('--epoch', type=float, default=None,
+                    help='meta.json が無いときの区間の長さ [s] (省くと出力の周期から: 1区間に8標本以上入る 0.2/0.5/1/2 s)')
+    ap.add_argument('--no-offsets', dest='offsets', action='store_false',
+                    help='静止の統計で、台ごとのゼロ点のずれを引かない')
     ap.add_argument('--m', type=int, default=10, help='meta.json が無いときの1区間のステップ数')
     ap.add_argument('--allan-bin-us', type=int, default=10000)
     ap.add_argument('--out')
