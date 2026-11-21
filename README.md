@@ -9,6 +9,39 @@ tools you already use.
 
 <!-- Photo of a hardware twin experiment goes here (a room that may be published; planned). -->
 
+## Dyne at a glance: one real room (hardware run, 2026-11-21)
+
+| Real room (4.0 m × 2.6 m) | Its twin, computed on the devices |
+|---|---|
+| ![Six devices on cardboard boxes along the walls of a 4.0 m × 2.6 m room](docs/img/siteA/real.jpg) | ![The room shape computed by the six devices, shown in Dyne's web dashboard; the floor colour is a dummy temperature field](docs/img/siteA/twin.jpg) |
+
+- **Sensor placement.** Six ESP32 devices, each with an 8×8-zone distance sensor (VL53L5CX) on a pan servo
+  ([one device](docs/img/siteA/device.jpg)), stand 0.35 m from the long walls and 0.27 m above the floor.
+  The room is split into 3 × 2 patches; each device computes the shape of its own patch (a signed distance field)
+  and exchanges only the values on the patch edges with its neighbours. In the dashboard the shape is from the
+  hardware; the floor colour is a dummy temperature field, not a measurement.
+- **Twin → robot simulator.** The computed shape is written as USD. Isaac Sim loads it, and a Unitree Go2 walks in it
+  with Isaac Lab's distributed pretrained locomotion policy (inference only; no policy has been trained in this room yet).
+
+  ![Unitree Go2 walking in the USD exported from the real room, in Isaac Sim](docs/img/siteA/go2.jpg)
+
+**How accurate is it?** Most other images in this README come from the simulator (a made-up room). The hardware
+run above was done in one night without calibration:
+
+| | Simulator, same room and placement | Hardware, 2026-11-21 |
+|---|---|---|
+| Mean distance from the computed walls to the measured walls | 7.7 mm | 49 mm (max 100 mm) |
+| Including the devices' own stands on the floor | – | 120 mm |
+| Share of the visible surfaces recovered | – | 83 % |
+
+Likely causes of the gap: the sensors see the device stands, the servo angles were not calibrated, the sensor beam
+spreads, and the devices were placed by hand.
+
+**The same kind of devices solving the 2D wave equation.** 16 devices solved the 2D wave equation (81 × 81 grid,
+400 steps), split 2 × 2, 4 × 2 and 4 × 4. Every device's part of the grid matched the single-PC solution bit for bit,
+also when each device deliberately dropped 30 % of the messages it received (lost messages were resent; 96.5 s
+instead of 45.4 s).
+
 ## What you can do with Dyne
 
 **Build a digital twin of a room and train robots in it.**
