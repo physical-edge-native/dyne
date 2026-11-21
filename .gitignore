@@ -143,3 +143,5 @@ first_flash_out/
 # 波動方程式のノード群の実行の記録 (scripts/wave2d_cluster.py。nodes.json = ノードの IP、実行ごとの設定・結果・MQTT の記録。2026-11-16)
 wave2d_out/
 site/
+# OpenFOAM の入力の例 (場所A の部屋の形と仮の温度。docs/demo/siteA-openfoam/README.md、Issue #110)
+!docs/demo/siteA-openfoam/*.csv

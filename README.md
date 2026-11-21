@@ -24,6 +24,11 @@ tools you already use.
   with Isaac Lab's distributed pretrained locomotion policy (inference only; no policy has been trained in this room yet).
 
   ![Unitree Go2 walking in the USD exported from the real room, in Isaac Sim](docs/img/siteA/go2.jpg)
+- **Twin → CFD.** The same room shape becomes an OpenFOAM mesh (cells inside walls and objects are left out) and
+  `scalarTransportFoam` runs on it (OpenFOAM.com v2606, Ubuntu package). The initial temperatures here are dummy
+  readings at the six device positions, not measurements.
+
+  ![OpenFOAM scalarTransportFoam on the mesh made from the room shape computed by the devices; dummy initial temperatures](docs/img/siteA/openfoam.png)
 
 **How accurate is it?** Most other images in this README come from the simulator (a made-up room). The hardware
 run above was done in one night without calibration:
@@ -345,8 +350,8 @@ real space that the devices keep up to date.
 |---|---|---|---|
 | USD (Isaac Sim / Isaac Lab and other USD-based tools) | room shape and objects, with collision information | robot learning and simulation in a scene that matches the real room | implemented, awaiting hardware verification |
 | VTK image data (ParaView, PyVista) | 2D/3D field state | inspection and post-processing without licences; checked bit for bit in CI | implemented (`--vti PATH`) |
-| OpenFOAM case (scalarTransportFoam) | grid, initial field, boundary conditions, given velocity and diffusivity | detailed what-if studies with an established CFD package; case format and read-back checked in CI | implemented (`dyne-foam case`); not yet run with an OpenFOAM installation |
-| OpenFOAM case with the room's walls and furniture | the cells inside walls and obstacles of the room shape built by the devices are left out; their faces form the patch `walls` | the real room in a CFD study | implemented (`dyne-foam case --shape`); a simulated room passes OpenFOAM's `checkMesh` and runs with `scalarTransportFoam` (OpenFOAM.com v2606 release candidate) |
+| OpenFOAM case (scalarTransportFoam) | grid, initial field, boundary conditions, given velocity and diffusivity | detailed what-if studies with an established CFD package; case format and read-back checked in CI | implemented (`dyne-foam case`); the room-shape variant below runs with OpenFOAM.com v2606 |
+| OpenFOAM case with the room's walls and furniture | the cells inside walls and obstacles of the room shape built by the devices are left out; their faces form the patch `walls` | the real room in a CFD study | implemented (`dyne-foam case --shape`); a simulated room and the real room of the 2026-11-21 hardware run (912 cells) pass OpenFOAM's `checkMesh` and run with `scalarTransportFoam` (OpenFOAM.com v2606) |
 | OpenFOAM initial temperature from point sensors | readings of a few sensors spread over the grid (inverse-distance weighting) | starting a CFD study from the measured state of the room | implemented (`dyne-foam case --sensors`); runs with `scalarTransportFoam` (OpenFOAM.com v2606 release candidate) |
 | OpenFOAM velocity field (import) | airflow computed by OpenFOAM, mapped onto Dyne's grid | the given airflow that carries temperature, CO2 and humidity | implemented (`dyne-foam velocity`, checked in CI on a synthetic file); not yet run with an OpenFOAM installation |
 
@@ -369,7 +374,7 @@ the same 64-bit float.
 # (faces west,east,south,north[,bottom,top]; diffusivity --diffusivity, default 2.2e-5 m^2/s)
 cargo run --release -p dyne-export --bin dyne-foam -- case --vti wave2d.vti --out wave2dCase --velocity 0.1,0,0 --faces fixed:0,zero-gradient,zero-gradient,zero-gradient
 cargo run --release -p dyne-export --bin dyne-foam -- info wave2dCase   # reads it back, prints the CRC-32 of T
-# then, with OpenFOAM (written for OpenFOAM.com v2xxx; not yet tried): cd wave2dCase && blockMesh && scalarTransportFoam
+# then, with OpenFOAM (written for OpenFOAM.com v2xxx): cd wave2dCase && blockMesh && scalarTransportFoam
 
 # OpenFOAM -> Dyne: map the velocity of a CFD case (roomFlow) onto Dyne's grid, then read it
 cargo run --release -p dyne-export --bin dyne-foam -- case --vti wave2d.vti --out flowGrid
