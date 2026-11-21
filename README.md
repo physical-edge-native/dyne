@@ -7,7 +7,8 @@ Devices spread through the space measure its shape and its physical fields, and
 keep a model of both on the devices themselves; Dyne hands the result to the
 tools you already use.
 
-<!-- Photo of a hardware twin experiment goes here (a room that may be published; planned). -->
+**Documentation:** <https://physical-edge-native.github.io/dyne/> ·
+**Architecture (assumptions, principles, limits):** <https://physical-edge-native.github.io/>
 
 ## Dyne at a glance: one real room (hardware run, 2026-11-21)
 
@@ -83,7 +84,7 @@ USD file for Isaac Lab and an OpenFOAM case, with screenshots of each step.
 
 | Part | Status |
 |---|---|
-| Room shape → USD → Isaac Lab | Simulator: works (tutorial). Real devices: first run planned. Isaac Lab training: procedure ready, not yet run on a GPU machine |
+| Room shape → USD → Isaac Sim | Simulator: works (tutorial). Real devices: six devices computed a real room on 2026-11-21, and a Unitree Go2 walks in its USD in Isaac Sim with a pretrained policy. Training inside the twin: next ([#119](https://github.com/physical-edge-native/dyne/issues/119)) |
 
 Dyne does not replace OpenFOAM or other field solvers: it keeps a coarse model
 fitted to the sensors on the devices, and hands the state to those tools when a
@@ -265,6 +266,9 @@ Details and raw data are in `docs/` and `measured/`.
 | Replay of recorded device input (synthetic records) | replay matches, and a single flipped bit is detected; not yet run with records from hardware |
 | ESP32 (Xtensa), WebAssembly interpreter (WAMR) | all digits match the PC result |
 | 2 × ESP32 over Wi-Fi | bit-exact split solution |
+| 4, 8 and 16 × ESP32, 2D wave equation (2026-11-21) | every device bit-exact against the simulator, also with 30 % of received messages dropped |
+| 6 × ESP32 with pan-servo range sensors, real room (2026-11-21) | walls within 49 mm on average without calibration (simulator: 7.7 mm); USD to Isaac Sim and mesh to OpenFOAM |
+| A device leaving and rejoining during a run (2026-11-21) | neighbours report the silence within about 10 s and hold; the device rejoins after power returns |
 | 4 × ESP32 on batteries with temperature sensors, 4 runs of ~33 min | all runs completed without restart |
 
 ## Quick start (no hardware needed)
@@ -296,9 +300,7 @@ and a [tutorial](docs/en/tutorial.md) that writes a new solver and checks it bit
 
 ## Applications and examples built on the core
 
-The following use the same solver interface, simulator and checks. Several are
-implemented and awaiting verification on a 16-device hardware setup (see
-[Roadmap](#roadmap)).
+The following use the same solver interface, simulator and checks.
 
 - **Classical and learned solvers side by side.** Finite-difference solvers and
   a small physics-informed neural network (a network trained so that its output
@@ -308,9 +310,10 @@ implemented and awaiting verification on a 16-device hardware setup (see
 - **Coupling to measurements.** Nudging (step 5 above) is verified in the
   simulator with a stability map and, on hardware, as a mechanism with
   temperature sensors.
-- **Room-shape reconstruction** from range sensors (`crates/sdf2d-grid-actor`,
-  simulator stage).
-- **Inertial-sensor (IMU) fusion across devices** (`crates/imu-fusion-actor`).
+- **Room-shape reconstruction** from range sensors (`crates/sdf2d-grid-actor`;
+  six devices on hardware, 2026-11-21).
+- **Inertial-sensor (IMU) fusion across devices** (`crates/imu-fusion-actor`;
+  seven sensors recorded on hardware, 2026-11-21).
 - **Flocking demo** on the same runtime (`crates/swarm-*`).
 - **Native solvers on a PC** and **connections to other tools** (VTK, USD,
   OpenFOAM), described below.
@@ -348,7 +351,7 @@ real space that the devices keep up to date.
 
 | Target | What is exported | Use | Status |
 |---|---|---|---|
-| USD (Isaac Sim / Isaac Lab and other USD-based tools) | room shape and objects, with collision information | robot learning and simulation in a scene that matches the real room | implemented, awaiting hardware verification |
+| USD (Isaac Sim / Isaac Lab and other USD-based tools) | room shape and objects, with collision information | robot learning and simulation in a scene that matches the real room | works with the room computed by six devices (2026-11-21) |
 | VTK image data (ParaView, PyVista) | 2D/3D field state | inspection and post-processing without licences; checked bit for bit in CI | implemented (`--vti PATH`) |
 | OpenFOAM case (scalarTransportFoam) | grid, initial field, boundary conditions, given velocity and diffusivity | detailed what-if studies with an established CFD package; case format and read-back checked in CI | implemented (`dyne-foam case`); the room-shape variant below runs with OpenFOAM.com v2606 |
 | OpenFOAM case with the room's walls and furniture | the cells inside walls and obstacles of the room shape built by the devices are left out; their faces form the patch `walls` | the real room in a CFD study | implemented (`dyne-foam case --shape`); a simulated room and the real room of the 2026-11-21 hardware run (912 cells) pass OpenFOAM's `checkMesh` and run with `scalarTransportFoam` (OpenFOAM.com v2606) |
@@ -484,13 +487,12 @@ is in [docs/design/2026-11-17-state-of-the-field.md](docs/design/2026-11-17-stat
 
 ## Roadmap
 
-Implemented and awaiting verification on a 16-device hardware setup (2026-11):
-time synchronisation over Wi-Fi, over-the-air deployment of WebAssembly modules
-to all devices, replay of recorded device input against the simulator, the 2D
-wave equation on a device cluster, inertial-sensor (IMU) fusion across devices,
-small networks trained in PyTorch imported via ONNX, room-shape reconstruction
-from range sensors, and USD export (see
-[Connecting to other tools](#connecting-to-other-tools)).
+Used on 16 devices in the hardware run of 2026-11-21: time synchronisation over
+Wi-Fi, over-the-air deployment of WebAssembly modules to all devices, the 2D wave
+equation on a device cluster, room-shape reconstruction from range sensors with
+USD and OpenFOAM export, and recording of inertial sensors (IMU) for fusion.
+Implemented and still to be run on hardware: replay of recorded device input
+against the simulator, and small networks trained in PyTorch imported via ONNX.
 
 Planned for 2026–2027 (tracked as GitHub issues):
 a slow indoor field (temperature, CO2 and humidity carried by a given airflow) as
