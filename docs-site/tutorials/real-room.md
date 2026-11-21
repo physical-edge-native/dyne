@@ -15,6 +15,12 @@
 
 ![Go2 in the exported room](../img/go2.jpg)
 
+5. **Export to OpenFOAM.** `dyne-foam case --sensors readings.csv --shape shape.csv --out roomCase --walls zero-gradient`
+   writes a mesh without the cells inside walls and objects; `checkMesh` and `scalarTransportFoam` run on it
+   (OpenFOAM.com v2606). The initial temperatures below are dummy readings at the six device positions.
+
+![OpenFOAM on the real room shape, dummy initial temperatures](../img/openfoam.png)
+
 ## Accuracy, honestly
 
 | | Simulator, same room and placement | Hardware, 2026-11-21 (no calibration) |
