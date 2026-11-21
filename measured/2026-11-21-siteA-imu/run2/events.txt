@@ -1,0 +1,12 @@
+06:40:10 static start, board 0.05 deg
+06:53:40 static end; tilt: 0deg hold starts now
+06:54:16 0deg hold end reading 0.00
+06:55:11 ~10deg set, reading 9.00 (hold 30 s)
+06:56:51 ~10deg end reading 9.00
+06:59:05 ~18deg set, reading 17.70 (hold 30 s)
+07:01:27 ~18deg end reading 17.60
+07:01:53 back to 0deg, reading 0.10 (hold 30 s)
+07:04:03 0deg hold done; motion start (static 20 s)
+07:04:25 rocking started (60 s)
+07:05:41 stopped, board on floor (static 20 s)
+07:14:12 end of run2

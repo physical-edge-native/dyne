@@ -58,3 +58,26 @@ ESP32-DevKitC-VE ×16、アクセスポイント経由の Wi-Fi、PC が MQTT �
 - IP アドレス(アクセスポイントの内側の 192.168.50.x)は置き換えていない(runbook §8: 置き換えるかはユーザーが決める)。
 - 時刻の列(t・pc_time・ts_us)は UNIX 時刻(秒・マイクロ秒)。events.jsonl の rt のトピックの番号は配置の番号(idx)で、
   ノード番号ではない(2×2 では idx 0〜3 = node 56・172・201・232)。
+
+## 2026-11-21-siteA-imu/ — 加速度・角速度センサ 7台を1枚の板に貼った記録(場所A、run2)
+
+当日のまとめ: docs\2026-11-21-imu-hw-run2.md。英語の報告: 文書のサイトの「IMU fusion on hardware (2026-11-21)」
+(docs-site/results/imu-2026-11-21.md)。ESP32-DevKitC-VE ×7 に Arduino Modulino Movement(LSM6DSOX)を1台ずつ。
+合板に貼り、PC の時刻同期のサーバ(UDP 12300)に7台とも合わせてから記録した。出力 12.5 Hz、1 秒ごとにまとめて MQTT で送る
+(1台あたり約1通/秒の上限のため。GitHub dyne Issue #114)。
+
+| フォルダ・ファイル | 内容 |
+|---|---|
+| run2/imu_raw.csv | 標本1つ=1行(node、seq、ts_us=同期した時刻 [UNIX µs]、local_us=台の時計、ax〜gz [m/s²・rad/s]、temp_c は空) |
+| run2/imu_batches.csv | 届いたバッチ1つ=1行(pc_time=PC に届いた時刻 [UNIX s]、batch=通番、n=標本の数、時刻合わせの状態) |
+| run2/imu_fused.csv | 見出しだけ(隣だけの融合のアクターは今回動かしていない) |
+| run2/events.txt | 当日の号令の記録(日本時間)。静止 06:40:10〜06:53:40、傾き 0°/9.00°/17.70→17.60°/0.10°(デジタル角度計の読み)、揺らし 07:04:25〜07:05:25 |
+| run2/level.csv | events.txt から作った、傾きの各区間(両端5秒を除く)の時刻と角度計の読み(tools/make_level.py) |
+| analysis/imu_analyze.txt・summary.json | scripts\imu_analyze.py(GitHub dyne Issue #121 の修正後)の出力。静止 = 最初の標本から 34.5〜834.5 s |
+| analysis/extra.txt・extra.json | tools/extra.py の出力: 台ごとのゆっくりした変化、232 を除いた6台の利得、揺らしでの時刻の比較 |
+| tools/ | 上の解析と、文書のサイトの図(tools/figs.py)を作る台本。リポジトリ直下から `python measured/2026-11-21-siteA-imu/tools/extra.py measured/2026-11-21-siteA-imu/run2 1795212265000000 1795212325000000` |
+
+- 置き換え: 不要だった(これらのファイルに MAC アドレス・IP アドレス・SSID は入っていない。node はノード番号)。
+- 7台の板の上での向きは目で合わせた(±10° 程度)。node 232 は記録の前にセンサを一度抜き差しした台で、静止の間に
+  加速度の y が段状に約 0.045 m/s² 変わった(取り付けがずれた疑い)。
+- 1回目の記録(run1: 3台が時刻合わせできていなかった)は公開していない。
