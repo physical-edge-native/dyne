@@ -14,11 +14,16 @@ watch and export it (to USD for Isaac Sim, to VTK for ParaView, to OpenFOAM case
 
 ## Where to start
 
-- [Getting started](getting-started.md): build a solver and run it split over 16 simulated devices (no hardware).
-- [Concepts](concepts.md): patches, edges, why results match bit for bit.
-- [A real room, end to end](tutorials/real-room.md): six devices map a room, the twin goes to Isaac Sim.
-- [The 2D wave equation](tutorials/wave-equation.md): split solver on a PC and on 16 devices, bit for bit.
-- [Hardware](hardware.md): the parts used and how devices are configured.
+| If you want to | Read |
+|---|---|
+| try Dyne on a PC in five minutes | [Quick start](getting-started.md), then [Installation](guide/installation.md) |
+| understand the design | [How it works](concepts.md) and the [architecture site](https://physical-edge-native.github.io/) |
+| see the whole pipeline without hardware | [A room from simulated sensors to USD and OpenFOAM](guide/tutorial-room.md) |
+| see what runs on real devices | [A real room, end to end](tutorials/real-room.md), [The 2D wave equation](tutorials/wave-equation.md), [Status and limits](status.md) |
+| write a solver | [Write your own solver](guide/tutorial.md), [Solver interface and messages](guide/reference.md) |
+| run it on ESP32 boards | [Hardware](hardware.md), [Hardware guide](guide/hardware.md) |
+| hand the twin to Isaac Sim, ParaView or OpenFOAM | [Connecting to other tools](connect.md) |
+| know what is guaranteed | [Verification](verification.md), [Theory](theory.md) |
 
 Source code: [github.com/physical-edge-native/dyne](https://github.com/physical-edge-native/dyne).
 Cite with the concept DOI [10.5281/zenodo.24241009](https://doi.org/10.5281/zenodo.24241009).
