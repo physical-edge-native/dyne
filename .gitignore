@@ -142,3 +142,4 @@ node-esp32/sdkconfig.local
 first_flash_out/
 # 波動方程式のノード群の実行の記録 (scripts/wave2d_cluster.py。nodes.json = ノードの IP、実行ごとの設定・結果・MQTT の記録。2026-11-16)
 wave2d_out/
+site/

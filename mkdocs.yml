@@ -1,0 +1,37 @@
+site_name: Dyne documentation
+site_url: https://physical-edge-native.github.io/dyne/
+site_description: Run physics models on a swarm of microcontrollers, keep a digital twin of a real space on them, and hand it to other tools.
+repo_url: https://github.com/physical-edge-native/dyne
+repo_name: physical-edge-native/dyne
+edit_uri: edit/main/docs-site/
+docs_dir: docs-site
+copyright: Dyne contributors, MIT OR Apache-2.0
+theme:
+  name: material
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - search.suggest
+    - content.code.copy
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle: {icon: material/brightness-7, name: Switch to dark mode}
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle: {icon: material/brightness-4, name: Switch to light mode}
+markdown_extensions:
+  - admonition
+  - tables
+  - toc: {permalink: true}
+  - pymdownx.superfences
+  - pymdownx.details
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Concepts: concepts.md
+  - Tutorials:
+      - A real room, end to end: tutorials/real-room.md
+  - Hardware: hardware.md
+  - Contributing: contributing.md
