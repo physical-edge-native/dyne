@@ -145,3 +145,6 @@ wave2d_out/
 site/
 # OpenFOAM の入力の例 (場所A の部屋の形と仮の温度。docs/demo/siteA-openfoam/README.md、Issue #110)
 !docs/demo/siteA-openfoam/*.csv
+# 文書のサイトの生成物: docs/en/ と docs/demo/tutorial/ からビルドのたびに写す(scripts/mkdocs_hooks.py、Issue #124)
+docs-site/guide/
+docs-site/demo/

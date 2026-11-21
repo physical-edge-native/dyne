@@ -27,12 +27,27 @@ markdown_extensions:
   - toc: {permalink: true}
   - pymdownx.superfences
   - pymdownx.details
+hooks:
+  - scripts/mkdocs_hooks.py
 nav:
   - Home: index.md
-  - Getting started: getting-started.md
-  - Concepts: concepts.md
+  - Getting started:
+      - Quick start: getting-started.md
+      - Installation: guide/installation.md
+  - How it works: concepts.md
   - Tutorials:
+      - A room from simulated sensors to USD and OpenFOAM: guide/tutorial-room.md
       - A real room, end to end: tutorials/real-room.md
       - The 2D wave equation: tutorials/wave-equation.md
-  - Hardware: hardware.md
+      - Write your own solver: guide/tutorial.md
+  - Hardware:
+      - Overview: hardware.md
+      - Hardware guide: guide/hardware.md
+  - Connecting to other tools: connect.md
+  - Verification: verification.md
+  - Theory: theory.md
+  - Status and limits: status.md
+  - Reference:
+      - Solver interface and messages: guide/reference.md
+      - Components: components.md
   - Contributing: contributing.md
