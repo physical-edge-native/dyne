@@ -269,7 +269,7 @@ Details and raw data are in `docs/` and `measured/`.
 | 2 × ESP32 over Wi-Fi | bit-exact split solution |
 | 4, 8 and 16 × ESP32, 2D wave equation (2026-11-21) | every device bit-exact against the simulator, also with 30 % of received messages dropped |
 | 6 × ESP32 with pan-servo range sensors, real room (2026-11-21) | walls within 49 mm on average without calibration (simulator: 7.7 mm); USD to Isaac Sim and mesh to OpenFOAM |
-| A device leaving and rejoining during a run (2026-11-21) | neighbours report the silence within about 10 s and hold; the device rejoins after power returns |
+| A device losing power during a run (2026-11-21) | neighbours report the silence within about 10 s and wait; after power returns the device reconnects in about 40 s but does not yet rejoin the computation ([#131](https://github.com/physical-edge-native/dyne/issues/131)) |
 | 4 × ESP32 on batteries with temperature sensors, 4 runs of ~33 min | all runs completed without restart |
 
 ## Quick start (no hardware needed)
