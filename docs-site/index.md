@@ -24,6 +24,7 @@ watch and export it (to USD for Isaac Sim, to VTK for ParaView, to OpenFOAM case
 | run it on ESP32 boards | [Hardware](hardware.md), [Hardware guide](guide/hardware.md) |
 | hand the twin to Isaac Sim, ParaView or OpenFOAM | [Connecting to other tools](connect.md) |
 | know what is guaranteed | [Verification](verification.md), [Theory](theory.md) |
+| ask a question or share an idea | [GitHub Discussions](https://github.com/physical-edge-native/dyne/discussions) |
 
 Source code: [github.com/physical-edge-native/dyne](https://github.com/physical-edge-native/dyne).
 Cite with the concept DOI [10.5281/zenodo.24241009](https://doi.org/10.5281/zenodo.24241009).
