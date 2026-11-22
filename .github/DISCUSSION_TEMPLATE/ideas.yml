@@ -1,0 +1,25 @@
+title: "[Idea] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for sharing an idea! Please search existing discussions first; if a similar idea exists, upvote it and add your use case instead.
+        Ideas are not guaranteed to be implemented. When an idea is ready to be scoped, a maintainer will open an issue and link it here.
+        日本語でも大丈夫です。
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: Describe the situation you are in (physics, hardware, scale) and what is hard today.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives or workarounds you have considered

@@ -1,0 +1,28 @@
+title: "[Show] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Built something with Dyne, or ran it somewhere interesting? We would love to see it.
+        Photos, videos, plots and links are very welcome. 日本語でも大丈夫です。
+  - type: textarea
+    id: what
+    attributes:
+      label: What did you build or try?
+    validations:
+      required: true
+  - type: textarea
+    id: media
+    attributes:
+      label: Screenshots, videos or links
+  - type: textarea
+    id: friction
+    attributes:
+      label: What was hard or confusing? (optional)
+      description: This helps us improve the docs and the toolchain.
+  - type: checkboxes
+    id: listing
+    attributes:
+      label: Listing
+      options:
+        - label: It is OK to list this project in the README "Used by / Showcase" section.

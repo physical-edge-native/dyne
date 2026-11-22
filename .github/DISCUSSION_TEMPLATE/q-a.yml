@@ -1,0 +1,29 @@
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Ask anything about using Dyne. If you found a bug, please open an issue instead.
+        When your question is answered, please mark the reply as the answer. 日本語でも大丈夫です。
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: What are you trying to do, what did you try, and what happened?
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Dyne version or commit
+  - type: dropdown
+    id: setup
+    attributes:
+      label: Where are you running it?
+      options:
+        - Simulator only (no hardware)
+        - ESP32 boards
+        - Both
+  - type: input
+    id: env
+    attributes:
+      label: OS and Rust version (`rustc --version`)
