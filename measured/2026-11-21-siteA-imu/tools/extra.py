@@ -76,6 +76,17 @@ def arrival_ts(i):
     return t
 
 
+# 届いた時刻は、全台そろって約 30 秒遅い (送信の詰まり)。この全台に共通の遅れ (届いた時刻 − 同期した時刻の
+# 中央値) を差し引き、同期した時刻と同じ揺らしの区間を比べる。差し引かないと、届いた時刻の側だけ揺らす前の
+# 区間を比べてしまう (この誤りで、以前の版は 0.066 rad/s を出していた。issue #129)
+_d = []
+for _i in ids:
+    _ta = arrival_ts(_i)
+    _nn = min(len(_ta), len(nc[_i]['ts']))
+    _d.append(_ta[-_nn:] - nc[_i]['ts'][-_nn:])
+COMMON = int(np.median(np.concatenate(_d)))
+
+
 def resample(ts, v):
     o = np.argsort(ts)
     return np.interp(grid, ts[o], v[o])
@@ -90,7 +101,7 @@ for mode in ('synced', 'arrival'):
         if mode == 'synced':
             ts = nd['ts']
         else:
-            ta = arrival_ts(i)
+            ta = arrival_ts(i) - COMMON
             nn = min(len(ta), len(nd['ts']))
             # 記録は同期した時刻のある標本だけ。バッチの合計と数が違えば、末尾をそろえる
             ts = ta[-nn:] if len(ta) >= len(nd['ts']) else None
@@ -106,6 +117,7 @@ cen = np.mean([out['synced'][i] for i in ids], axis=0)
 ax_k = int(np.argmax(cen[:, 3:].std(axis=0))) + 3
 amp = float(cen[:, ax_k].std())
 print('\n## 揺らし (%.0f s): 動きの大きい成分 %s、他の台の平均との差の RMS' % ((mo_hi - mo_lo) / 1e6, names[ax_k]))
+print('届いた時刻から差し引いた、全台に共通の遅れ: %.3f s' % (COMMON / 1e6))
 print('| 時刻 | 各台 − 他の台の平均 (RMS、台の平均) | 信号の大きさ (標準偏差) |\n|---|---|---|')
 for mode in ('synced', 'arrival'):
     errs = []
@@ -114,5 +126,7 @@ for mode in ('synced', 'arrival'):
         errs.append(np.sqrt(np.mean((out[mode][i][:, ax_k] - others) ** 2)))
     out[mode + '_rms'] = float(np.mean(errs))
     print('| %s | %.4f rad/s | %.4f rad/s |' % ({'synced': '時刻同期した時刻印', 'arrival': '届いた時刻から並べた時刻'}[mode], np.mean(errs), amp))
-res['motion'] = dict(axis=names[ax_k], amplitude_std=amp, rms_synced=out['synced_rms'], rms_arrival=out['arrival_rms'])
-json.dump(res, open(os.path.join(d, 'analysis', 'extra.json'), 'w'), indent=1)
+res['motion'] = dict(axis=names[ax_k], amplitude_std=amp, rms_synced=out['synced_rms'], rms_arrival=out['arrival_rms'],
+                     arrival_common_delay_s=COMMON / 1e6)
+# 出力は記録 (run2) と同じ階層の analysis/ に置く
+json.dump(res, open(os.path.join(d, '..', 'analysis', 'extra.json'), 'w'), indent=1)

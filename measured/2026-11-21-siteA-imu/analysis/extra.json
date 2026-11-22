@@ -72,6 +72,7 @@
   "axis": "gy",
   "amplitude_std": 0.19268649062946133,
   "rms_synced": 0.0371281911319154,
-  "rms_arrival": 0.06587084123242848
+  "rms_arrival": 0.11516951511090541,
+  "arrival_common_delay_s": 29.562034
  }
 }

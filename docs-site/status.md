@@ -10,7 +10,7 @@ the user documentation (this site) is in English.
 | 2D wave equation on 4, 8 and 16 ESP32 devices (81 × 81 grid, 400 steps) | every device's region equals the single-solver solution bit for bit; also with 30 % of received messages dropped | hardware, 2026-11-21 |
 | Room shape from six devices with pan-servo distance sensors (4.0 m × 2.6 m room) | walls within 49 mm on average (max 100 mm), 83 % of visible surfaces; 7.7 mm in the simulator with the same placement | hardware, 2026-11-21 |
 | A device leaving and rejoining during a room run | neighbours report the silence within about 10 s and hold; the device rejoins about 40 s after power returns | hardware, 2026-11-21 |
-| Seven accelerometer/gyroscope modules on one board ([report](results/imu-2026-11-21.md)) | gyroscopes follow √N; horizontal accelerometer axes too once one shifted module is left out; tilt within 0.3° of an angle meter; synchronised timestamps halve the disagreement while rocking | hardware, 2026-11-21 |
+| Seven accelerometer/gyroscope modules on one board ([report](results/imu-2026-11-21.md)) | gyroscopes follow √N; horizontal accelerometer axes too once the module whose sensor was unplugged and replugged is left out; tilt within 0.3° of an angle meter; synchronised timestamps cut the disagreement while rocking to about a third | hardware, 2026-11-21 |
 | Room → USD → Isaac Sim | a Unitree Go2 walks in the room computed by the devices (pretrained policy, inference only) | hardware + Isaac Sim |
 | Room → OpenFOAM | 912-cell mesh passes `checkMesh`; `scalarTransportFoam` runs (dummy initial temperatures) | hardware + OpenFOAM v2606 |
 | 4 ESP32 devices on batteries with temperature sensors, 4 runs of about 33 min | all completed without restart | hardware |
