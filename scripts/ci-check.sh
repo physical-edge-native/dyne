@@ -8,9 +8,11 @@
 #      analytic standing waves (every observed order in [1.9, 2.1]; crates/dyne-native/tests/convergence.rs;
 #      run only here, not again as a separate step) (issue #43)
 #   2. build the WebAssembly actors (heat1d, heat1d-pinn, heat2d)
-#   3. 1D: a 16-node split solution must match the single-node solution bit for bit
+#   3. 1D: a 16-node split solution must match the single-node solution bit for bit; with --steps 0 neither
+#      side computes a step, so both keep the initial field (issue #138)
 #   4. 2D: several partitions with packet loss / latency / pauses must match bit for bit;
-#      a ring of waiting nodes (2x2, heavy loss) finishes within a time limit (issue #26)
+#      a ring of waiting nodes (2x2, heavy loss) finishes within a time limit (issue #26); --steps 0
+#      computes no step on either side (issue #138)
 #   5. determinism: two runs with the same arguments produce identical output
 #   6. firmware host tests, built with the host C compiler: the node id selection of node-esp32, and the
 #      step sync replies (a same-step duplicate is answered, so a ring of nodes cannot deadlock; issue #29)
@@ -102,9 +104,11 @@ expect_pass() { # name, command...
 
 echo "== [3] 1D split vs single node (bit-exact) =="
 expect_pass "1d-16nodes" "$SIM1" --wasm "$W1" --nodes 16 --points 65 --steps 2000
+expect_pass "1d-steps0"  "$SIM1" --wasm "$W1" --nodes 16 --points 65 --steps 0
 
 echo "== [4] 2D partitions under loss/latency/pause (bit-exact) =="
 expect_pass "basic2x2"   "$SIM2" --wasm "$W2" --quiet --px 2 --py 2 --steps 500
+expect_pass "2d-steps0"  "$SIM2" --wasm "$W2" --quiet --px 2 --py 2 --steps 0
 expect_pass "loss10_lat" "$SIM2" --wasm "$W2" --quiet --px 2 --py 2 --steps 500 --loss 0.1 --lat-ms 5 --lat-jitter-ms 3
 expect_pass "3x2_uneven" "$SIM2" --wasm "$W2" --quiet --px 3 --py 2 --nx 40 --ny 33 --steps 400 --loss 0.15 --lat-ms 5 --lat-jitter-ms 10
 expect_pass "pause_part" "$SIM2" --wasm "$W2" --quiet --px 2 --py 2 --steps 500 --loss 0.1 --pause 3@2000:6000 --partition 0-1@10000:15000 --partition 1-3@12000:20000

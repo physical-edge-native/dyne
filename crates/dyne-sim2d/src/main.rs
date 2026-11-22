@@ -1232,6 +1232,13 @@ impl Sim {
     }
 
     fn run(&mut self) {
+        // --steps 0: no step is computed, the same as the single-node reference (issue #138)
+        if self.cfg.steps == 0 {
+            for n in &mut self.nodes {
+                n.phase = Phase::Done;
+            }
+            return;
+        }
         for node in 0..self.nodes.len() {
             self.start_step(node, 0);
         }
