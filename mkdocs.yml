@@ -27,6 +27,11 @@ markdown_extensions:
   - toc: {permalink: true}
   - pymdownx.superfences
   - pymdownx.details
+extra:
+  social:
+    - icon: material/forum
+      link: https://github.com/physical-edge-native/dyne/discussions
+      name: Questions and ideas (GitHub Discussions)
 hooks:
   - scripts/mkdocs_hooks.py
 nav:

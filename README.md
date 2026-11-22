@@ -8,7 +8,8 @@ keep a model of both on the devices themselves; Dyne hands the result to the
 tools you already use.
 
 **Documentation:** <https://physical-edge-native.github.io/dyne/> ·
-**Architecture (assumptions, principles, limits):** <https://physical-edge-native.github.io/>
+**Architecture (assumptions, principles, limits):** <https://physical-edge-native.github.io/> ·
+**Questions and ideas:** [GitHub Discussions](https://github.com/physical-edge-native/dyne/discussions)
 
 ## Dyne at a glance: one real room (hardware run, 2026-11-21)
 
@@ -505,6 +506,7 @@ device senses.
 ## Contributing
 
 Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
+Please ask questions and share ideas in [GitHub Discussions](https://github.com/physical-edge-native/dyne/discussions); report bugs as [Issues](https://github.com/physical-edge-native/dyne/issues).
 
 ## How this software is developed
 
