@@ -89,6 +89,12 @@
 #      the pinned values at steps 20, 40 and 64 (195 / 507, 262 / 0, 299 / 0), the last row must equal the final
 #      report, and 8 snapshots must be written. scripts/twin_growth.py draws the figures when matplotlib is there
 #      (required when REQUIRE_NUMPY=1, CI).
+#  23. error bound when learned regions leave a residual (theory/guarantee/residual_bound.py, issue #159): on the
+#      idealised map of mixed classical and learned regions (r = 0.1, 0.3, 0.5; fixed-value and zero-gradient ends;
+#      nudging), ||Phi||_inf <= 1 and 200 steps with defects up to delta keep the error under initial error + n·delta,
+#      and a constant defect reaches it; then the learned solver (heat1d-pinn-actor) on one device in dyne-sim: its
+#      distance from the exact backward-Euler sequence stays under the sum of its one-step defects, and each defect is
+#      at most the end deviation plus the grid residual. Needs numpy (required when REQUIRE_NUMPY=1, CI).
 #
 # Usage (from the repository root):  bash scripts/ci-check.sh
 set -euo pipefail
@@ -509,6 +515,21 @@ elif [ "${REQUIRE_NUMPY:-0}" = "1" ]; then
   echo "twin-growth-fig  FAIL (numpy and matplotlib are required here)"; fail=1
 else
   echo "twin-growth-fig  SKIP (numpy or matplotlib not installed)"
+fi
+
+echo "== [23] error bound with residuals of the learned solver (issue #159) =="
+if [ -n "$PY" ] && "$PY" -c "import numpy" > /dev/null 2>&1; then
+  (cd crates/heat1d-pinn-actor && cargo build --release --target wasm32-unknown-unknown)
+  WP="crates/heat1d-pinn-actor/target/wasm32-unknown-unknown/release/heat1d_pinn_actor.wasm"
+  if "$PY" theory/guarantee/residual_bound.py --sim "$SIM1" --wasm "$WP" > target/ci-residual-bound.log 2>&1; then
+    grep -E "worst case|learned solver on one device|defect <=|PASS" target/ci-residual-bound.log
+  else
+    cat target/ci-residual-bound.log; echo "residual-bound   FAIL"; fail=1
+  fi
+elif [ "${REQUIRE_NUMPY:-0}" = "1" ]; then
+  echo "residual-bound   FAIL (numpy is required here)"; fail=1
+else
+  echo "residual-bound   SKIP (numpy not installed)"
 fi
 
 if [ "$fail" -ne 0 ]; then echo "CI CHECK FAILED"; exit 1; fi
