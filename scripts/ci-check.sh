@@ -75,6 +75,11 @@
 #      on every accelerometer axis once offsets are removed, and estimate a 10-degree tilt within 0.2 degrees.
 #      Needs numpy and matplotlib: skipped locally when they are missing, required when REQUIRE_NUMPY=1 (CI)
 #      (issue #121).
+#  20b. the 2026-11-21 IMU hardware record (measured/2026-11-21-siteA-imu) replayed through the IMU fusion solver,
+#      seven devices in a ring, first 120 s (scripts/imu_record_replay.py): the WebAssembly solver and its Python
+#      reference agree bit for bit on every output and message, each fused mean equals the one-place mean within 1e-6,
+#      and the CRC-32 of the outputs is pinned. Needs numpy and wasmtime: skipped locally when they are missing,
+#      required when REQUIRE_ONNX=1 (CI) (issue #158).
 #  21. learned-solver path (ONNX -> .dynm -> crates/mlp-actor): unit tests of mlp-core, mlp-actor and
 #      mlp-train-actor; their WebAssembly modules (full, and --features small for mlp-actor); then
 #      scripts/onnx_check.py: onnxruntime, a same-order reference and the WebAssembly actor agree (tanh and sigmoid
@@ -448,6 +453,20 @@ elif [ "${REQUIRE_NUMPY:-0}" = "1" ]; then
   echo "imu-analyze      FAIL (numpy and matplotlib are required here: pip install numpy matplotlib)"; fail=1
 else
   echo "imu-analyze      SKIP (numpy or matplotlib not installed)"
+fi
+
+echo "== [20b] IMU hardware record replayed through the fusion solver (issue #158) =="
+if [ -n "$PY" ] && "$PY" -c "import numpy, wasmtime" > /dev/null 2>&1; then
+  (cd crates/imu-fusion-actor && cargo build --release --target wasm32-unknown-unknown)
+  if "$PY" scripts/imu_record_replay.py --check > target/ci-imu-record.log 2>&1; then
+    tail -n 5 target/ci-imu-record.log
+  else
+    cat target/ci-imu-record.log; echo "imu-record       FAIL"; fail=1
+  fi
+elif [ "${REQUIRE_ONNX:-0}" = "1" ]; then
+  echo "imu-record       FAIL (needs: pip install numpy wasmtime)"; fail=1
+else
+  echo "imu-record       SKIP (numpy or wasmtime not installed)"
 fi
 
 echo "== [21] learned-solver path: ONNX -> .dynm -> mlp-actor (issue #155) =="
