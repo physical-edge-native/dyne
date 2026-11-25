@@ -257,20 +257,34 @@ JOSS の 2026 年の新しい基準を満たすため、今後ずっと守る。
   数値計算ライブラリ(PETSc など)、マイコン向けの機械学習(TinyML)、マイコン上の WebAssembly の
   実行環境(WAMR など)。関連する作業のときに気づいたことは、docs/ に記録する。
 
-## ビルドと検証(Windowsネイティブ)
+## ビルドと検証
+
+- シミュレータは乱数シード固定で決定論(同一入力なら全出力がOS間でも一致)。
+  数値やカオス統計が変わったら、それは回帰の失敗である。
+
+### クラウドのセッション(Linux。実装の基本、2026-11-25〜)
+
+- 機材なしの回帰の全体: リポジトリの根で `bash scripts/ci-check.sh`(CI と同じ。最後に `ALL CHECKS PASSED` が出ること)。
+  要るもの: Rust の stable と `wasm32-unknown-unknown` のターゲット、Python 3.8 以上。numpy・matplotlib が
+  ないと IMU の解析の確認だけを飛ばす(CI では `REQUIRE_NUMPY=1` で必須)。
+- アクター単体: `cd crates/heat1d-actor && cargo build --release --target wasm32-unknown-unknown`
+- シミュレータ: `cargo build --release -p dyne-sim`
+- 回帰の基本形(リポジトリの根で。`PASS (bit-exact)` が出ること):
+  `target/release/dyne-sim --wasm crates/heat1d-actor/target/wasm32-unknown-unknown/release/heat1d_actor.wasm --nodes 16 --points 65 --steps 2000`
+- クラウドで確かめられないもの(ネットワークの制限、Windows でしか起きないことなど)は、GitHub の CI の結果で確かめる。
+
+### 手元の PC(Windowsネイティブ。実機と Windows でしか確かめられない作業)
 
 - アクター(フル版と実機用縮小版を一括): `powershell -ExecutionPolicy Bypass -File scripts\build-actor-wasm.ps1`
   - 単体: `cd crates\heat1d-actor && cargo build --release --target wasm32-unknown-unknown`
 - シミュレータ: `cd crates\dyne-sim && cargo build --release`
 - 回帰の基本形(PASS (bit-exact) が出ること):
   `target\release\dyne-sim.exe --wasm ..\heat1d-actor\target\wasm32-unknown-unknown\release\heat1d_actor.wasm --nodes 16 --points 65 --steps 2000`
-- シミュレータは乱数シード固定で決定論(同一入力なら全出力がOS間でも一致)。
-  数値やカオス統計が変わったら、それは回帰の失敗である。
 - ESP-IDF(5.5.5): `export.ps1` は失敗する環境なので、PowerShellで
   `. C:\Espressif\Initialize-Idf.ps1 -IdfId esp-idf-7a8737a10725bc5cb19d516a1186b39f`
   を実行してから `idf.py build`。書き込み・モニタは実機作業なのでユーザーが行う。
 
-### この環境での注意
+### 手元の PC(Windows)での注意
 
 - PowerShellの `Set-Content` / `Out-File` はBOMや文字化けを入れる。設定ファイル
   (sdkconfig.defaults 等)や日本語を含むファイルは Write/Edit ツールで書く。
