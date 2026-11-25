@@ -22,7 +22,7 @@ int dyne_node_id_fields(char *buf, int len);
 
 /* ctl 命令 node_id の処理。扱った命令なら true。
  *   {"cmd":"node_id"}                                     番号と決め方を報告 (dyne/ctl/all なら全台が返事)
- *   {"cmd":"node_id","mac":"24:0A:C4:12:34:56","id":5}   この MAC の基板の NVS に 5 を書く
+ *   {"cmd":"node_id","mac":"02:00:00:12:34:56","id":5}   この MAC の基板の NVS に 5 を書く
  *   {"cmd":"node_id","mac":"...","id":-1}                 NVS の番号を消す (次の起動から MAC の番号)
  *   "reboot":true を足すと、番号が変わる場合はすぐ再起動する (既定は再起動しない。次の起動で効く)
  * 返事: dyne/node/<今の番号>/id/ack (QoS1、retain なし) */
