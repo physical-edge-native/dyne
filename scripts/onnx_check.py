@@ -14,6 +14,9 @@ torch を使わずに onnx.helper で試験用の MLP を作り、
      → .dynm f64 と f32 (量子化) の両方
   B: 3→8→8→2、Relu/Sigmoid、MatMul+Add、f32 → .dynm f32
   C: Softmax と Conv を含むモデル → 変換が拒否されること
+  D: 8→32→32→4、Relu、Gemm、f64 (重みは乱数を使わない決定的な値) → .dynm f64 と f32。
+     数学関数を使わないので、参照計算と**全件ビット一致**し、.dynm と出力の CRC-32 が固定値と
+     合うことを合格とする (issue #155。ReLU の網はほかのリポジトリの制御器が使う形)
 
 使い方:
   .venv\\Scripts\\python.exe scripts\\onnx_check.py [--wasm 経路] [--wasm-small 経路] [--out 作業ディレクトリ]
@@ -25,6 +28,7 @@ import os
 import struct
 import sys
 import tempfile
+import zlib
 
 import numpy as np
 import onnx
@@ -86,6 +90,48 @@ def model_matmul_mixed(rng):
         inits,
     )
     return helper.make_model(g, opset_imports=[helper.make_opsetid("", 17)], ir_version=8)
+
+
+def det_values(n, salt, scale):
+    """乱数を使わない決定的な値の列 (NumPy の乱数の列は版をまたいで同じとは限らないため、
+    CRC を固定するモデルはこちらで作る)。値は (k·7919 + salt) mod 2001 を [-1, 1] に写して scale 倍"""
+    return [((k * 7919 + salt) % 2001 - 1000) / 1000.0 * scale for k in range(n)]
+
+
+def model_gemm_relu(dims, np_dtype, tp_dtype):
+    """Gemm(transB=1)+Relu を積んだ MLP。最後の層は活性化なし。重みは det_values で作る (CRC の固定用)。
+    ReLU と積和だけなので、アクターと同じ演算順の参照計算とはビット一致するはず (数学関数を使わない)"""
+    nodes, inits = [], []
+    cur = "x"
+    for k in range(len(dims) - 1):
+        w = np.array(det_values(dims[k] * dims[k + 1], 11 * k + 3, 1.0 / math.sqrt(dims[k])),
+                     dtype=np_dtype).reshape(dims[k + 1], dims[k])
+        b = np.array(det_values(dims[k + 1], 13 * k + 5, 0.1), dtype=np_dtype)
+        inits += [numpy_helper.from_array(w, f"W{k}"), numpy_helper.from_array(b, f"b{k}")]
+        nodes.append(helper.make_node("Gemm", [cur, f"W{k}", f"b{k}"], [f"z{k}"], transB=1))
+        cur = f"z{k}"
+        if k < len(dims) - 2:
+            nodes.append(helper.make_node("Relu", [cur], [f"h{k}"]))
+            cur = f"h{k}"
+    nodes.append(helper.make_node("Identity", [cur], ["y"]))
+    g = helper.make_graph(
+        nodes, "mlp_gemm_relu",
+        [helper.make_tensor_value_info("x", tp_dtype, ["N", dims[0]])],
+        [helper.make_tensor_value_info("y", tp_dtype, ["N", dims[-1]])],
+        inits,
+    )
+    return helper.make_model(g, opset_imports=[helper.make_opsetid("", 17)], ir_version=8)
+
+
+# ReLU だけのモデル D の固定値 (issue #155)。.dynm の形式やアクターの演算が変わると、ここが合わなくなる。
+# 変えるときは、変わった理由を PR に書いてから値を更新する
+D_DIMS = [8, 32, 32, 4]
+D_ROWS = 500
+D_PINNED_CRC = {
+    # (.dynm の種類): (.dynm のバイト列の CRC-32, アクターの出力 (f64 のリトルエンディアン) の CRC-32)
+    "f64": (0x345CCE3D, 0x2B2E8227),
+    "f32": (0x417984A5, 0x84688770),
+}
 
 
 def model_unsupported():
@@ -192,7 +238,7 @@ def run_case(name, model, x, dtype, actor, workdir, log):
     log(f"[{name} / .dynm {'f32' if f32w else 'f64'}] パラメータ {n_params}、{len(data)} バイト、入力 {len(x)} 組")
     log(f"    onnxruntime との最大絶対誤差      {d_ort:.3e}")
     log(f"    同じ演算順の参照計算との最大誤差  {d_ref:.3e}  (ビット一致 {n_bit}/{y_wasm.size})")
-    return d_ort, d_ref, y_wasm
+    return d_ort, d_ref, y_wasm, n_bit, data
 
 
 def main():
@@ -212,6 +258,8 @@ def main():
     x3 = rng.uniform(-2, 2, (500, 3))
     mA64 = model_gemm_tanh(np.random.default_rng(1), [2, 16, 16, 1], np.float64, TensorProto.DOUBLE)
     mB = model_matmul_mixed(np.random.default_rng(2))
+    mD = model_gemm_relu(D_DIMS, np.float64, TensorProto.DOUBLE)
+    xD = np.array(det_values(D_ROWS * D_DIMS[0], 17, 2.0), dtype=np.float64).reshape(D_ROWS, D_DIMS[0])
 
     for label, wpath in (("フル版", a.wasm), ("縮小版", a.wasm_small)):
         if not os.path.exists(wpath):
@@ -222,10 +270,23 @@ def main():
         log(f"    WASM {actor.wasm_bytes} バイト、線形メモリ {actor.pages()} ページ "
             f"({actor.pages() * 64} KB)、パラメータ上限 {actor.call('dyne_param_max')}、"
             f"読み込み領域 {actor.call('dyne_load_cap')} バイト")
-        d1, r1, y1 = run_case("A_gemm_tanh", mA64, x2, "f64", actor, workdir, log)
-        d2, r2, y2 = run_case("A_gemm_tanh", mA64, x2, "f32", actor, workdir, log)
-        d3, r3, y3 = run_case("B_matmul_mixed", mB, x3, "auto", actor, workdir, log)
-        outs.append((label, np.concatenate([y1.ravel(), y2.ravel(), y3.ravel()])))
+        d1, r1, y1, _, _ = run_case("A_gemm_tanh", mA64, x2, "f64", actor, workdir, log)
+        d2, r2, y2, _, _ = run_case("A_gemm_tanh", mA64, x2, "f32", actor, workdir, log)
+        d3, r3, y3, _, _ = run_case("B_matmul_mixed", mB, x3, "auto", actor, workdir, log)
+        # D: ReLU だけのモデル。同じ演算順の参照計算と全件ビット一致し、CRC-32 が固定値と合うこと (issue #155)
+        yd = []
+        for kind in ("f64", "f32"):
+            dd, rd, y4, nb, dyn = run_case("D_gemm_relu", mD, xD, kind, actor, workdir, log)
+            crc_file = zlib.crc32(dyn) & 0xFFFFFFFF
+            crc_out = zlib.crc32(np.ascontiguousarray(y4, dtype="<f8").tobytes()) & 0xFFFFFFFF
+            pinned = D_PINNED_CRC[kind]
+            match = (crc_file, crc_out) == pinned
+            log(f"    全件ビット一致: {'はい' if nb == y4.size else 'いいえ'}  "
+                f"CRC-32 .dynm {crc_file:08x} 出力 {crc_out:08x}  "
+                f"(固定値 {'と一致' if match else 'と不一致: ' + str(tuple(f'{c:08x}' if c is not None else None for c in pinned))})")
+            ok &= nb == y4.size and rd == 0.0 and dd < (1e-12 if kind == "f64" else 1e-5) and match
+            yd.append(y4.ravel())
+        outs.append((label, np.concatenate([y1.ravel(), y2.ravel(), y3.ravel()] + yd)))
         ok &= d1 < 1e-12 and r1 < 1e-14
         ok &= d2 < 1e-5 and r2 < 1e-14
         ok &= d3 < 1e-5 and r3 < 1e-14

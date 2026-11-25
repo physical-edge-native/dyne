@@ -75,6 +75,14 @@
 #      on every accelerometer axis once offsets are removed, and estimate a 10-degree tilt within 0.2 degrees.
 #      Needs numpy and matplotlib: skipped locally when they are missing, required when REQUIRE_NUMPY=1 (CI)
 #      (issue #121).
+#  21. learned-solver path (ONNX -> .dynm -> crates/mlp-actor): unit tests of mlp-core, mlp-actor and
+#      mlp-train-actor; their WebAssembly modules (full, and --features small for mlp-actor); then
+#      scripts/onnx_check.py: onnxruntime, a same-order reference and the WebAssembly actor agree (tanh and sigmoid
+#      models within 1e-14, from libm differences in the last digit); a ReLU-only model must match the reference in
+#      every output and give the pinned CRC-32 of its .dynm file and outputs; full and small builds agree bit for
+#      bit; truncated files and unsupported operators are rejected. Needs numpy, onnx, onnxruntime and wasmtime:
+#      skipped locally when they are missing, required when REQUIRE_ONNX=1 (CI). The PyTorch steps of
+#      scripts/check-onnx.ps1 are not run here (issue #155).
 #
 # Usage (from the repository root):  bash scripts/ci-check.sh
 set -euo pipefail
@@ -440,6 +448,27 @@ elif [ "${REQUIRE_NUMPY:-0}" = "1" ]; then
   echo "imu-analyze      FAIL (numpy and matplotlib are required here: pip install numpy matplotlib)"; fail=1
 else
   echo "imu-analyze      SKIP (numpy or matplotlib not installed)"
+fi
+
+echo "== [21] learned-solver path: ONNX -> .dynm -> mlp-actor (issue #155) =="
+for c in mlp-core mlp-actor mlp-train-actor; do
+  if ! (cd "crates/$c" && cargo test --release --quiet > /dev/null 2>&1); then
+    echo "$c unit tests  FAIL"; fail=1
+  fi
+done
+(cd crates/mlp-actor && cargo build --release --target wasm32-unknown-unknown \
+  && cargo build --release --target wasm32-unknown-unknown --features small --target-dir target/small)
+(cd crates/mlp-train-actor && cargo build --release --target wasm32-unknown-unknown)
+if [ -n "$PY" ] && "$PY" -c "import numpy, onnx, onnxruntime, wasmtime" > /dev/null 2>&1; then
+  if PYTHONIOENCODING=utf-8 "$PY" scripts/onnx_check.py --out target/ci-onnx-check > target/ci-onnx-check.log 2>&1; then
+    grep -E "^\[|全件|フル版と縮小版|PASS" target/ci-onnx-check.log
+  else
+    cat target/ci-onnx-check.log; echo "onnx-check       FAIL"; fail=1
+  fi
+elif [ "${REQUIRE_ONNX:-0}" = "1" ]; then
+  echo "onnx-check       FAIL (needs: pip install numpy onnx onnxruntime wasmtime)"; fail=1
+else
+  echo "onnx-check       SKIP (numpy, onnx, onnxruntime or wasmtime not installed)"
 fi
 
 if [ "$fail" -ne 0 ]; then echo "CI CHECK FAILED"; exit 1; fi
