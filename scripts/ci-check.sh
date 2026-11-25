@@ -83,6 +83,12 @@
 #      bit; truncated files and unsupported operators are rejected. Needs numpy, onnx, onnxruntime and wasmtime:
 #      skipped locally when they are missing, required when REQUIRE_ONNX=1 (CI). The PyTorch steps of
 #      scripts/check-onnx.ps1 are not run here (issue #155).
+#  22. how the room twin grows (issue #157): the shape grid solver with panning distance sensors
+#      (crates/dyne-sim2d/scenes/room6_move_pan4h.txt, 2x2 split, 64 steps) with --growth-csv and --snapshot-every;
+#      the split solution must be bit-exact, the surfaces covered and the free points without a distance yet must be
+#      the pinned values at steps 20, 40 and 64 (195 / 507, 262 / 0, 299 / 0), the last row must equal the final
+#      report, and 8 snapshots must be written. scripts/twin_growth.py draws the figures when matplotlib is there
+#      (required when REQUIRE_NUMPY=1, CI).
 #
 # Usage (from the repository root):  bash scripts/ci-check.sh
 set -euo pipefail
@@ -469,6 +475,40 @@ elif [ "${REQUIRE_ONNX:-0}" = "1" ]; then
   echo "onnx-check       FAIL (needs: pip install numpy onnx onnxruntime wasmtime)"; fail=1
 else
   echo "onnx-check       SKIP (numpy, onnx, onnxruntime or wasmtime not installed)"
+fi
+
+echo "== [22] how the room twin grows: coverage per step and snapshots (issue #157) =="
+GD=target/ci-twin-growth
+rm -rf "$GD"; mkdir -p "$GD"
+out=$("$SIM2" --wasm "$WS" --scene crates/dyne-sim2d/scenes/room6_move_pan4h.txt --px 2 --py 2 --steps 64 --quiet \
+      --growth-csv "$GD/growth.csv" --snapshot-every 8 --snapshot-dir "$GD/snaps") || true
+# columns: steps_done, coverage_pct, covered, ..., no_distance_yet (10th)
+got=$(awk -F, '$1==20||$1==40||$1==64 {printf "%s:%s/%s ", $1, $3, $10}' "$GD/growth.csv" 2>/dev/null || true)
+want="20:195/507 40:262/0 64:299/0 "
+last=$(tail -n 1 "$GD/growth.csv" 2>/dev/null | awk -F, '{printf "coverage %.1f%% (%s / %s", $2, $3, $4}')
+nsnap=$(ls "$GD/snaps"/shape_step*.csv 2>/dev/null | wc -l | tr -d ' ')
+if ! printf '%s\n' "$out" | grep -q "PASS (bit-exact)"; then
+  echo "$out"; echo "twin-growth      FAIL (split run)"; fail=1
+elif [ "$got" != "$want" ]; then
+  echo "twin-growth      FAIL (covered/no-distance at steps 20,40,64: got '$got', want '$want')"; fail=1
+elif ! printf '%s\n' "$out" | grep -qF "shape: $last"; then
+  echo "twin-growth      FAIL (last growth row '$last' differs from the final report)"; fail=1
+elif [ "$nsnap" != "8" ]; then
+  echo "twin-growth      FAIL ($nsnap snapshots, want 8)"; fail=1
+else
+  echo "twin-growth      PASS (covered/no-distance $got; $nsnap snapshots)"
+fi
+if [ -n "$PY" ] && "$PY" -c "import numpy, matplotlib" > /dev/null 2>&1; then
+  if ! "$PY" scripts/twin_growth.py --growth "$GD/growth.csv" --snapshots "$GD/snaps" --out "$GD/fig" > "$GD/fig.log" 2>&1 \
+     || [ ! -s "$GD/fig/growth.png" ] || [ ! -s "$GD/fig/snapshots.png" ]; then
+    cat "$GD/fig.log"; echo "twin-growth-fig  FAIL"; fail=1
+  else
+    echo "twin-growth-fig  PASS ($(head -n 1 "$GD/fig.log"))"
+  fi
+elif [ "${REQUIRE_NUMPY:-0}" = "1" ]; then
+  echo "twin-growth-fig  FAIL (numpy and matplotlib are required here)"; fail=1
+else
+  echo "twin-growth-fig  SKIP (numpy or matplotlib not installed)"
 fi
 
 if [ "$fail" -ne 0 ]; then echo "CI CHECK FAILED"; exit 1; fi

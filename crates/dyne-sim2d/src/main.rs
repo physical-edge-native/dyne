@@ -70,6 +70,13 @@
 //!   --track-csv 経路 [--track-every N] … 単一ノード解の N ステップごとの採点を CSV に書く
 //!     (その時刻の正解の形状に対して。動く箱のある場面ファイルで追従の時間を測る)
 //!
+//! How the twin grows (2026-11-25, GitHub issue #157; nothing changes without the options):
+//!   --growth-csv PATH … scores the single-node shape solution after every step against the scene at that step, with the
+//!     same measures as the final "shape:" lines (coverage of surface samples, surface error, unobserved free points,
+//!     free points the distance has not reached yet); the last row equals the final report
+//!   --snapshot-every N --snapshot-dir DIR … writes the single-node shape field every N steps as DIR/shape_stepNNNNN.csv
+//!     (columns as --field-csv: gx, gy, x, y, phi, d, w, truth). The split solution is identical bit for bit
+//!
 //! 実機の入力の再生 (2026-11-15、GitHub issue #2、docs/2026-11-15-hw-replay.md。指定しなければ従来と同じ動作):
 //!   --replay 経路 … 実機のノードがアクターへ渡した測距フレーム・IMU の標本 (scripts/hw_replay.py が MQTT の記録から作る
 //!     再生の入力) を同じステップで渡し、ノードが報告した CRC32 と比べる (`replay-check ... OK|DIFF`)。
@@ -159,6 +166,12 @@ struct Config {
     track_scale: Option<f64>,
     track_csv: Option<String>,
     track_every: u64,
+    /// --growth-csv 経路: 形の格子型アクターの単一ノード解を毎ステップ採点し、最後の "shape:" の行と同じ指標を
+    /// CSV に書く (ツインが育つ様子。GitHub issue #157)
+    growth_csv: Option<String>,
+    /// --snapshot-every N --snapshot-dir DIR: N ステップごとに単一ノード解の形の場 (phi, d, w, truth) を書く (#157)
+    snapshot_every: u64,
+    snapshot_dir: Option<String>,
     /// --cfg キー=値 (繰り返し可): 格子型以外のアクターへ dyne_init2d の前に dyne_cfg で渡す
     /// (波動方程式のアクターの初期条件・吸収境界など。2026-11-11、docs/2026-11-11-wave2d.md)
     extra_cfg: Vec<(u32, f64)>,
@@ -241,6 +254,9 @@ fn parse_args() -> Config {
         track_scale: None,
         track_csv: None,
         track_every: 1,
+        growth_csv: None,
+        snapshot_every: 0,
+        snapshot_dir: None,
         extra_cfg: Vec::new(),
         dump_node: None,
         dump_file: None,
@@ -338,6 +354,9 @@ fn parse_args() -> Config {
             }
             "--track-csv" => c.track_csv = Some(val),
             "--track-every" => c.track_every = val.parse().unwrap(),
+            "--growth-csv" => c.growth_csv = Some(val),
+            "--snapshot-every" => c.snapshot_every = val.parse().unwrap(),
+            "--snapshot-dir" => c.snapshot_dir = Some(val),
             "--track-scale-m" => c.track_scale = Some(val.parse().unwrap()),
             "--dump-node" => c.dump_node = Some(val.parse().unwrap()),
             "--dump-file" => c.dump_file = Some(val),
@@ -1356,8 +1375,87 @@ fn count_mismatch(a: &[f64], b: &[f64]) -> (usize, f64) {
     (n, m)
 }
 
+/// 正解の形状に対する採点の結果 (設計書 §4.3)。最後の "shape:" の行と --growth-csv の行が同じ値を使う
+struct ShapeMetrics {
+    se: Vec<f64>,
+    covered: usize,
+    samples: usize,
+    fe: Vec<f64>,
+    unknown: usize,
+    free: usize,
+    unreached: usize,
+}
+
+fn mean_of(v: &[f64]) -> f64 {
+    if v.is_empty() { f64::NAN } else { v.iter().sum::<f64>() / v.len() as f64 }
+}
+
+fn pct_of(v: &[f64], p: f64) -> f64 {
+    if v.is_empty() { f64::NAN } else { v[((v.len() - 1) as f64 * p) as usize] }
+}
+
 /// 正解の形状に対する採点 (設計書 §4.3)
 fn shape_report(out: &mut String, sc: &Scene, f: &Fields, nx: usize, ny: usize, g: &GridGeom, mu: f64) {
+    let m = shape_metrics(sc, f, nx, ny, g, mu);
+    let (se, fe) = (&m.se, &m.fe);
+    let (mean, pct) = (mean_of, pct_of);
+    let (covered, samples, unknown, free, unreached) = (m.covered, m.samples, m.unknown, m.free, m.unreached);
+    writeln!(
+        out,
+        "shape: surface points {} | |phi-truth| mean {:.4} m p95 {:.4} m max {:.4} m",
+        se.len(), mean(se), pct(se, 0.95), se.last().copied().unwrap_or(f64::NAN)
+    ).unwrap();
+    writeln!(
+        out,
+        "shape: coverage {:.1}% ({} / {} surface samples at h)",
+        100.0 * covered as f64 / samples.max(1) as f64, covered, samples
+    ).unwrap();
+    writeln!(
+        out,
+        "shape: observed-free points {} | |phi-truth| mean {:.4} m p95 {:.4} m max {:.4} m",
+        fe.len(), mean(fe), pct(fe, 0.95), fe.last().copied().unwrap_or(f64::NAN)
+    ).unwrap();
+    writeln!(
+        out,
+        "shape: unobserved {:.1}% of free grid points ({} / {}), no distance yet {}",
+        100.0 * unknown as f64 / free.max(1) as f64, unknown, free, unreached
+    ).unwrap();
+}
+
+/// --growth-csv の見出しと1行 (#157)。steps_done は計算を終えたステップの数 (最後の行は "shape:" の行と同じ値)
+const GROWTH_HEADER: &str = "steps_done,coverage_pct,covered,surface_samples,surface_err_mean_m,surface_err_p95_m,unobserved_pct,unobserved,free_points,no_distance_yet";
+
+fn growth_row(steps_done: u64, sc: &Scene, f: &Fields, nx: usize, ny: usize, g: &GridGeom, mu: f64) -> String {
+    let m = shape_metrics(sc, f, nx, ny, g, mu);
+    format!(
+        "{},{:.4},{},{},{:.6},{:.6},{:.4},{},{},{}",
+        steps_done,
+        100.0 * m.covered as f64 / m.samples.max(1) as f64,
+        m.covered,
+        m.samples,
+        mean_of(&m.se),
+        pct_of(&m.se, 0.95),
+        100.0 * m.unknown as f64 / m.free.max(1) as f64,
+        m.unknown,
+        m.free,
+        m.unreached
+    )
+}
+
+/// 形の場を CSV に書く (--field-csv と同じ列。truth はそのステップの正解の符号つき距離)
+fn shape_field_csv(sc: &Scene, f: &Fields, nx: usize, ny: usize, g: &GridGeom) -> String {
+    let mut s = String::from("gx,gy,x,y,phi,d,w,truth\n");
+    for gy in 0..ny {
+        for gx in 0..nx {
+            let k = gy * nx + gx;
+            let (x, y) = (g.x0 + gx as f64 * g.h, g.y0 + gy as f64 * g.h);
+            writeln!(s, "{},{},{},{},{:e},{:e},{},{:e}", gx, gy, x, y, f.phi[k], f.d[k], f.w[k], sc.signed_distance(x, y)).unwrap();
+        }
+    }
+    s
+}
+
+fn shape_metrics(sc: &Scene, f: &Fields, nx: usize, ny: usize, g: &GridGeom, mu: f64) -> ShapeMetrics {
     let pos = |k: usize| (g.x0 + (k % nx) as f64 * g.h, g.y0 + (k / nx) as f64 * g.h);
     let truth: Vec<f64> = (0..nx * ny).map(|k| {
         let (x, y) = pos(k);
@@ -1367,8 +1465,6 @@ fn shape_report(out: &mut String, sc: &Scene, f: &Fields, nx: usize, ny: usize, 
     // 2. 表面の近くの点の距離の誤差
     let mut se: Vec<f64> = (0..nx * ny).filter(|&k| is_surf(k)).map(|k| (f.phi[k] - truth[k]).abs()).collect();
     se.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let mean = |v: &[f64]| if v.is_empty() { f64::NAN } else { v.iter().sum::<f64>() / v.len() as f64 };
-    let pct = |v: &[f64], p: f64| if v.is_empty() { f64::NAN } else { v[((v.len() - 1) as f64 * p) as usize] };
     // 3. 表面の覆い率
     let samples = sc.surface_samples(g.h);
     let mut covered = 0usize;
@@ -1403,26 +1499,7 @@ fn shape_report(out: &mut String, sc: &Scene, f: &Fields, nx: usize, ny: usize, 
     let free: Vec<usize> = (0..nx * ny).filter(|&k| truth[k] > 0.0).collect();
     let unknown = free.iter().filter(|&&k| f.w[k] == 0.0).count();
     let unreached = free.iter().filter(|&&k| f.phi[k] >= 1e29).count();
-    writeln!(
-        out,
-        "shape: surface points {} | |phi-truth| mean {:.4} m p95 {:.4} m max {:.4} m",
-        se.len(), mean(&se), pct(&se, 0.95), se.last().copied().unwrap_or(f64::NAN)
-    ).unwrap();
-    writeln!(
-        out,
-        "shape: coverage {:.1}% ({} / {} surface samples at h)",
-        100.0 * covered as f64 / samples.len().max(1) as f64, covered, samples.len()
-    ).unwrap();
-    writeln!(
-        out,
-        "shape: observed-free points {} | |phi-truth| mean {:.4} m p95 {:.4} m max {:.4} m",
-        fe.len(), mean(&fe), pct(&fe, 0.95), fe.last().copied().unwrap_or(f64::NAN)
-    ).unwrap();
-    writeln!(
-        out,
-        "shape: unobserved {:.1}% of free grid points ({} / {}), no distance yet {}",
-        100.0 * unknown as f64 / free.len().max(1) as f64, unknown, free.len(), unreached
-    ).unwrap();
+    ShapeMetrics { se, covered, samples: samples.len(), fe, unknown, free: free.len(), unreached }
 }
 
 /// 推定した表面 (φ のゼロ等値線) の通過点。表示 (scripts/twin_demo.py) と同じく、
@@ -1835,6 +1912,17 @@ fn main() {
             assert!(cfg.track_every >= 1, "--track-every は1以上");
             track.push_str("step,n_cross,static_err_mean,static_err_p95,phantom,phantom_old,mover_cov,mover_err_mean,static_cov\n");
         }
+        let mut growth = String::new();
+        if cfg.growth_csv.is_some() {
+            assert!(is_shape, "--growth-csv は格子型アクター用");
+            growth.push_str(GROWTH_HEADER);
+            growth.push('\n');
+        }
+        if cfg.snapshot_every > 0 || cfg.snapshot_dir.is_some() {
+            assert!(is_shape, "--snapshot-every は格子型アクター用");
+            assert!(cfg.snapshot_every >= 1 && cfg.snapshot_dir.is_some(), "--snapshot-every N と --snapshot-dir DIR は組で指定する");
+            std::fs::create_dir_all(cfg.snapshot_dir.as_ref().unwrap()).expect("--snapshot-dir の作成");
+        }
         for s in 0..cfg.steps {
             if let Some(rp) = &sim.replay {
                 // 再生 (--replay-single): 全ノードの記録したフレームを、ノードの順・記録の順に渡す
@@ -1869,9 +1957,27 @@ fn main() {
                 track.push_str(&row);
                 track.push('\n');
             }
+            let snap_now = cfg.snapshot_every > 0 && (s + 1) % cfg.snapshot_every == 0;
+            if cfg.growth_csv.is_some() || snap_now {
+                let mut gf = blank();
+                read_block(&mut single, &whole, cfg.nx, &mut gf);
+                let now = scene.as_ref().unwrap().at_step(s);
+                let mu = shape_cfg.as_ref().unwrap().mu;
+                if cfg.growth_csv.is_some() {
+                    growth.push_str(&growth_row(s + 1, &now, &gf, cfg.nx, cfg.ny, &geom, mu));
+                    growth.push('\n');
+                }
+                if snap_now {
+                    let path = std::path::Path::new(cfg.snapshot_dir.as_ref().unwrap()).join(format!("shape_step{:05}.csv", s + 1));
+                    std::fs::write(path, shape_field_csv(&now, &gf, cfg.nx, cfg.ny, &geom)).expect("--snapshot-dir への書き込み");
+                }
+            }
         }
         if let Some(path) = &cfg.track_csv {
             std::fs::write(path, &track).expect("--track-csv の書き込み");
+        }
+        if let Some(path) = &cfg.growth_csv {
+            std::fs::write(path, &growth).expect("--growth-csv の書き込み");
         }
         read_block(&mut single, &whole, cfg.nx, &mut single_f);
         single_late = single.count(single.late);
