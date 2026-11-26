@@ -51,6 +51,11 @@ cd ..\..
 | model_b_f32.dynm | 上と同じモデルの重みを f32 に丸めたもの |
 
 `expect` は実機が出すべき CRC を `#EXPECT` 行で表示します。
+その出力は `bench-c5/expected.txt` に固定してあり、CI (scripts/ci-check.sh の21番目) が、置いてある素材と、
+作り直した mlp-actor の両方で同じ値になることを毎回確かめます (2026-11-26、GitHub issue #156)。
+mlp-actor を作り直したら、上の `make` の代わりに wasm の写し (1行目の cargo build の後の
+`crates/mlp-actor/target/small/.../mlp_actor.wasm` → `assets/mlp_actor_small.wasm`) だけでよく、
+期待値が変わらなければ `expected.txt` もそのままです (`make` は .dynm も作り直すので、NumPy の版によって重みが変わりうる)。
 
 ### 2. ビルドと書き込み
 
