@@ -16,8 +16,14 @@ Reported:
   - steps per second per device (one step = one solver step on that device), and the step time split into
     "send and wait for the neighbours" (t1 - t0) and "compute" (t2 - t1).
 
+On the devices (firmware, stage 2 of #167) each node keeps its records in memory and, after the run, publishes them in
+batches to dyne/node/<idx>/perf as {"node","steps","i0","total","dropped","recs":[...],"n"}. With --from-mqtt, LOG is
+an MQTT recording (scripts/hw_replay.py record: one line = {"t","topic","payload"}); the batches are put back into one
+log (checked complete: every record from 0 to total exactly once per device) and analysed the same way.
+
 Usage:
   python scripts/coop_perf.py LOG [--json out.json] [--check-sim]
+  python scripts/coop_perf.py RECORDING --from-mqtt [--write-log perf.jsonl] [--json out.json]
   --check-sim (simulator logs only): the latency must lie in [lat, lat + 2·jitter] as configured, and its median must
   be within 5 % of lat + jitter (the virtual network of crates/dyne-core draws lat + a uniform integer in
   [0, 2·jitter] µs, at least 1 µs); exit 1 otherwise.
@@ -70,6 +76,58 @@ def load(path):
     if run is None:
         raise SystemExit(f"{path}: no header line (k = run)")
     return run, tx, rx, steps
+
+
+def load_mqtt(path):
+    """Collect dyne/node/<idx>/perf batches from an MQTT recording into (run, tx, rx, steps)."""
+    import re
+    topic_re = re.compile(r"^dyne/node/(-?\d+)/perf$")
+    parts = defaultdict(dict)
+    meta = {}
+    with open(path, encoding="utf-8") as f:
+        for ln, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
+                continue
+            r = json.loads(line)
+            m = topic_re.match(r.get("topic", ""))
+            if not m:
+                continue
+            p = r["payload"]
+            if isinstance(p, str):
+                p = json.loads(p)
+            node = int(m.group(1))
+            if p.get("n") != len(p.get("recs", [])):
+                raise SystemExit(f"{path}:{ln}: batch of device {node} at {p.get('i0')} says n = {p.get('n')} "
+                                 f"but has {len(p.get('recs', []))} records")
+            parts[node][int(p["i0"])] = p["recs"]
+            meta[node] = (int(p["total"]), int(p["dropped"]), int(p["steps"]))
+    if not parts:
+        raise SystemExit(f"{path}: no dyne/node/<idx>/perf messages")
+    tx, rx, steps = [], [], []
+    dropped = 0
+    for node, chunks in sorted(parts.items()):
+        total, drop, _ = meta[node]
+        dropped += drop
+        recs = []
+        for i0 in sorted(chunks):
+            if i0 != len(recs):
+                raise SystemExit(f"{path}: device {node}: records {len(recs)}..{i0 - 1} missing (lost batch)")
+            recs.extend(chunks[i0])
+        if len(recs) != total:
+            raise SystemExit(f"{path}: device {node}: {len(recs)} of {total} records received")
+        for r in recs:
+            {"tx": tx, "rx": rx, "step": steps}[r["k"]].append(r)
+    run = {"k": "run", "source": "devices", "nodes": len(parts), "steps": max(m[2] for m in meta.values()),
+           "dropped": dropped}
+    return run, tx, rx, steps
+
+
+def write_log(path, run, tx, rx, steps):
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(json.dumps(run, separators=(",", ":")) + "\n")
+        for r in tx + rx + steps:
+            f.write(json.dumps(r, separators=(",", ":")) + "\n")
 
 
 def analyse(run, tx, rx, steps):
@@ -155,8 +213,15 @@ def main():
     ap.add_argument("log")
     ap.add_argument("--json")
     ap.add_argument("--check-sim", action="store_true")
+    ap.add_argument("--from-mqtt", action="store_true", help="LOG is an MQTT recording with dyne/node/<idx>/perf batches")
+    ap.add_argument("--write-log", help="with --from-mqtt: also write the collected log (one record per line)")
     a = ap.parse_args()
-    run, tx, rx, steps = load(a.log)
+    run, tx, rx, steps = load_mqtt(a.log) if a.from_mqtt else load(a.log)
+    if a.write_log:
+        write_log(a.write_log, run, tx, rx, steps)
+    if run.get("dropped"):
+        print(f"warning: the devices dropped {run['dropped']} records (their buffers were full); "
+              f"the numbers below cover only what was recorded")
     res = analyse(run, tx, rx, steps)
     report(res)
     if a.json:
