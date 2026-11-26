@@ -313,8 +313,10 @@ The following use the same solver interface, simulator and checks.
   temperature sensors.
 - **Room-shape reconstruction** from range sensors (`crates/sdf2d-grid-actor`;
   six devices on hardware, 2026-11-21).
-- **Inertial-sensor (IMU) fusion across devices** (`crates/imu-fusion-actor`;
-  seven sensors recorded on hardware, 2026-11-21).
+- **Inertial-sensor (IMU) fusion across devices** (`crates/imu-fusion-actor`).
+  Seven sensors were recorded on hardware (2026-11-21) and analysed on a PC; the
+  fusion solver itself has so far run on that record only in the simulator, not
+  on the devices.
 - **Flocking demo** on the same runtime (`crates/swarm-*`).
 - **Native solvers on a PC** and **connections to other tools** (VTK, USD,
   OpenFOAM), described below.
