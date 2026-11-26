@@ -3,6 +3,37 @@
 Thank you for your interest. Dyne is a research prototype maintained by a
 single author, so response times may vary (usually within a week).
 
+## Your first contribution
+
+New here? Welcome. Start with one of these:
+
+- **Good first issues** (small, well-defined):
+  https://github.com/physical-edge-native/dyne/labels/good%20first%20issue
+- **Help wanted** (ESP32 boards, firmware, numerics; bigger):
+  https://github.com/physical-edge-native/dyne/labels/help%20wanted
+
+Each issue says whether it needs hardware. Without hardware you can work on the simulators, solvers, scripts,
+tests and documentation; hardware issues name the boards they need.
+
+**Before you start, comment on the issue** ("I'd like to work on this") so two people do not do the same thing.
+
+**How to make the pull request**: follow the
+[step-by-step guide of the organization](https://github.com/physical-edge-native/.github/blob/main/CONTRIBUTING.md#step-by-step-your-first-pull-request).
+For pull requests from forks, CI starts only after the maintainer approves it.
+
+**Checks in this repository**: `bash scripts/ci-check.sh` from the repository root runs everything CI runs
+(needs Rust stable with the `wasm32-unknown-unknown` target and Python 3.8+; it skips the parts whose Python
+packages are missing). To run only one Rust test: `cargo test --release -p <crate> --test <name>`.
+
+**Hardware records**: never commit Wi-Fi names or passwords (put them in `node-esp32/sdkconfig.local`, which Git
+ignores). In logs and records, replace each board's MAC address with `02:00:00:00:02:YY` (`YY` = the last byte of
+the real address, which the firmware uses as the node number) and the access point's with `02:00:00:00:00:01`.
+
+**Questions**: in the issue, in [GitHub Discussions](https://github.com/physical-edge-native/dyne/discussions),
+or on Discord `#dyne` (invite link in the organization's
+[SUPPORT.md](https://github.com/physical-edge-native/.github/blob/main/SUPPORT.md)).
+You may use AI coding assistants; say so in the pull request (see the organization guide).
+
 ## Reporting problems and asking questions
 
 Open a [GitHub issue](https://github.com/physical-edge-native/dyne/issues).
