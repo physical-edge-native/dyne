@@ -15,7 +15,8 @@
 #      computes no step on either side (issue #138)
 #   5. determinism: two runs with the same arguments produce identical output
 #   6. firmware host tests, built with the host C compiler: the node id selection of node-esp32, and the
-#      step sync replies (a same-step duplicate is answered, so a ring of nodes cannot deadlock; issue #29)
+#      step sync replies (a same-step duplicate is answered, so a ring of nodes cannot deadlock; issue #29), and the
+#      cooperative-run log kept on the devices (records, JSON, batches; issue #167)
 #   7. hardware-input replay: synthetic records (range frames, IMU samples) replay bit for bit;
 #      a one-bit change in an input is detected (needs Python 3.8+, standard library only)
 #   8. 1D baseline: all outputs of the 12 regression scenarios match the stored hashes of the
@@ -103,7 +104,9 @@
 #  24. cooperative-run log (issue #167): dyne-sim2d --perf-log on a 2x2 heat run with 5 ms latency, 10 ms jitter and
 #      10 % loss (300 steps, seed 42); the split result must stay bit-exact, scripts/coop_perf.py --check-sim must find
 #      the latency inside the configured range with the expected median, and the counts of messages sent and received
-#      must be the pinned ones (3552 / 3204). Standard library only.
+#      must be the pinned ones (3552 / 3204). Standard library only. Device side: the batches written by the host test of
+#      step 6 with the firmware's C code (node-esp32/main/dyne_perf_core.c) must be put back into one log by
+#      coop_perf.py --from-mqtt and give the latency the test used (median 5 ms, 3..7 ms).
 #
 # Usage (from the repository root):  bash scripts/ci-check.sh
 set -euo pipefail
@@ -199,10 +202,14 @@ host_test() { # name, test source, core source
 if [ -z "$cc_bin" ]; then
   echo "node_id          SKIP (no C compiler)"
   echo "sync             SKIP (no C compiler)"
+  echo "perf             SKIP (no C compiler)"
 else
   tdir="$(mktemp -d)"
   host_test node_id node-esp32/host_test/node_id_test.c node-esp32/main/dyne_node_id_core.c
   host_test sync node-esp32/host_test/sync_test.c node-esp32/main/dyne_sync_core.c
+  host_test perf node-esp32/host_test/perf_test.c node-esp32/main/dyne_perf_core.c
+  # the device log's batches, put back together on the PC side in step 24 (issue #167)
+  "$tdir/perf_test${EXE}" --emit > target/ci-perf-mqtt.jsonl || fail=1
   rm -rf "$tdir"
 fi
 
@@ -569,6 +576,17 @@ elif ! grep -q "3552 messages sent, 3204 received" target/ci-perf.log; then
   head -n 1 target/ci-perf.log; echo "coop-perf        FAIL (counts differ from the pinned 3552 / 3204)"; fail=1
 else
   head -n 3 target/ci-perf.log; tail -n 1 target/ci-perf.log
+fi
+# Device side (firmware stage of #167): the batches the firmware publishes (written by the host test of step 6 with the
+# same C code) must be put back into one log and give the latency the test used (3..7 ms, median 5 ms)
+if [ -z "$cc_bin" ]; then
+  echo "coop-perf-mqtt   SKIP (no C compiler, see step 6)"
+elif [ -n "$PY" ] && "$PY" scripts/coop_perf.py target/ci-perf-mqtt.jsonl --from-mqtt > target/ci-perf-mqtt.log 2>&1 \
+     && grep -q "devices: 2 devices, 9.93 s, 200 messages sent, 200 received" target/ci-perf-mqtt.log \
+     && grep -q "latency ms: median 5.000 p95 7.000 p99 7.000 max 7.000 min 3.000" target/ci-perf-mqtt.log; then
+  echo "coop-perf-mqtt   PASS ($(head -n 1 target/ci-perf-mqtt.log))"
+else
+  cat target/ci-perf-mqtt.log 2>/dev/null; echo "coop-perf-mqtt   FAIL"; fail=1
 fi
 
 if [ "$fail" -ne 0 ]; then echo "CI CHECK FAILED"; exit 1; fi

@@ -25,6 +25,19 @@ Times are microseconds: virtual time in the simulator, synchronised clocks on th
 latency only as good as the clock synchronisation, see #154). `bytes` is the size of the delivery unit (the UDP payload
 on the devices), without the envelope added on real radios.
 
+## On the devices (stage 2)
+
+- The configuration's `mode.perf_cap` (records, default 0 = off) turns recording on; the buffer is taken from PSRAM when
+  the board has it (40 bytes per record; 300 steps on four links need about 3,000 records, 120 kB).
+- After the run, before the `done` status, each device publishes its records to `dyne/node/<idx>/perf` in batches of
+  `mode.perf_batch` records (default 20) every `mode.perf_pace_ms` (default 1000 ms), QoS 1, as
+  `{"node","steps","i0","total","dropped","recs":[...],"n"}` with the record objects above. If the buffer fills, later
+  records are dropped and counted.
+- `scripts/coop_perf.py RECORDING --from-mqtt` reads an MQTT recording (`scripts/hw_replay.py record`), checks that every
+  record from 0 to `total` arrived exactly once per device, and analyses the result as above.
+- The record buffer, the JSON and the batches are C code without ESP-IDF (`node-esp32/main/dyne_perf_core.c`), checked
+  on a PC (`node-esp32/host_test/perf_test.c`); the integration into `node_v2.c` is checked on the devices.
+
 ## Derived numbers (`scripts/coop_perf.py`)
 
 One-way latency per link and overall (median, 95th and 99th percentile, maximum); jitter as the standard deviation and
