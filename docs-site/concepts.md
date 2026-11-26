@@ -82,7 +82,8 @@ distance sensors for the room shape, thermometers for temperature, accelerometer
   border becomes an exchange.
 - **Leaving:** on hardware (2026-11-21), when a device's battery was removed during a six-device room run, its
   neighbours reported the silence within about 10 s and held the run; when the battery was put back, the device
-  rejoined about 40 s later.
+  reconnected to the network about 40 s later but does not yet rejoin the computation
+  ([#131](https://github.com/physical-edge-native/dyne/issues/131)).
 
 ## 7. The PC configures, watches and exports — it does not compute
 
