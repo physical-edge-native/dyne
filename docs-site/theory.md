@@ -42,9 +42,48 @@ iteration between devices is needed.
 | **Proven** | Nudging to sensors `u ← u + γ(y − u)`: for `r ≤ 1/2` and `0 ≤ γ ≤ 2`, the error never increases, whatever the number, position and period of observations (`‖I − γP‖∞ = max(1, |1 − γ|)`). `γ = 2` cannot be improved. |
 | **Proven** | Splitting does not change the result (same operations in the same order). |
 | **Proven** | 2D wave equation (von Neumann analysis on an infinite uniform grid): stable if and only if the Courant number `ν = cΔt/h ≤ 1/√2 ≈ 0.70711` (`1/√3` in 3D). |
+| **Proven** | Learned regions that leave a residual: if the step with exact training never increases the error (as above for `r ≤ 1/2`), and every step's learned output differs from the exact step by at most `δ`, the error after `n` steps is at most the initial error plus `n·δ`; `δ` is at most the deviation at the region's ends plus the training residual at the grid points. See [below](#learned-regions-that-leave-a-residual). |
 | **Derived under idealisation** (training converges exactly) | Classical and learned regions mixed in any arrangement: for `r ≤ 1/2`, one step never increases the error (`B` is diagonally dominant with non-positive off-diagonals, so `B⁻¹ ≥ 0`). Learned regions alone: stability limit `r = (7 − √17)/4 ≈ 0.719`. |
 | **Checked numerically** | Wave equation on bounded grids: limit 0.70765 with fixed-value walls, `1/√2` with zero-gradient and absorbing walls, matching where the simulator starts to diverge; growth factors match theory to 5–6 digits. Transparent borders: limits 0.500 / 0.319 / 0.438 depending on the variant. The `γ > 2` boundary matches experiments. |
 | **Open** | Why the learned solver's measured limit lies above the idealised 0.719; a proof that transparent borders never create heat; matching the mixed-solver predictions in the simulator and on hardware. |
+
+## Learned regions that leave a residual
+
+The mixed result above assumes that training converges exactly in every step. In practice each step of a learned
+region leaves a small residual. Let `Φ` be the step with exact training (classical points explicit, learned
+interiors solved exactly by backward Euler), and let the computed values satisfy `u(t) = Φ·u(t−1) + ρ(t)`, where the
+*one-step defect* `ρ(t)` is the difference between what the learned solver produced and the exact step from the same
+previous values. The exact sequence satisfies `v(t) = Φ·v(t−1)`. Then
+
+```
+u(t) − v(t) = Φ·(u(t−1) − v(t−1)) + ρ(t)   ⇒   ‖u(n) − v(n)‖∞ ≤ ‖u(0) − v(0)‖∞ + Σₜ ‖ρ(t)‖∞ ≤ ‖u(0) − v(0)‖∞ + n·δ
+```
+
+whenever `‖Φ‖∞ ≤ 1` (proven for `r ≤ 1/2`, any arrangement of classical and learned regions, fixed-value or
+zero-gradient ends, nudging with `0 ≤ γ ≤ 2`) and every `‖ρ(t)‖∞ ≤ δ`.
+
+The defect is bounded by what training controls. Inside a learned region the exact values `w*` solve `B·w* = b`; the
+computed values solve `B·w = b + q`, where `q` is the backward-Euler residual at the grid points. Hence
+`w − w* = B⁻¹·q`, and `‖B⁻¹‖∞ ≤ 1` (each row of `B` has `1 + 2r` on the diagonal and `−r` beside it, so it exceeds
+the off-diagonal sum by 1). Values the region takes as targets at its ends add their own deviation. So
+`‖ρ(t)‖∞ ≤` (largest deviation at the ends) `+ ‖q‖∞`.
+
+The bound grows linearly with the number of steps and cannot be improved in general: with zero-gradient ends `Φ`
+keeps constant fields, and a constant defect `δ` in every point gives an error of exactly `n·δ`. It says that the
+error does not grow faster than the residuals add up — not that it stays small.
+
+Checked in `scripts/ci-check.sh` (step 23, `theory/guarantee/residual_bound.py`):
+
+- on the idealised map of several mixed chains with `r = 0.1, 0.3, 0.5`, `‖Φ‖∞ ≤ 1` and 200 steps with random and
+  constant defects stay under the bound, and the constant defect on one learned region with zero-gradient ends
+  reaches it (0.2031 against 0.2097, the gap being the part of the initial difference that has decayed);
+- the learned solver (`crates/heat1d-pinn-actor`) running in the simulator on one device (17 points, fixed-value ends):
+  its distance from the exact backward-Euler sequence started at the same field stays under the sum of its measured
+  one-step defects (0.037 against 0.153 after 39 steps), and each defect is at most the end deviation plus the grid
+  residual.
+
+Not covered: several learned devices in the simulator (the simulator's arrangement of border points has not yet been
+matched to the idealised map), the wave equation, and transparent borders.
 
 ## Transparent borders
 
