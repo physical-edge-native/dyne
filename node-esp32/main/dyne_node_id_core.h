@@ -36,7 +36,7 @@ bool dyne_node_id_valid(double v);
  *   src:       決め方を返す (NULL 可) */
 int dyne_node_id_select(int config_id, bool nvs_has, int32_t nvs_id, const uint8_t mac[6], dyne_id_src_t *src);
 
-/* MAC の文字列 ("24:0A:C4:12:34:56"、"24-0a-c4-12-34-56"、"240ac4123456"。大文字小文字は問わない) を読む */
+/* MAC の文字列 ("02:00:00:12:34:56"、"02-00-00-12-34-56"、"020000123456"。大文字小文字は問わない) を読む */
 bool dyne_mac_parse(const char *s, uint8_t out[6]);
 
 /* ctl 命令 node_id の解釈の結果 */
