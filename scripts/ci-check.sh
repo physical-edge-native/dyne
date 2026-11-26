@@ -87,7 +87,9 @@
 #      every output and give the pinned CRC-32 of its .dynm file and outputs; full and small builds agree bit for
 #      bit; truncated files and unsupported operators are rejected. Needs numpy, onnx, onnxruntime and wasmtime:
 #      skipped locally when they are missing, required when REQUIRE_ONNX=1 (CI). The PyTorch steps of
-#      scripts/check-onnx.ps1 are not run here (issue #155).
+#      scripts/check-onnx.ps1 are not run here (issue #155). Also: the values the ESP32 benchmark firmware must report
+#      (bench-c5/tools/bench_ref.py expect), with the committed assets and with the mlp-actor rebuilt from this tree,
+#      equal bench-c5/expected.txt (issue #156).
 #  22. how the room twin grows (issue #157): the shape grid solver with panning distance sensors
 #      (crates/dyne-sim2d/scenes/room6_move_pan4h.txt, 2x2 split, 64 steps) with --growth-csv and --snapshot-every;
 #      the split solution must be bit-exact, the surfaces covered and the free points without a distance yet must be
@@ -504,6 +506,24 @@ elif [ "${REQUIRE_ONNX:-0}" = "1" ]; then
   echo "onnx-check       FAIL (needs: pip install numpy onnx onnxruntime wasmtime)"; fail=1
 else
   echo "onnx-check       SKIP (numpy, onnx, onnxruntime or wasmtime not installed)"
+fi
+# ESP32 benchmark firmware (bench-c5, issue #156): the values the boards must report, computed on the PC with the
+# committed assets and with the mlp-actor rebuilt from this tree, must equal bench-c5/expected.txt
+if [ -n "$PY" ] && "$PY" -c "import numpy, wasmtime" > /dev/null 2>&1; then
+  MLPS="crates/mlp-actor/target/small/wasm32-unknown-unknown/release/mlp_actor.wasm"
+  # (carriage returns removed: Python on Windows prints CRLF)
+  if diff -q <("$PY" bench-c5/tools/bench_ref.py expect | tr -d '\r') <(tr -d '\r' < bench-c5/expected.txt) > /dev/null \
+     && diff -q <("$PY" bench-c5/tools/bench_ref.py expect --mlp-wasm "$MLPS" | tr -d '\r') \
+                <(tr -d '\r' < bench-c5/expected.txt) > /dev/null; then
+    echo "bench-expected   PASS ($(wc -l < bench-c5/expected.txt | tr -d ' ') values, committed and rebuilt mlp-actor)"
+  else
+    "$PY" bench-c5/tools/bench_ref.py expect --mlp-wasm "$MLPS" | diff - bench-c5/expected.txt
+    echo "bench-expected   FAIL (bench-c5/expected.txt)"; fail=1
+  fi
+elif [ "${REQUIRE_ONNX:-0}" = "1" ]; then
+  echo "bench-expected   FAIL (needs: pip install numpy wasmtime)"; fail=1
+else
+  echo "bench-expected   SKIP (numpy or wasmtime not installed)"
 fi
 
 echo "== [22] how the room twin grows: coverage per step and snapshots (issue #157) =="
