@@ -70,6 +70,12 @@
 //!   --track-csv 経路 [--track-every N] … 単一ノード解の N ステップごとの採点を CSV に書く
 //!     (その時刻の正解の形状に対して。動く箱のある場面ファイルで追従の時間を測る)
 //!
+//! Cooperative-run log (2026-11-26, GitHub issue #167; nothing changes without the option):
+//!   --perf-log PATH … one JSON line per sent border message (k = tx: node, iface, step, t, bytes, resend), per received
+//!     one (k = rx: node, iface, step, t_sent, t, bytes) and per finished step (k = step: node, step, t0 = start,
+//!     t1 = all border values in, t2 = done), after a header line (k = run). Times are virtual µs. The format is the one
+//!     the firmware is to write (docs/design/2026-11-26-coop-perf-log.md); scripts/coop_perf.py analyses it
+//!
 //! How the twin grows (2026-11-25, GitHub issue #157; nothing changes without the options):
 //!   --growth-csv PATH … scores the single-node shape solution after every step against the scene at that step, with the
 //!     same measures as the final "shape:" lines (coverage of surface samples, surface error, unobserved free points,
@@ -169,6 +175,9 @@ struct Config {
     /// --growth-csv 経路: 形の格子型アクターの単一ノード解を毎ステップ採点し、最後の "shape:" の行と同じ指標を
     /// CSV に書く (ツインが育つ様子。GitHub issue #157)
     growth_csv: Option<String>,
+    /// --perf-log PATH: one JSON line per sent and received border message and per step (times, bytes), in the format
+    /// of docs/design/2026-11-26-coop-perf-log.md (GitHub issue #167)
+    perf_log: Option<String>,
     /// --snapshot-every N --snapshot-dir DIR: N ステップごとに単一ノード解の形の場 (phi, d, w, truth) を書く (#157)
     snapshot_every: u64,
     snapshot_dir: Option<String>,
@@ -255,6 +264,7 @@ fn parse_args() -> Config {
         track_csv: None,
         track_every: 1,
         growth_csv: None,
+        perf_log: None,
         snapshot_every: 0,
         snapshot_dir: None,
         extra_cfg: Vec::new(),
@@ -355,6 +365,7 @@ fn parse_args() -> Config {
             "--track-csv" => c.track_csv = Some(val),
             "--track-every" => c.track_every = val.parse().unwrap(),
             "--growth-csv" => c.growth_csv = Some(val),
+            "--perf-log" => c.perf_log = Some(val),
             "--snapshot-every" => c.snapshot_every = val.parse().unwrap(),
             "--snapshot-dir" => c.snapshot_dir = Some(val),
             "--track-scale-m" => c.track_scale = Some(val.parse().unwrap()),
@@ -863,6 +874,8 @@ struct Msg {
     iface: usize,
     step: u64,
     raw: Vec<u8>,
+    /// virtual time of the last send (set in transmit; on hardware the sender's timestamp in the header)
+    sent_us: u64,
 }
 
 enum Ev {
@@ -904,6 +917,9 @@ struct Node {
     stat_max_unit: usize,
     wait_us: u64,
     wait_since: u64,
+    /// --perf-log: start of the current step and end of its wait (virtual µs)
+    perf_t0: u64,
+    perf_t1: u64,
 }
 
 struct Sim {
@@ -933,6 +949,8 @@ struct Sim {
     last_progress_us: u64,
     /// Temperature readings (issue #96; empty without --temp-sensors)
     temp: Vec<TempSensor>,
+    /// --perf-log lines (None when the option is not given)
+    perf: Option<String>,
     /// Last innovation y - u (before nudging) of each reading
     innov: Vec<f64>,
 }
@@ -977,8 +995,17 @@ impl Sim {
 
     /// 損失・分断・遅延を適用して配送をスケジュールする。分断の判定は乱数を消費しない
     /// (dyne-core::net の規約と同じ順序。分断はノードの組で指定するためホスト側で判定する)
-    fn transmit(&mut self, from: usize, msg: Msg, is_resend: bool) {
+    fn transmit(&mut self, from: usize, mut msg: Msg, is_resend: bool) {
         let to = self.peer_of(from, msg.iface);
+        msg.sent_us = self.now_us;
+        if let Some(p) = &mut self.perf {
+            writeln!(
+                p,
+                "{{\"k\":\"tx\",\"node\":{},\"iface\":{},\"step\":{},\"t\":{},\"bytes\":{},\"resend\":{}}}",
+                from, msg.iface, msg.step, self.now_us, msg.raw.len(), is_resend
+            )
+            .unwrap();
+        }
         {
             let n = &mut self.nodes[from];
             n.stat_sent += 1;
@@ -1001,6 +1028,7 @@ impl Sim {
     /// step を開始: 送信メールボックスを取り出して界面ごとの配送単位にまとめて送り、
     /// センサのあるノードには測距フレームを渡し、待ち状態に入る
     fn start_step(&mut self, node: usize, step: u64) {
+        self.nodes[node].perf_t0 = self.now_us;
         let bundle = self.nodes[node].actor.collect_outbox();
         // (界面ID) → 配送単位。並びは送信メールボックスに出た順のまま
         let mut units: Vec<Msg> = Vec::new();
@@ -1012,7 +1040,7 @@ impl Sim {
             match units.iter_mut().find(|u| u.iface == iface) {
                 Some(u) => push_framed(&mut u.raw, raw),
                 None => {
-                    let mut m = Msg { iface, step, raw: Vec::new() };
+                    let mut m = Msg { iface, step, raw: Vec::new(), sent_us: 0 };
                     push_framed(&mut m.raw, raw);
                     units.push(m);
                 }
@@ -1110,6 +1138,7 @@ impl Sim {
         self.last_progress_us = now;
         let n = &mut self.nodes[node];
         n.wait_us += now - n.wait_since;
+        n.perf_t1 = now;
         // 実機の再生: IMU の標本を計算の直前に渡す (ファームの feed_imu と同じ位置)
         if let Some(rp) = &self.replay {
             if let Some(samples) = rp[node].imu.get(&n.cur_step) {
@@ -1179,6 +1208,14 @@ impl Sim {
     }
 
     fn on_deliver(&mut self, node: usize, msg: Msg) {
+        if let Some(p) = &mut self.perf {
+            writeln!(
+                p,
+                "{{\"k\":\"rx\",\"node\":{},\"iface\":{},\"step\":{},\"t_sent\":{},\"t\":{},\"bytes\":{}}}",
+                node, msg.iface, msg.step, msg.sent_us, self.now_us, msg.raw.len()
+            )
+            .unwrap();
+        }
         let Some(k) = self.nodes[node].ifaces.iter().position(|&j| j == msg.iface) else {
             panic!("ノード{node}に無い界面{}宛のメッセージ", msg.iface);
         };
@@ -1241,6 +1278,15 @@ impl Sim {
     }
 
     fn on_step_done(&mut self, node: usize) {
+        if let Some(p) = &mut self.perf {
+            let n = &self.nodes[node];
+            writeln!(
+                p,
+                "{{\"k\":\"step\",\"node\":{},\"step\":{},\"t0\":{},\"t1\":{},\"t2\":{}}}",
+                node, n.cur_step, n.perf_t0, n.perf_t1, self.now_us
+            )
+            .unwrap();
+        }
         let next = self.nodes[node].cur_step + 1;
         if next >= self.cfg.steps {
             // ドレイン不要: プロセス内に居続けるので過去分の replay には常時応答できる
@@ -1818,6 +1864,8 @@ fn main() {
             stat_max_unit: 0,
             wait_us: 0,
             wait_since: 0,
+            perf_t0: 0,
+            perf_t1: 0,
         });
     }
     let mem_pages = nodes[0].actor.memory_pages;
@@ -1846,8 +1894,16 @@ fn main() {
         last_progress_us: 0,
         innov: vec![f64::NAN; temp.len()],
         temp: temp.clone(),
+        perf: cfg.perf_log.as_ref().map(|_| String::new()),
     };
     sim.run();
+    if let (Some(path), Some(lines)) = (&cfg.perf_log, &sim.perf) {
+        let head = format!(
+            "{{\"k\":\"run\",\"source\":\"dyne-sim2d\",\"nodes\":{},\"steps\":{},\"step_us\":{},\"lat_us\":{},\"lat_jitter_us\":{},\"loss\":{},\"seed\":{}}}\n",
+            sim.nodes.len(), cfg.steps, cfg.step_us, cfg.lat_us, cfg.lat_jitter_us, cfg.loss, cfg.seed
+        );
+        std::fs::write(path, head + lines).expect("--perf-log の書き込み");
+    }
     if let Some(w) = &sim.rec {
         std::fs::write(&w.path, &w.out).expect("--replay-record の書き込み");
     }
