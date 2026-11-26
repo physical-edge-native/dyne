@@ -100,6 +100,10 @@
 #      and a constant defect reaches it; then the learned solver (heat1d-pinn-actor) on one device in dyne-sim: its
 #      distance from the exact backward-Euler sequence stays under the sum of its one-step defects, and each defect is
 #      at most the end deviation plus the grid residual. Needs numpy (required when REQUIRE_NUMPY=1, CI).
+#  24. cooperative-run log (issue #167): dyne-sim2d --perf-log on a 2x2 heat run with 5 ms latency, 10 ms jitter and
+#      10 % loss (300 steps, seed 42); the split result must stay bit-exact, scripts/coop_perf.py --check-sim must find
+#      the latency inside the configured range with the expected median, and the counts of messages sent and received
+#      must be the pinned ones (3552 / 3204). Standard library only.
 #
 # Usage (from the repository root):  bash scripts/ci-check.sh
 set -euo pipefail
@@ -549,6 +553,22 @@ elif [ "${REQUIRE_NUMPY:-0}" = "1" ]; then
   echo "residual-bound   FAIL (numpy is required here)"; fail=1
 else
   echo "residual-bound   SKIP (numpy not installed)"
+fi
+
+echo "== [24] cooperative-run log: latency, jitter, throughput (issue #167) =="
+PL=target/ci-perf.jsonl
+out=$("$SIM2" --wasm "$W2" --px 2 --py 2 --steps 300 --quiet --lat-ms 5 --lat-jitter-ms 10 --loss 0.1 --seed 42 \
+      --perf-log "$PL") || true
+if ! printf '%s\n' "$out" | grep -q "PASS (bit-exact)"; then
+  echo "$out"; echo "coop-perf        FAIL (split run)"; fail=1
+elif [ -z "$PY" ]; then
+  echo "coop-perf        FAIL (no Python 3.8+ found)"; fail=1
+elif ! "$PY" scripts/coop_perf.py "$PL" --check-sim > target/ci-perf.log 2>&1; then
+  cat target/ci-perf.log; echo "coop-perf        FAIL (analysis)"; fail=1
+elif ! grep -q "3552 messages sent, 3204 received" target/ci-perf.log; then
+  head -n 1 target/ci-perf.log; echo "coop-perf        FAIL (counts differ from the pinned 3552 / 3204)"; fail=1
+else
+  head -n 3 target/ci-perf.log; tail -n 1 target/ci-perf.log
 fi
 
 if [ "$fail" -ne 0 ]; then echo "CI CHECK FAILED"; exit 1; fi
