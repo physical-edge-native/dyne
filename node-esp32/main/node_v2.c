@@ -20,6 +20,11 @@
  * 待っているステップ・足りない界面・計数を status に出す (再起動はしない。docs/2026-11-13-firmware-nodes.md §14)。
  * 実機の確認のため、mode.test_drop (0〜1 未満、既定 0) で待ちの間に受けたデータグラムをその割合でわざと捨てられる
  * (dyne-sim2d の --loss に当たる試験用の設定。0 なら何もしない)。
+ * 2026-11-26 (GitHub issue #167): mode.perf_cap (記録の件数の上限、既定 0 = 記録しない) を与えると、送った・受けた境目の
+ * メッセージとステップの時刻を実行中はメモリ (PSRAM があればそこ) に貯め、実行の後、done の status の前に
+ * dyne/node/<idx>/perf へ mode.perf_batch 件 (既定 20) ずつ、mode.perf_pace_ms (既定 1000) おきに QoS 1 で出す。
+ * 形式は docs/design/2026-11-26-coop-perf-log.md (dyne-sim2d の --perf-log と同じ)。解析は scripts/coop_perf.py --from-mqtt。
+ * 測っている最中の通信を記録の送信で乱さないため、実行中は送らない。
  *
  * 設定注入 (dyne/cfg/<id>、本経路の時のみ。暫定の形。docs/2026-11-08-firmware-wire-v2.md):
  *   { "gen":G, "cluster":{"steps":S,"alpha":a,"dt":dt,"step_period_ms":p},
@@ -84,6 +89,8 @@
 #include "dyne_sense.h"    /* 2026-11-13: 測距・IMU の値をアクターへ */
 #include "dyne_shape_msg.h" /* 2026-11-13: 形の区画のメッセージ (PC の常駐版へ) */
 #include "dyne_sync_core.h" /* 2026-11-15: 同期の受信の判定 (issue #29) */
+#include "dyne_perf_core.h" /* 2026-11-26: 協調して動かしたときの記録 (issue #167) */
+#include "esp_heap_caps.h"  /* 2026-11-26: 記録の領域を PSRAM に取る */
 
 static const char *TAG = "dyne-v2";
 
@@ -218,6 +225,9 @@ typedef struct {
     bool replay_log;          /* 2026-11-15: 再生の記録 (replay.log) */
     int stall_ms;             /* 2026-11-15: 止まっていることの報告の間隔 (mode.stall_ms。0 = しない。issue #29) */
     double test_drop;         /* 2026-11-15: 待ちの間に受けたデータグラムをわざと捨てる割合 (mode.test_drop。試験用。既定 0) */
+    int perf_cap;             /* 2026-11-26: 記録の件数の上限 (mode.perf_cap。0 = 記録しない。issue #167) */
+    int perf_batch;           /* 2026-11-26: 1つのメッセージに入れる件数 (mode.perf_batch。既定 20) */
+    int perf_pace_ms;         /* 2026-11-26: 記録のメッセージの間隔 (mode.perf_pace_ms。既定 1000) */
 } v2cfg_t;
 static v2cfg_t *s_cp;
 #define s_c (*s_cp)
@@ -334,6 +344,13 @@ static bool parse_cfg_v2(const char *payload, int len, uint32_t *gen, int *idx,
         if (s_c.stall_ms < 0) s_c.stall_ms = 0;
         s_c.test_drop = mo ? num_d(mo, "test_drop", 0.0) : 0.0;
         if (!(s_c.test_drop >= 0.0 && s_c.test_drop < 1.0)) { snprintf(err, errlen, "mode.test_drop: 0 <= p < 1"); break; }
+        s_c.perf_cap = mo ? num_i(mo, "perf_cap", 0) : 0;
+        s_c.perf_batch = mo ? num_i(mo, "perf_batch", 20) : 20;
+        s_c.perf_pace_ms = mo ? num_i(mo, "perf_pace_ms", 1000) : 1000;
+        if (s_c.perf_cap < 0 || s_c.perf_batch < 1 || s_c.perf_pace_ms < 0) {
+            snprintf(err, errlen, "mode.perf_cap >= 0, perf_batch >= 1, perf_pace_ms >= 0");
+            break;
+        }
         s_c.shape_every = mo ? num_i(mo, "shape_every", f_get_aux ? V2_SHAPE_DEFAULT_EVERY : 0)
                              : (f_get_aux ? V2_SHAPE_DEFAULT_EVERY : 0);
         if (s_c.shape_every > 0 && !f_get_aux) { snprintf(err, errlen, "shape_every needs dyne_get_aux"); break; }
@@ -423,7 +440,7 @@ void dyne_v2_on_cfg(const char *payload, int len)
 typedef struct {
     uint32_t id;
     struct sockaddr_in peer;
-    struct { uint64_t step; int len; bool valid; uint8_t buf[DYNE_ENV_MAX_DATAGRAM]; } slot[2];
+    struct { uint64_t step; int len; uint32_t ulen; bool valid; uint8_t buf[DYNE_ENV_MAX_DATAGRAM]; } slot[2]; /* ulen: 配送単位の大きさ (外箱を除く。記録用) */
     struct { uint64_t step; size_t len; bool valid; uint8_t buf[DYNE_ENV_MAX_PAYLOAD]; } pend;
     uint8_t unit[DYNE_ENV_MAX_PAYLOAD]; /* 送信する配送単位の組み立て */
     size_t unit_len;
@@ -506,9 +523,62 @@ static int deliver(uint32_t app, uint32_t cap, const uint8_t *payload, size_t pl
     return r[0].of.i32;
 }
 
+/* 2026-11-26 (issue #167): 協調して動かしたときの記録 (mode.perf_cap > 0 のときだけ領域を取る) */
+static dyne_perf_t s_perf;
+static dyne_perf_rec_t *s_perf_mem;
+
 static void send_slot(int sock, v2link_t *l, int si)
 {
     sendto(sock, l->slot[si].buf, l->slot[si].len, 0, (struct sockaddr *)&l->peer, sizeof(l->peer));
+}
+
+/* 送って記録する。resend: 再送・重複への応答 */
+static void send_slot_rec(int sock, v2link_t *l, int si, bool resend)
+{
+    send_slot(sock, l, si);
+    if (s_perf.rec)
+        dyne_perf_tx(&s_perf, l->id, (uint32_t)l->slot[si].step, dyne_time_at_local(esp_timer_get_time()),
+                     l->slot[si].ulen, resend);
+}
+
+static void perf_begin(void)
+{
+    if (s_perf_mem) { free(s_perf_mem); s_perf_mem = NULL; }
+    dyne_perf_init(&s_perf, NULL, 0);
+    if (s_c.perf_cap <= 0) return;
+    size_t sz = (size_t)s_c.perf_cap * sizeof(dyne_perf_rec_t);
+    s_perf_mem = heap_caps_malloc(sz, MALLOC_CAP_SPIRAM);
+    if (!s_perf_mem) s_perf_mem = malloc(sz);
+    if (!s_perf_mem) {
+        ESP_LOGW(TAG, "perf: no memory for %d records; not recording", s_c.perf_cap);
+        return;
+    }
+    dyne_perf_init(&s_perf, s_perf_mem, (uint32_t)s_c.perf_cap);
+}
+
+/* 実行の後: 貯めた記録を dyne/node/<idx>/perf へまとめて出し、領域を返す */
+static void perf_publish(uint64_t steps)
+{
+    if (!s_perf.rec) return;
+    enum { PERF_MSG_MAX = 1900 }; /* MQTT の送信の緩衝 (2048) に収める */
+    char *buf = malloc(PERF_MSG_MAX);
+    char sub[32];
+    snprintf(sub, sizeof(sub), "node/%d/perf", g_cfg.idx);
+    uint32_t i0 = 0, done = 0;
+    while (buf && i0 < s_perf.n) {
+        if (dyne_perf_batch(&s_perf, g_cfg.idx, (uint32_t)steps, i0, (uint32_t)s_c.perf_batch, buf, PERF_MSG_MAX, &done) < 0
+            || done == 0)
+            break;
+        dyne_mqtt_pub(sub, buf, 1, false, false);
+        i0 += done;
+        if (s_c.perf_pace_ms > 0) vTaskDelay(pdMS_TO_TICKS((uint32_t)s_c.perf_pace_ms));
+    }
+    ESP_LOGI(TAG, "perf: published %u of %u records (%u dropped)", (unsigned)i0, (unsigned)s_perf.n,
+             (unsigned)s_perf.dropped);
+    free(buf);
+    free(s_perf_mem);
+    s_perf_mem = NULL;
+    dyne_perf_init(&s_perf, NULL, 0);
 }
 
 /* 送信メールボックスを取り出し、界面ごとの配送単位にまとめて外箱に包んで送る。
@@ -563,11 +633,12 @@ static const char *send_step(int sock, v2link_t *links, int nl, uint32_t app, ui
         int dn = dyne_env_encode(l->slot[si].buf, sizeof(l->slot[si].buf), &h, l->unit, l->unit_len);
         if (dn < 0) return "envelope encode";
         l->slot[si].len = dn;
+        l->slot[si].ulen = (uint32_t)l->unit_len;
         l->slot[si].step = step;
         l->slot[si].valid = true;
         l->got = false;
         dyne_sync_echo_reset(&l->echo); /* 2026-11-15: 応答の記録はステップごと (dyne-sim2d の start_step と同じ) */
-        send_slot(sock, l, si);
+        send_slot_rec(sock, l, si, false);
         st_sent++;
         l->last_send = now;
     }
@@ -943,6 +1014,7 @@ void dyne_v2_run_bsp(void)
     uint32_t w_n = 0;
 
     ESP_LOGI(TAG, "BSP(v2) start: %u steps, %d iface(s)", (unsigned)s_c.steps, nl);
+    perf_begin();
     int64_t pace0 = esp_timer_get_time();
     if (s_imu_t0_run > 0) {
         /* 2026-11-13: ステップ0 = 同期した時刻 t0。それまで待ち、t0 に当たる esp_timer の時刻を起点にする */
@@ -996,7 +1068,7 @@ void dyne_v2_run_bsp(void)
             int64_t now = esp_timer_get_time();
             for (int i = 0; i < nl; i++) {
                 if (!links[i].got && now - links[i].last_send >= V2_TIMEOUT_US) {
-                    send_slot(sock, &links[i], (int)(step & 1));
+                    send_slot_rec(sock, &links[i], (int)(step & 1), true);
                     st_resend++;
                     links[i].last_send = now + V2_RESEND_MIN_US - V2_TIMEOUT_US;
                 }
@@ -1020,6 +1092,9 @@ void dyne_v2_run_bsp(void)
             v2link_t *l = NULL;
             for (int i = 0; i < nl; i++) if (links[i].id == h.iface) l = &links[i];
             if (!l) continue;
+            if (s_perf.rec)
+                dyne_perf_rx(&s_perf, h.iface, (uint32_t)h.step, dyne_perf_unit_t_us(pl, pn), dyne_time_at_local(now),
+                             (uint32_t)pn);
             /* 受信の扱い (dyne_sync_core.h。dyne-sim2d の on_deliver と同じ規則) */
             switch (dyne_sync_classify(step, h.step, l->got, &l->echo, now, V2_RESEND_MIN_US)) {
             case DYNE_SYNC_ACCEPT:
@@ -1039,7 +1114,7 @@ void dyne_v2_run_bsp(void)
                 /* 過去分 = 相手はまだ受け取れていない。控えを再送で応答 */
                 int ri = (int)(h.step & 1);
                 if (l->slot[ri].valid && l->slot[ri].step == h.step) {
-                    send_slot(sock, l, ri);
+                    send_slot_rec(sock, l, ri, true);
                     st_replay++;
                 }
                 break;
@@ -1049,7 +1124,7 @@ void dyne_v2_run_bsp(void)
                  * 今のステップの控えを再送で応える (界面ごとに再送の最小間隔以上あける) */
                 int si = (int)(step & 1);
                 if (l->slot[si].valid && l->slot[si].step == step) {
-                    send_slot(sock, l, si);
+                    send_slot_rec(sock, l, si, true);
                     dyne_sync_echo_mark(&l->echo, now);
                     st_replay++;
                     st_echo++;
@@ -1076,6 +1151,8 @@ void dyne_v2_run_bsp(void)
         if (r[0].of.i32 != F2_STEP_OK) st_missing++;
         if (f_imu_push) publish_fused(step, &fused_epoch); /* 2026-11-13: 区間の境目ごと */
         int64_t t2 = esp_timer_get_time();
+        if (s_perf.rec)
+            dyne_perf_step(&s_perf, (uint32_t)step, dyne_time_at_local(t0), dyne_time_at_local(t1), dyne_time_at_local(t2));
 
         w_step += (t2 - t0) / 1000.0;
         w_comp += (t2 - t1) / 1000.0;
@@ -1112,7 +1189,7 @@ void dyne_v2_run_bsp(void)
             for (int i = 0; i < nl; i++) {
                 int ri = (int)(h.step & 1);
                 if (links[i].id == h.iface && links[i].slot[ri].valid && links[i].slot[ri].step == h.step) {
-                    send_slot(sock, &links[i], ri);
+                    send_slot_rec(sock, &links[i], ri, true);
                     st_replay++;
                 }
             }
@@ -1124,6 +1201,7 @@ void dyne_v2_run_bsp(void)
     free(s_rl_imu);
     s_rl_imu = NULL;
 
+    perf_publish(s_c.steps); /* 2026-11-26: 失敗・中止のときも、記録があれば出す (status より前に) */
     if (fail) {
         snprintf(json, sizeof(json), "\"err\":\"v2: %s\"", fail);
         dyne_mqtt_pub_status(DYNE_ST_ERR, json);
