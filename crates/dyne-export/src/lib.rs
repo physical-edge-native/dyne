@@ -17,17 +17,20 @@
 //! - [`walls`] and [`polymesh`]: the room shape built by Dyne's devices (a signed distance field) as
 //!   solid grid points, and the OpenFOAM mesh without them, whose faces towards walls and obstacles form
 //!   the patch `walls`.
+//! - [`mjcf`]: the same room shape as an MJCF file for MuJoCo (static boxes merged from the solid grid
+//!   points, a floor plane, the frame of the USD export) and the free floor where a robot can start.
 //! - [`sensors`]: an initial field from a few point sensors (inverse-distance weighting), e.g. the
 //!   temperature readings of the devices for the initial `T` of an OpenFOAM case.
 //!
 //! The binary `dyne-vti` prints the grid and the CRC-32 of every array of a `.vti` file written by
 //! this crate ([`field_crc32`], the field hash that Dyne's simulators print). The binary `dyne-foam`
 //! writes an OpenFOAM case from a `.vti` file, reads a case back (printing the CRC-32 of the field),
-//! and imports a velocity field into a `.vti` file.
+//! and imports a velocity field into a `.vti` file. The binary `dyne-mjcf` writes the room shape as MJCF.
 
 #![warn(missing_docs)]
 
 pub mod foam;
+pub mod mjcf;
 pub mod polymesh;
 pub mod sensors;
 pub mod vti;
@@ -36,14 +39,18 @@ pub mod walls;
 /// CRC-32 (IEEE 802.3) of the little-endian bits of a field: the field hash that Dyne's simulators
 /// and native solvers print, so that an exported field can be compared with a run's output.
 pub fn field_crc32(field: &[f64]) -> u32 {
+    crc32(field.iter().flat_map(|v| v.to_bits().to_le_bytes()))
+}
+
+/// CRC-32 (IEEE 802.3) of a sequence of bytes, e.g. of a written file (the same value as `crc32` of
+/// zlib or Python's `zlib.crc32`).
+pub fn crc32(bytes: impl IntoIterator<Item = u8>) -> u32 {
     let mut c: u32 = 0xFFFF_FFFF;
-    for v in field {
-        for b in v.to_bits().to_le_bytes() {
-            c ^= b as u32;
-            for _ in 0..8 {
-                let m = (c & 1).wrapping_neg();
-                c = (c >> 1) ^ (0xEDB8_8320 & m);
-            }
+    for b in bytes {
+        c ^= b as u32;
+        for _ in 0..8 {
+            let m = (c & 1).wrapping_neg();
+            c = (c >> 1) ^ (0xEDB8_8320 & m);
         }
     }
     !c
@@ -56,5 +63,7 @@ mod tests {
         // Same check as dyne-native: the bytes "12345678" as one f64 give 0x9AE0DAAF.
         let v = f64::from_bits(u64::from_le_bytes(*b"12345678"));
         assert_eq!(super::field_crc32(&[v]), 0x9AE0_DAAF);
+        // The standard check value of CRC-32.
+        assert_eq!(super::crc32(*b"123456789"), 0xCBF4_3926);
     }
 }
