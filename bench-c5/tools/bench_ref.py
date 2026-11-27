@@ -143,6 +143,16 @@ def expected():
 
 
 def cmd_expect(_a):
+    global ASSETS
+    if getattr(_a, "assets", None):
+        ASSETS = _a.assets
+    if getattr(_a, "mlp_wasm", None):
+        # 作り直した mlp-actor で確かめる (issue #156): 素材を一時フォルダへ写し、wasm だけ差し替える
+        tmp = tempfile.mkdtemp(prefix="bench_c5_expect_")
+        for f in os.listdir(ASSETS):
+            shutil.copyfile(os.path.join(ASSETS, f), os.path.join(tmp, f))
+        shutil.copyfile(_a.mlp_wasm, os.path.join(tmp, "mlp_actor_small.wasm"))
+        ASSETS = tmp
     for e in expected():
         if e["bench"] == "mlp":
             print(f"#EXPECT bench=mlp model={e['model']} n_in={e['n_in']} n_out={e['n_out']} "
@@ -194,7 +204,10 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("make").set_defaults(fn=cmd_make)
-    sub.add_parser("expect").set_defaults(fn=cmd_expect)
+    e = sub.add_parser("expect")
+    e.add_argument("--assets", help="素材のフォルダ (既定 bench-c5/assets)。CI は作り直した mlp-actor を入れたフォルダで確かめる")
+    e.add_argument("--mlp-wasm", help="mlp_actor_small.wasm の代わりに使う wasm (作り直したもの)")
+    e.set_defaults(fn=cmd_expect)
     c = sub.add_parser("compare")
     c.add_argument("log")
     c.set_defaults(fn=cmd_compare)
