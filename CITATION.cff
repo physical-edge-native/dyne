@@ -17,8 +17,8 @@ authors:
     given-names: "Natsuhi"
 doi: "10.5281/zenodo.24241009"
 repository-code: "https://github.com/physical-edge-native/dyne"
-version: "0.1.0"
-date-released: "2026-11-15"
+version: "0.2.0"
+date-released: "2026-11-27"
 # Dyne is dual licensed: MIT OR Apache-2.0, at your option (see LICENSE-MIT and LICENSE-APACHE).
 # Zenodo's GitHub integration accepts only a single SPDX identifier here (a list makes the
 # metadata import fail), so the Apache-2.0 half is declared. The MIT option still applies.
