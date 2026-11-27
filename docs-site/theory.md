@@ -43,6 +43,7 @@ iteration between devices is needed.
 | **Proven** | Splitting does not change the result (same operations in the same order). |
 | **Proven** | 2D wave equation (von Neumann analysis on an infinite uniform grid): stable if and only if the Courant number `ν = cΔt/h ≤ 1/√2 ≈ 0.70711` (`1/√3` in 3D). |
 | **Proven** | Learned regions that leave a residual: if the step with exact training never increases the error (as above for `r ≤ 1/2`), and every step's learned output differs from the exact step by at most `δ`, the error after `n` steps is at most the initial error plus `n·δ`; `δ` is at most the deviation at the region's ends plus the training residual at the grid points. See [below](#learned-regions-that-leave-a-residual). |
+| **Proven** | The same bound in 2D and 3D: for the explicit heat scheme with `r ≤ 1/4` (2D) or `r ≤ 1/6` (3D), with classical and learned regions in any arrangement of rectangular blocks, the step with exact training has `‖Φ‖∞ ≤ 1`, so the error after `n` steps is at most the initial error plus `n·δ`. See [below](#in-2d-and-3d). |
 | **Derived under idealisation** (training converges exactly) | Classical and learned regions mixed in any arrangement: for `r ≤ 1/2`, one step never increases the error (`B` is diagonally dominant with non-positive off-diagonals, so `B⁻¹ ≥ 0`). Learned regions alone: stability limit `r = (7 − √17)/4 ≈ 0.719`. |
 | **Checked numerically** | Wave equation on bounded grids: limit 0.70765 with fixed-value walls, `1/√2` with zero-gradient and absorbing walls, matching where the simulator starts to diverge; growth factors match theory to 5–6 digits. Transparent borders: limits 0.500 / 0.319 / 0.438 depending on the variant. The `γ > 2` boundary matches experiments. |
 | **Open** | Why the learned solver's measured limit lies above the idealised 0.719; a proof that transparent borders never create heat; matching the mixed-solver predictions in the simulator and on hardware. |
@@ -82,8 +83,37 @@ Checked in `scripts/ci-check.sh` (step 23, `theory/guarantee/residual_bound.py`)
   one-step defects (0.037 against 0.153 after 39 steps), and each defect is at most the end deviation plus the grid
   residual.
 
+### In 2D and 3D
+
+The argument above uses only `‖Φ‖∞ ≤ 1`, so it carries over once that is shown for the scheme in `d` dimensions
+(`d = 2` or `3`; the same `h` in every direction). Each point has `2d` neighbours. Classical points, and points of a
+learned region that have a neighbour in another region, are updated explicitly:
+`u_i(t) = (1 − 2d·r)·u_i(t−1) + r·Σ_j u_j(t−1)`. Their coefficients are non-negative when `r ≤ 1/(2d)` and sum to at
+most 1 (exactly 1 with zero-gradient ends, where the missing neighbour mirrors the one inside; less with fixed-value
+ends). The other points of a learned region solve backward Euler with the region's border points as targets:
+`B·w(t) = w(t−1) + r·(sum of border neighbours at t)`, where `B` has `1 + 2d·r` on the diagonal and `−r` for every
+neighbour inside the region. `B` is diagonally dominant with non-positive off-diagonals, so `B⁻¹ ≥ 0` elementwise.
+If `c_i` counts point `i`'s neighbours that are border points of the region, then `B·1 ≥ 1 + r·c` elementwise
+(equality without fixed-value ends), so `B⁻¹·(1 + r·c) ≤ 1`. The new values are therefore a combination, with
+non-negative weights summing to at most 1, of previous values and border values, which themselves have row sums at
+most 1. Hence `‖Φ‖∞ ≤ 1` for `r ≤ 1/(2d)`, in any arrangement of rectangular regions, and nudging with
+`0 ≤ γ ≤ 2` keeps it. The bound `‖u(n) − v(n)‖∞ ≤ ‖u(0) − v(0)‖∞ + n·δ` and the bound on `δ` (with `‖B⁻¹‖∞ ≤ 1`,
+since every row of `B` exceeds its off-diagonal sum by at least 1) follow as in 1D. The limit `1/(2d)` is sharp for
+classical points: just above it, `|1 − 2d·r| + 2d·r > 1`.
+
+Checked in `scripts/ci-check.sh` (step 23, `theory/guarantee/heat_nd.py` and `residual_bound.py`): on a 20 × 20
+and an 8 × 8 × 8 grid, with checkerboards of classical and learned regions (also uneven sizes), all-learned
+splits, nudging with `γ = 1.5`, fixed-value and zero-gradient ends, and `r` up to `1/4` and `1/6`, `‖Φ‖∞ ≤ 1`,
+200 steps with random and constant defects stay under the bound, and the constant defect on one learned region with
+zero-gradient ends reaches it (2D: 0.2004 against 0.2100; 3D: 0.1997 against 0.2100). Just above the limit
+(`r = 1.05/(2d)`), a classical grid has `‖Φ‖∞ = 1.1`.
+
+This is a result on the idealised map (training converges exactly up to the defect `δ`); the 2D and 3D learned
+solvers themselves have not been run in the simulator.
+
 Not covered: several learned devices in the simulator (the simulator's arrangement of border points has not yet been
-matched to the idealised map), the wave equation, and transparent borders.
+matched to the idealised map), learned solvers in 2D and 3D, the wave equation (it needs an energy norm instead of
+the maximum norm), and transparent borders.
 
 ## Transparent borders
 

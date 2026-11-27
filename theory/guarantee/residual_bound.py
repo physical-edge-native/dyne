@@ -26,6 +26,12 @@ Checks (run from the repository root; numpy only, plus dyne-sim for the second p
      writes the field after every step; the defect of every step against the exact backward-Euler step is measured,
      and the distance from the exact sequence started at the same field must stay under the sum of the defects.
 
+  3. Synthetic in 2D and 3D (issue #197; heat_nd.py): the same argument holds for the explicit scheme with
+     r <= 1/(2d) (1/4 in 2D, 1/6 in 3D). Mixed arrangements of classical and learned blocks on a 20 x 20 and an
+     8 x 8 x 8 grid: ||Phi||_inf <= 1 is confirmed, defects as in 1 stay under the bound, the constant defect on
+     one learned region with zero-gradient ends reaches it, and just above r = 1/(2d) a classical grid has
+     ||Phi||_inf > 1 (the limit is sharp).
+
 Usage:
   python theory/guarantee/residual_bound.py [--sim target/release/dyne-sim --wasm <heat1d_pinn_actor.wasm>]
 """
@@ -41,6 +47,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from checker import Model  # noqa: E402
+from heat_nd import MixedHeatND, block_centres, grid_blocks  # noqa: E402
 
 DELTA = 1e-3
 STEPS = 200
@@ -112,6 +119,67 @@ def synthetic(log):
     return ok
 
 
+def chains_nd():
+    """2D and 3D arrangements: (name, shape, splits, kind of block, outer edges, nudging gamma)."""
+    lrn = lambda bi: 'learned'  # noqa: E731
+    checker = lambda bi: 'learned' if sum(bi) % 2 == 0 else 'fd'  # noqa: E731
+    diag = lambda bi: 'learned' if len(set(bi)) == 1 else 'fd'  # noqa: E731
+    return [
+        ('2D fd/learned 2x2 checkerboard (fixed ends)', (20, 20), (2, 2), checker, 'dirichlet', 0.0),
+        ('2D learned 3x3 (zero-gradient ends)', (20, 20), (3, 3), lrn, 'zero_grad', 0.0),
+        ('2D fd/learned 4x3 checkerboard, uneven (zero-gr.)', (20, 20), (4, 3), checker, 'zero_grad', 0.0),
+        ('2D learned 2x2, nudging 1.5 (zero-gradient ends)', (20, 20), (2, 2), lrn, 'zero_grad', 1.5),
+        ('2D one learned region (zero-gradient ends)', (20, 20), (1, 1), lrn, 'zero_grad', 0.0),
+        ('3D fd/learned 2x2x2 checkerboard (fixed ends)', (8, 8, 8), (2, 2, 2), checker, 'dirichlet', 0.0),
+        ('3D learned on the diagonal 2x2x2 (zero-gradient)', (8, 8, 8), (2, 2, 2), diag, 'zero_grad', 0.0),
+        ('3D one learned region (zero-gradient ends)', (8, 8, 8), (1, 1, 1), lrn, 'zero_grad', 0.0),
+    ]
+
+
+def synthetic_nd(log):
+    ok = True
+    rng = np.random.default_rng(197)
+    for name, shape, splits, kinds, bc, gamma in chains_nd():
+        d = len(shape)
+        rmax = 1.0 / (2 * d)
+        blocks = grid_blocks(shape, splits, kinds)
+        obs = block_centres(shape, blocks) if gamma else ()
+        for r in (rmax / 5, rmax / 2, rmax):
+            m = MixedHeatND(shape, blocks, r, bc, gamma, obs)
+            norm = m.norm()
+            pts = np.array([f for f in range(m.n) if blocks[m.owner.ravel()[f]][0] == 'learned'], dtype=int)
+            worst = 0.0
+            for mode in ('random', 'constant'):
+                u = rng.uniform(-1, 1, m.n)
+                v = u + rng.uniform(-1e-2, 1e-2, m.n)
+                e0 = np.abs(u - v).max()
+                for k in range(STEPS):
+                    rho = np.zeros(m.n)
+                    rho[pts] = rng.uniform(-DELTA, DELTA, len(pts)) if mode == 'random' else DELTA
+                    u = m.step(u) + rho
+                    v = m.step(v)
+                    err = np.abs(u - v).max()
+                    bound = e0 + (k + 1) * DELTA + (k + 1) * EPS
+                    if err > bound:
+                        ok = False
+                        log(f"  VIOLATED {name} r={r} {mode} step {k + 1}: error {err:.3e} > bound {bound:.3e}")
+                        break
+                    worst = max(worst, err / bound)
+                if mode == 'constant' and 'one learned' in name and r == rmax:
+                    tight = err >= 0.99 * (e0 + STEPS * DELTA - 1e-2)
+                    ok &= tight
+                    log(f"  worst case {d}D (one learned region, zero-gradient ends, constant defect, r=1/{2 * d}): "
+                        f"error {err:.6f} vs bound {e0 + STEPS * DELTA:.6f}")
+            ok &= norm <= 1 + 1e-12
+            log(f"  {name:50s} r={r:.4f}  ||Phi||_inf {norm:.12f}  max error/bound {worst:.3f}")
+    for d, shape in ((2, (20, 20)), (3, (8, 8, 8))):
+        r = 1.0 / (2 * d) * 1.05
+        norm = MixedHeatND(shape, grid_blocks(shape, (1,) * d, lambda bi: 'fd'), r, 'zero_grad').norm()
+        ok &= norm > 1 + 1e-3
+        log(f"  {d}D classical grid just above the limit (r = 1.05/{2 * d}): ||Phi||_inf {norm:.6f} > 1")
+    return ok
+
+
 def b_inverse_norm(r, m):
     b = np.diag([1 + 2 * r] * m) + np.diag([-r] * (m - 1), 1) + np.diag([-r] * (m - 1), -1)
     return np.abs(np.linalg.inv(b)).sum(axis=1).max()
@@ -171,6 +239,8 @@ def main():
     log = print
     log('synthetic defects on the idealised mixed map:')
     ok = synthetic(log)
+    log('synthetic defects on the idealised mixed map in 2D and 3D (issue #197):')
+    ok &= synthetic_nd(log)
     if a.sim and a.wasm:
         log('learned solver in the simulator:')
         ok &= simulator(a.sim, a.wasm, log)
