@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "dyne-wire"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "libm"
@@ -14,7 +14,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "sdf2d-grid-actor"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dyne-wire",
  "libm",
