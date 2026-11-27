@@ -14,6 +14,7 @@
 | mixed_sweep.py | 差分法と学習型を混ぜた鎖の r* を計算し、out/ に表と図を出す |
 | configs/*.json | 構成の記述例 |
 | residual_bound.py | 学習が残差を残すときの誤差の上限(初めの誤差 + 1ステップのずれの和)の確認: 理想化した写像に大きさ δ のずれを入れる試験と、dyne-sim で学習型の計算部品を1台動かした実測のずれ。2026-11-25、GitHub issue #159。docs/2026-11-08-stability-theory-primer.md 第10.4節。scripts/ci-check.sh の23番目 |
+| heat_nd.py | 2次元・3次元の陽的な熱の格子で、差分法と学習型の区画(直方体)を混ぜた理想化した1ステップの写像。r ≤ 1/(2d) で ‖Φ‖∞ ≤ 1 になることを residual_bound.py の3番目の確認で使う。2026-11-27、GitHub issue #197(AI アシスタント Claude Code が作成) |
 | out/mixed_table.dat | 代表的な構成ごとの r* |
 | out/mixed_size.dat / .png | 中央の区画の点数 k を変えたときの r* |
 | wave2d.py | 2次元の波動方程式(crates/wave2d-actor)の安定性: フォン・ノイマンの方法(無限格子、限界 1/√2)と、実際の更新式から組み立てたコンパニオン行列(2時刻を並べた1ステップの写像)の固有値による有界な領域の限界(値固定・ゼロ勾配・吸収境界)。2026-11-11、docs/2026-11-11-wave2d.md |
