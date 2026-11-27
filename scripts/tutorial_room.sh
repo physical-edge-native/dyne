@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Room tutorial (docs/en/tutorial-room.md, GitHub issue #96): a dummy room with simulated devices,
-# from dummy sensor readings to Dyne's shape and temperature, then USD, a 3D dashboard and an OpenFOAM case.
+# from dummy sensor readings to Dyne's shape and temperature, then USD, a 3D dashboard, an OpenFOAM case and
+# a MuJoCo model.
 # No hardware is needed. Run from the repository root:
 #
 #   bash scripts/tutorial_room.sh                # steps 1-3 (and step 4 if you add --openfoam)
-#   bash scripts/tutorial_room.sh --sim-only     # only what needs Rust: steps 1, 2 and the OpenFOAM case
+#   bash scripts/tutorial_room.sh --sim-only     # only what needs Rust: steps 1, 2, the OpenFOAM case and the MuJoCo model
 #                                                # (no Python; this is what scripts/ci-check.sh runs)
 #   bash scripts/tutorial_room.sh --openfoam     # also run the case with OpenFOAM (optional step 4;
 #                                                # needs OpenFOAM: blockMesh on PATH, or the openfoam2606 command)
@@ -96,6 +97,9 @@ if [ "$WALLS" -eq 0 ]; then
   "$FOAM" case --vti "$OUT/temperature.vti" --out "$OUT/openfoam" "${FOAM_OPTS[@]}"
 fi
 "$FOAM" info "$OUT/openfoam" | grep -E "^(T:|mesh|faces)"
+
+echo "== [3c] MuJoCo model (MJCF) of the room shape and its free floor for robot spawn points (no Python, no MuJoCo needed)"
+"target/release/dyne-mjcf${EXE}" --shape "$OUT/shape.vti" --out "$OUT/room_mujoco.xml"
 
 if [ "$SIM_ONLY" -eq 0 ] && [ -n "$PY" ]; then
   echo "== [3b] USD (physics colliders), MuJoCo model and the 3D dashboard (HTML)"
