@@ -55,9 +55,17 @@ extern const uint8_t mb_start[] asm("_binary_model_b_f64_dynm_start");
 extern const uint8_t mb_end[] asm("_binary_model_b_f64_dynm_end");
 extern const uint8_t mb32_start[] asm("_binary_model_b_f32_dynm_start");
 extern const uint8_t mb32_end[] asm("_binary_model_b_f32_dynm_end");
+/* erg の方策と同じ形の網 (issue #156)。縮小版の上限 2048 に入らないので、フル版の mlp-actor (.wasm、
+ * AOT の方式でもインタプリタ) で動かす。フル版は線形メモリが 2 ページ (128 KiB) 要るので PSRAM のある基板向け */
+extern const uint8_t mlpf_bin_start[] asm("_binary_mlp_actor_full_wasm_start");
+extern const uint8_t mlpf_bin_end[] asm("_binary_mlp_actor_full_wasm_end");
+extern const uint8_t erg_leg_start[] asm("_binary_erg_leg_f64_dynm_start");
+extern const uint8_t erg_leg_end[] asm("_binary_erg_leg_f64_dynm_end");
+extern const uint8_t erg_cen_start[] asm("_binary_erg_central_f64_dynm_start");
+extern const uint8_t erg_cen_end[] asm("_binary_erg_central_f64_dynm_end");
 
-/* 入力の組数 (tools/bench_ref.py の ROWS と一致させること) */
-#define ROWS 64
+/* 入力の組数の上限。モデルごとの組数は bench_mlp の引数 (tools/bench_ref.py の MODELS と一致させること) */
+#define ROWS_MAX 64
 
 /* heat1d の計測条件: (点数, dt, ステップ数)。bench_ref.py の HEAT_CASES と一致させること */
 static const struct { int n; double dt; int steps; } HEAT_CASES[] = {
@@ -174,11 +182,13 @@ static void *app_ptr(actor_t *a, uint32_t off, uint32_t size)
 }
 
 /* ---- (a) mlp-actor ---- */
-static void bench_mlp(const char *model, const uint8_t *dynm, size_t dlen)
+static void bench_mlp(const char *model, const uint8_t *dynm, size_t dlen,
+                      const uint8_t *bin, size_t blen, const char *actor_name, int rows)
 {
     actor_t a;
     size_t h_before = free_int();
-    if (!actor_up(&a, mlp_bin_start, (size_t)(mlp_bin_end - mlp_bin_start), "mlp")) { actor_down(&a); return; }
+    if (rows <= 0 || rows > ROWS_MAX) return;
+    if (!actor_up(&a, bin, blen, actor_name)) { actor_down(&a); return; }
     wasm_function_inst_t f_lbuf = fn(&a, "dyne_load_buf"), f_lcap = fn(&a, "dyne_load_cap"),
                          f_load = fn(&a, "dyne_model_load"), f_ibuf = fn(&a, "dyne_in_buf"),
                          f_obuf = fn(&a, "dyne_out_buf"), f_cap = fn(&a, "dyne_io_cap"),
@@ -200,32 +210,32 @@ static void bench_mlp(const char *model, const uint8_t *dynm, size_t dlen)
     int64_t t_load = esp_timer_get_time() - t0;
     int n_in = call_i(&a, f_nin, 0, 0), n_out = call_i(&a, f_nout, 0, 0), np = call_i(&a, f_np, 0, 0);
     int io_cap = call_i(&a, f_cap, 0, 0);
-    if (rc != 0 || n_in <= 0 || n_out <= 0 || ROWS * n_in > io_cap || ROWS * n_out > io_cap) {
+    if (rc != 0 || n_in <= 0 || n_out <= 0 || rows * n_in > io_cap || rows * n_out > io_cap) {
         printf("#BENCH bench=error what=model_load model=%s rc=%d n_in=%d n_out=%d\n", model, (int)rc, n_in, n_out);
         actor_down(&a);
         return;
     }
-    double *in = app_ptr(&a, (uint32_t)call_i(&a, f_ibuf, 0, 0), (uint32_t)(8 * ROWS * n_in));
-    uint8_t *out = app_ptr(&a, (uint32_t)call_i(&a, f_obuf, 0, 0), (uint32_t)(8 * ROWS * n_out));
+    double *in = app_ptr(&a, (uint32_t)call_i(&a, f_ibuf, 0, 0), (uint32_t)(8 * rows * n_in));
+    uint8_t *out = app_ptr(&a, (uint32_t)call_i(&a, f_obuf, 0, 0), (uint32_t)(8 * rows * n_out));
     if (!in || !out) { actor_down(&a); return; }
 
     /* 入力: x[r][i] = (((37r + 11i) mod 201) − 100) / 64  (PC側と同一。丸めなしで表せる値) */
-    for (int r = 0; r < ROWS; r++)
+    for (int r = 0; r < rows; r++)
         for (int i = 0; i < n_in; i++)
             in[r * n_in + i] = (double)(((37 * r + 11 * i) % 201) - 100) / 64.0;
 
-    /* 照合用: 64組まとめて1回 → 出力 CRC (この時点の出力が PC と比べる対象) */
-    if (call_i(&a, f_batch, 1, ROWS) != n_out) { actor_down(&a); return; }
-    uint32_t crc = crc32_bytes(out, (size_t)8 * ROWS * n_out);
+    /* 照合用: rows 組まとめて1回 → 出力 CRC (この時点の出力が PC と比べる対象) */
+    if (call_i(&a, f_batch, 1, rows) != n_out) { actor_down(&a); return; }
+    uint32_t crc = crc32_bytes(out, (size_t)8 * rows * n_out);
     double y0;
     memcpy(&y0, out, 8);
 
-    /* 速度 1: 64組まとめた推論の繰り返し (呼び出しの手間を薄めた、計算そのものの速さ) */
+    /* 速度 1: rows 組まとめた推論の繰り返し (呼び出しの手間を薄めた、計算そのものの速さ) */
     int reps = CONFIG_BENCH_MLP_BATCH_REPS;
     t0 = esp_timer_get_time();
-    for (int k = 0; k < reps; k++) call_i(&a, f_batch, 1, ROWS);
+    for (int k = 0; k < reps; k++) call_i(&a, f_batch, 1, rows);
     int64_t t_batch = esp_timer_get_time() - t0;
-    uint32_t crc2 = crc32_bytes(out, (size_t)8 * ROWS * n_out); /* 入力が同じなので crc と同じはず */
+    uint32_t crc2 = crc32_bytes(out, (size_t)8 * rows * n_out); /* 入力が同じなので crc と同じはず */
 
     /* 速度 2: 1組ずつの呼び出し (ホストから毎回呼ぶ実運用に近い形) */
     int calls = CONFIG_BENCH_MLP_SINGLE_CALLS;
@@ -239,8 +249,8 @@ static void bench_mlp(const char *model, const uint8_t *dynm, size_t dlen)
            "load_rc=%d model_load_us=%" PRId64 " us_per_inf_batch=%.3f us_per_inf_single=%.3f "
            "batch_reps=%d single_calls=%d pages=%u heap_used=%u crc=0x%08" PRIX32 " crc_repeat=0x%08" PRIX32
            " y0=%.17g\n",
-           s_mode, model, n_in, n_out, np, ROWS, (unsigned)dlen, (int)rc, t_load,
-           (double)t_batch / ((double)reps * ROWS), (double)t_single / (double)calls, reps, calls,
+           s_mode, model, n_in, n_out, np, rows, (unsigned)dlen, (int)rc, t_load,
+           (double)t_batch / ((double)reps * rows), (double)t_single / (double)calls, reps, calls,
            mem ? (unsigned)wasm_memory_get_cur_page_count(mem) : 0u,
            (unsigned)(h_before - free_int()), crc, crc2, y0);
     actor_down(&a);
@@ -608,11 +618,18 @@ static void *bench_main(void *arg)
     bench_replay("wave_n5", "-", BIN(wave2d_actor_small_wasm), BIN(wave_n5_rec));
     bench_heap("after_2d");
 #if CONFIG_BENCH_RUN_LEGACY
-    bench_mlp("model_a_f64", ma_start, (size_t)(ma_end - ma_start));
-    bench_mlp("model_b_f64", mb_start, (size_t)(mb_end - mb_start));
-    bench_mlp("model_b_f32", mb32_start, (size_t)(mb32_end - mb32_start));
+    size_t mlp_len = (size_t)(mlp_bin_end - mlp_bin_start);
+    bench_mlp("model_a_f64", ma_start, (size_t)(ma_end - ma_start), mlp_bin_start, mlp_len, "mlp", 64);
+    bench_mlp("model_b_f64", mb_start, (size_t)(mb_end - mb_start), mlp_bin_start, mlp_len, "mlp", 64);
+    bench_mlp("model_b_f32", mb32_start, (size_t)(mb32_end - mb32_start), mlp_bin_start, mlp_len, "mlp", 64);
     for (size_t k = 0; k < sizeof(HEAT_CASES) / sizeof(HEAT_CASES[0]); k++)
         bench_heat(HEAT_CASES[k].n, HEAT_CASES[k].dt, HEAT_CASES[k].steps);
+#endif
+#if CONFIG_BENCH_RUN_ERG
+    /* erg の方策の形 (issue #156)。制御の周期は 20 ms。us_per_inf_single が1回の推論の時間 */
+    size_t mlpf_len = (size_t)(mlpf_bin_end - mlpf_bin_start);
+    bench_mlp("erg_leg_f64", erg_leg_start, (size_t)(erg_leg_end - erg_leg_start), mlpf_bin_start, mlpf_len, "mlp_full", 8);
+    bench_mlp("erg_central_f64", erg_cen_start, (size_t)(erg_cen_end - erg_cen_start), mlpf_bin_start, mlpf_len, "mlp_full", 8);
 #endif
 
     bench_heap("end");

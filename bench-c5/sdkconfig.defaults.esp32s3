@@ -1,0 +1,11 @@
+# ESP32-S3 (Seeed XIAO ESP32S3。erg の脚と同じ基板) 向けの追加設定 (issue #156)
+# 8 MB フラッシュ、8 MB の Octal PSRAM。フル版の mlp-actor の線形メモリを PSRAM に置くため PSRAM を有効にする
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_USE_MALLOC=y
+
+# 2次元の再生の記録 (.rec) も埋め込むので、ESP32 と同じ 3.9MB のアプリ領域の表を使う
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_esp32.csv"

@@ -14,6 +14,14 @@ menu "bench-c5 (WASMアクターの速度・メモリ計測)"
         bool "mlp と heat1d の計測も行う (2次元の再生の後)"
         default y
 
+    config BENCH_RUN_ERG
+        bool "erg の方策と同じ形の網 (67→48→48→8、75→48→48→16) をフル版の mlp-actor で計測する"
+        default y
+        help
+            issue #156。erg の脚の制御の周期は 20 ms。フル版の mlp-actor は線形メモリが 2 ページ
+            (128 KiB) 要るので、PSRAM のない基板では読み込めないことがある (その場合は
+            #BENCH bench=error を出して先へ進む)。
+
     config BENCH_MLP_BATCH_REPS
         int "mlp: 64組まとめた推論の繰り返し回数"
         default 50

@@ -1,9 +1,9 @@
 # bench-c5 のビルド (実行方式とターゲットごとに別のビルドディレクトリを使う)
-#   使い方: powershell -ExecutionPolicy Bypass -File bench-c5\build.ps1 [-Target esp32c5|esp32] [-Mode classic|fast|aot] [-Flash COM5]
+#   使い方: powershell -ExecutionPolicy Bypass -File bench-c5\build.ps1 [-Target esp32c5|esp32|esp32s3] [-Mode classic|fast|aot] [-Flash COM5]
 #   例:     powershell -ExecutionPolicy Bypass -File bench-c5\build.ps1 -Target esp32c5 -Mode classic
 #   -Flash を付けると、ビルド後にそのポートへ書き込んでモニタを開く (実機作業)
 param(
-    [ValidateSet("esp32c5", "esp32")] [string]$Target = "esp32c5",
+    [ValidateSet("esp32c5", "esp32", "esp32s3")] [string]$Target = "esp32c5",
     [ValidateSet("classic", "fast", "aot")] [string]$Mode = "classic",
     [string]$Flash = ""
 )

@@ -16,15 +16,17 @@ set(_rec_files sdf2d_grid_actor_small.wasm sdf2d_base_small.wasm sdf2d_nostd_sma
                sdf2d_f32_small.wasm wave2d_actor_small.wasm
                shape_n13.rec shape_n5.rec shape_sw2_n5.rec shape_f32_n5.rec
                shape_h5_n5.rec shape_p4h.rec wave_n5.rec)
+# erg の方策と同じ形の網とフル版の mlp-actor (issue #156)。AOT の方式でも .wasm (インタプリタ) で動かす
+set(_erg_files mlp_actor_full.wasm erg_leg_f64.dynm erg_central_f64.dynm)
 set(_embed "${_assets}/mlp_actor_small.${_actor_ext}" "${_assets}/heat1d_actor_small.${_actor_ext}"
            "${_assets}/model_a_f64.dynm" "${_assets}/model_b_f64.dynm" "${_assets}/model_b_f32.dynm")
 foreach(_f mlp_actor_small.${_actor_ext} heat1d_actor_small.${_actor_ext}
-           model_a_f64.dynm model_b_f64.dynm model_b_f32.dynm ${_rec_files})
+           model_a_f64.dynm model_b_f64.dynm model_b_f32.dynm ${_rec_files} ${_erg_files})
     if(NOT EXISTS ${_assets}/${_f})
         message(FATAL_ERROR "bench-c5: assets/${_f} がありません。README の手順 (bench_ref.py make / interp_bench.py make / make_aot.ps1) で作ってください")
     endif()
 endforeach()
-foreach(_f ${_rec_files})
+foreach(_f ${_rec_files} ${_erg_files})
     list(APPEND _embed "${_assets}/${_f}")
 endforeach()
 
