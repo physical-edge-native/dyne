@@ -30,7 +30,7 @@ The outputs go to `demo_out/tutorial/`.
 |---|---|---|
 | 1 | A dummy room, devices, sensors and dummy readings | nothing (files in the repository) |
 | 2 | Dyne computes the shape and the temperature on 32 simulated devices | Rust |
-| 3 | Export: USD with colliders, a 3D dashboard, an OpenFOAM case | Rust; Python for USD and the dashboard |
+| 3 | Export: USD with colliders, a 3D dashboard, an OpenFOAM case, a MuJoCo model | Rust; Python for USD and the dashboard |
 | 4 (optional) | Run the case with OpenFOAM; drive a Go2 robot in the room in Isaac Lab | OpenFOAM; an NVIDIA GPU and Isaac Lab |
 
 ## What is real and what is dummy
@@ -43,7 +43,7 @@ The outputs go to `demo_out/tutorial/`.
 | The devices and the network between them | **Simulated**: 32 copies of each solver in one process, with virtual time and a virtual network |
 | The shape | **Computed by Dyne** from the distance readings |
 | The temperature field you see | **Computed by Dyne** from the thermometer readings |
-| USD, dashboard, OpenFOAM case | **Written from Dyne's results** |
+| USD, dashboard, OpenFOAM case, MuJoCo model | **Written from Dyne's results** |
 
 The same steps are meant to run with real sensors on real devices; only the
 inputs change. See the [hardware guide](hardware.md) for the devices.
@@ -215,6 +215,23 @@ option (GitHub issue #91), the script also takes the room shape at the points
 of the 10 cm temperature grid (`scripts/tutorial_room.py coarse-shape`) and
 removes the cells inside walls and furniture. Without it, the case is the
 whole rectangle of the room.
+
+### 3c. MuJoCo model
+
+```
+dyne-mjcf --shape shape.vti --out room_mujoco.xml
+```
+
+`dyne-mjcf` writes the same shape as an MJCF file for MuJoCo, without Python
+or MuJoCo: the solid grid cells merged into 153 static boxes (140 where a
+sensor saw an object, 13 where no sensor looked), four boxes around the grid,
+and a floor plane, all in the frame of the USD file (the shape grid's x and y,
+Z up, floor at z = 0, metres). Next to it, `room_mujoco_spawn.json` lists the
+free floor where a robot can be placed (10968 grid points, 6.86 m²; add
+`--clearance 0.3` to keep a robot's centre 0.3 m from every object). Frame
+and file layout: the MuJoCo section of the docs site's connect page. The CI
+checks the files byte for byte and loads them in MuJoCo
+(`scripts/mjcf_room_check.py`, step 25 of `scripts/ci-check.sh`).
 
 ## Step 4 (optional): run the case, drive a robot
 
