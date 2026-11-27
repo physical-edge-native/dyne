@@ -108,6 +108,13 @@
 #      10 % loss (300 steps, seed 42); the split result must stay bit-exact, scripts/coop_perf.py --check-sim must find
 #      the latency inside the configured range with the expected median, and the counts of messages sent and received
 #      must be the pinned ones (3552 / 3204). Standard library only.
+#  25. room shape as MJCF for MuJoCo (dyne-mjcf, crates/dyne-export/src/mjcf.rs, issue #193): from the shape of the
+#      room tutorial (step 19), the .vti file and the CSV file must give the same bytes with the pinned CRC-32 (MJCF
+#      158 geoms, crc32 3fbbe905; spawn JSON 10968 points, crc32 39f2dcfa); from the 2026-11-21 real room
+#      (docs/demo/siteA-openfoam/shape.csv) the files must equal docs/demo/siteA-mujoco/ byte for byte (line ends
+#      aside). If the mujoco package is installed, scripts/mjcf_room_check.py loads both rooms (geom count, static boxes
+#      on the floor, spawn points outside every box, a dropped ball rests on the floor); skipped with a note when it is
+#      missing, required when REQUIRE_MUJOCO=1 (CI).
 #
 # Usage (from the repository root):  bash scripts/ci-check.sh
 set -euo pipefail
@@ -591,6 +598,42 @@ elif ! grep -q "3552 messages sent, 3204 received" target/ci-perf.log; then
   head -n 1 target/ci-perf.log; echo "coop-perf        FAIL (counts differ from the pinned 3552 / 3204)"; fail=1
 else
   head -n 3 target/ci-perf.log; tail -n 1 target/ci-perf.log
+fi
+
+echo "== [25] room shape as MJCF for MuJoCo, tutorial room and 2026-11-21 real room (issue #193) =="
+MJ="target/release/dyne-mjcf${EXE}"
+MD="target/ci-mjcf"
+rm -rf "$MD"; mkdir -p "$MD"
+MJ_TUT_XML=3fbbe905; MJ_TUT_SPAWN=39f2dcfa; MJ_TUT_GEOMS=158; MJ_REAL_GEOMS=56
+mj_ok=1
+if [ ! -f "$TL/out/shape.vti" ] || [ ! -f "$TL/out/shape.csv" ]; then
+  echo "mjcf room        FAIL (no tutorial shape from step 19)"; mj_ok=0
+elif ! "$MJ" --shape "$TL/out/shape.vti" --out "$MD/tut_vti.xml" > "$MD/tut_vti.log" 2>&1 \
+     || ! "$MJ" --shape "$TL/out/shape.csv" --out "$MD/tut_csv.xml" > "$MD/tut_csv.log" 2>&1 \
+     || ! "$MJ" --shape docs/demo/siteA-openfoam/shape.csv --out "$MD/real.xml" > "$MD/real.log" 2>&1; then
+  cat "$MD"/*.log; echo "mjcf room        FAIL (export)"; mj_ok=0
+elif ! grep -q "tut_vti.xml: $MJ_TUT_GEOMS geoms .* crc32 $MJ_TUT_XML\$" "$MD/tut_vti.log" \
+     || ! grep -q "tut_vti_spawn.json: 10968 spawn points .* crc32 $MJ_TUT_SPAWN\$" "$MD/tut_vti.log" \
+     || ! cmp -s "$MD/tut_vti.xml" "$MD/tut_csv.xml" || ! cmp -s "$MD/tut_vti_spawn.json" "$MD/tut_csv_spawn.json"; then
+  cat "$MD/tut_vti.log"; echo "mjcf room        FAIL (expected $MJ_TUT_GEOMS geoms, crc32 $MJ_TUT_XML / $MJ_TUT_SPAWN, same files from .vti and CSV)"; mj_ok=0
+elif ! diff -q <(tr -d '\r' < docs/demo/siteA-mujoco/room.xml) "$MD/real.xml" > /dev/null \
+     || ! diff -q <(tr -d '\r' < docs/demo/siteA-mujoco/room_spawn.json) "$MD/real_spawn.json" > /dev/null; then
+  cat "$MD/real.log"; echo "mjcf room        FAIL (real room differs from docs/demo/siteA-mujoco/)"; mj_ok=0
+else
+  echo "mjcf room        OK (tutorial: $MJ_TUT_GEOMS geoms, crc32 $MJ_TUT_XML, spawn $MJ_TUT_SPAWN, same from .vti and CSV; real room equals docs/demo/siteA-mujoco/)"
+fi
+[ "$mj_ok" -eq 1 ] || fail=1
+if [ "$mj_ok" -eq 1 ] && [ -n "$PY" ] && "$PY" -c "import mujoco, numpy" > /dev/null 2>&1; then
+  if "$PY" scripts/mjcf_room_check.py "$MD/tut_vti.xml" "$MD/tut_vti_spawn.json" --geoms "$MJ_TUT_GEOMS" \
+     && "$PY" scripts/mjcf_room_check.py "$MD/real.xml" "$MD/real_spawn.json" --geoms "$MJ_REAL_GEOMS"; then
+    :
+  else
+    echo "mjcf-mujoco      FAIL"; fail=1
+  fi
+elif [ "$mj_ok" -eq 1 ] && [ "${REQUIRE_MUJOCO:-0}" = "1" ]; then
+  echo "mjcf-mujoco      FAIL (the mujoco package is required here: pip install mujoco)"; fail=1
+elif [ "$mj_ok" -eq 1 ]; then
+  echo "mjcf-mujoco      SKIP (the mujoco Python package is not installed; pip install mujoco to load the rooms in MuJoCo)"
 fi
 
 if [ "$fail" -ne 0 ]; then echo "CI CHECK FAILED"; exit 1; fi

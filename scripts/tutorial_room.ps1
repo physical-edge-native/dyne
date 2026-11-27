@@ -1,5 +1,6 @@
 # Room tutorial (docs/en/tutorial-room.md, GitHub issue #96): a dummy room with simulated devices,
-# from dummy sensor readings to Dyne's shape and temperature, then USD, a 3D dashboard and an OpenFOAM case.
+# from dummy sensor readings to Dyne's shape and temperature, then USD, a 3D dashboard, an OpenFOAM case and
+# a MuJoCo model.
 # No hardware is needed. The same steps as scripts/tutorial_room.sh, for Windows PowerShell.
 #
 # Usage (from the repository root):
@@ -124,6 +125,9 @@ if ($usage -match "--shape" -and $py) {
     Invoke-Checked "dyne-foam case" { & $foam case --vti $tempVti --out $case @foamOpts }
 }
 & $foam info $case | Select-String -Pattern "^(T:|mesh|faces)" | ForEach-Object { Write-Host $_.Line }
+
+Write-Host "== [3c] MuJoCo model (MJCF) of the room shape and its free floor for robot spawn points (no Python, no MuJoCo needed)"
+Invoke-Checked "dyne-mjcf" { & "target\release\dyne-mjcf.exe" --shape (Join-Path $OutDir "shape.vti") --out (Join-Path $OutDir "room_mujoco.xml") }
 
 if ($py -and -not $SimOnly) {
     Write-Host "== [3b] USD (physics colliders), MuJoCo model and the 3D dashboard (HTML)"

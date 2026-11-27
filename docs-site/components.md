@@ -6,7 +6,7 @@
 | `crates/dyne-core` | deterministic random numbers, discrete-event clock, virtual network (loss, delay, partitions), WebAssembly loader |
 | `crates/dyne-sim`, `crates/dyne-sim2d` | N-device simulators (1D / 2D) |
 | `crates/dyne-native` | native PC solvers (2D/3D wave), bit-exact with the WebAssembly solvers; reference and fast backend |
-| `crates/dyne-export` | connections to other tools: VTK image data, OpenFOAM cases and velocity import (`dyne-vti`, `dyne-foam`) |
+| `crates/dyne-export` | connections to other tools: VTK image data, OpenFOAM cases and velocity import, the room shape as MJCF for MuJoCo (`dyne-vti`, `dyne-foam`, `dyne-mjcf`) |
 | `crates/heat1d-actor`, `crates/heat2d-actor`, `crates/wave2d-actor` | finite-difference solvers compiled to WebAssembly |
 | `crates/heat1d-pinn-actor` | learned solver (time-discrete physics-informed network) |
 | `crates/sdf2d-grid-actor` | room shape from distance sensors |
