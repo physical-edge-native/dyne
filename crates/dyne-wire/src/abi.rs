@@ -221,6 +221,18 @@ pub mod imu {
     pub const CFG_GYRO_CAL_EPOCHS: u32 = 5;
     /// Configuration key: agreement method (`CONS_*`, default `CONS_DYNAMIC`).
     pub const CFG_CONSENSUS: u32 = 6;
+    /// Configuration key (added 2026-11-27, issue #194): number of initial epochs over which each
+    /// device estimates its own zero offset (keep the devices still meanwhile; default 0 = off).
+    /// From the next epoch on, each device subtracts its offset before sharing: for the angular
+    /// rate, its own static mean (the true rate is 0); for the acceleration, its own static mean
+    /// minus the fused static mean (so that gravity stays). The fused tilt filter holds its
+    /// angle at the acceleration angle during these epochs and does not subtract the angular-rate
+    /// offset again (its `CFG_GYRO_CAL_EPOCHS` calibration uses only later, corrected epochs).
+    /// The device's own outputs (`G_LOCAL*`) stay uncorrected.
+    pub const CFG_OFFSET_EPOCHS: u32 = 7;
+    /// Configuration key (added 2026-11-27, issue #194): number of devices N in the run, used
+    /// only for `G_FUSED_DEVICES` (default 0 = unknown).
+    pub const CFG_DEVICES: u32 = 8;
 
     /// Agreement: reset the state to the device's own sums every epoch (the average is
     /// approached within the M iterations of the epoch).
@@ -275,6 +287,10 @@ pub mod imu {
     pub const G_EARLY: u32 = 20;
     /// `dyne_get` index: count of neighbour values that did not arrive.
     pub const G_MISSING: u32 = 21;
-    /// Number of `dyne_get` values.
-    pub const G_LEN: u32 = 22;
+    /// `dyne_get` index (added 2026-11-27, issue #194): number of devices whose samples the last
+    /// fused epoch used, `floor(G_FUSED_N · N + 0.5)` with N = `CFG_DEVICES` (0 if N is not set).
+    /// A device without samples in an epoch shares weight 0 and is left out of the average.
+    pub const G_FUSED_DEVICES: u32 = 22;
+    /// Number of `dyne_get` values (22 before 2026-11-27; indices 0..21 are unchanged).
+    pub const G_LEN: u32 = 23;
 }
