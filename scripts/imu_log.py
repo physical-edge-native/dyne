@@ -22,7 +22,7 @@ import time
 
 import paho.mqtt.client as mqtt
 
-G_LEN = 22
+G_LEN = 23  # 22 before 2026-11-27 (issue #194: G_FUSED_DEVICES added)
 G0 = 9.80665
 
 

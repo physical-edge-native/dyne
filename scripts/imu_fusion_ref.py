@@ -17,8 +17,9 @@ WASM = os.path.join(ROOT, 'crates', 'imu-fusion-actor', 'target', 'wasm32-unknow
 
 # ---- abi.rs の写し ----
 CFG_EPOCH_STEPS, CFG_TIME_MODE, CFG_T0_US, CFG_TS_OFFSET_US, CFG_CF_ALPHA, CFG_GYRO_CAL_EPOCHS, CFG_CONSENSUS = range(7)
+CFG_OFFSET_EPOCHS, CFG_DEVICES = 7, 8  # added 2026-11-27 (issue #194)
 CONS_RESET, CONS_DYNAMIC = 0, 1
-CFG_DEFAULT = [10.0, 0.0, 0.0, 0.0, 0.9, 0.0, 1.0]
+CFG_DEFAULT = [10.0, 0.0, 0.0, 0.0, 0.9, 0.0, 1.0, 0.0, 0.0]
 TIME_STAMP, TIME_ARRIVAL = 0, 1
 PER_POINT = 8
 PUSH_OK, PUSH_LATE, PUSH_EARLY, PUSH_NOT_READY = 0, 1, 2, -1
@@ -26,7 +27,9 @@ G_EPOCH, G_FUSED_N, G_FUSED = 0, 1, 2
 G_FUSED_ROLL, G_FUSED_PITCH = 8, 9
 G_LOCAL_N, G_LOCAL = 10, 11
 G_LOCAL_ROLL, G_LOCAL_PITCH = 17, 18
-G_LATE, G_EARLY, G_MISSING, G_LEN = 19, 20, 21, 22
+G_LATE, G_EARLY, G_MISSING = 19, 20, 21
+G_FUSED_DEVICES, G_LEN = 22, 23  # added 2026-11-27 (issue #194); indices 0..21 unchanged
+G_LEN_V1 = 22  # number of outputs before 2026-11-27 (records written by older solvers)
 ANGLE_IDX = (G_FUSED_ROLL, G_FUSED_PITCH, G_LOCAL_ROLL, G_LOCAL_PITCH)
 # field2d
 FACE_W, FACE_E, FACE_S, FACE_N = 0, 1, 2, 3
@@ -140,15 +143,23 @@ def _trunc_i64(v):
 
 class _Cf:
     def __init__(self):
+        self.seen = 0.0
         self.init = False
         self.roll = 0.0
         self.pitch = 0.0
         self.cal_n = 0.0
         self.gsum = [0.0, 0.0]
 
-    def update(self, m, e_s, alpha, cal):
+    def update(self, m, e_s, alpha, cal, skip=0.0):
         ra = libm_atan2(m[1], m[2])
         pa = libm_atan2(-m[0], math.sqrt(m[1] * m[1] + m[2] * m[2]))
+        if self.seen < skip:
+            self.seen += 1.0
+            self.roll = ra
+            self.pitch = pa
+            self.init = True
+            return
+        cal = cal - skip
         if self.cal_n < cal:
             self.gsum[0] += m[3]
             self.gsum[1] += m[4]
@@ -202,7 +213,7 @@ class ImuFusionRef:
         self.ready = False
 
     def cfg(self, key, val):
-        if 0 <= key < 7:
+        if 0 <= key < len(CFG_DEFAULT):
             self.cfg_set[key] = float(val)
 
     def _cfg_get(self, key):
@@ -232,11 +243,22 @@ class ImuFusionRef:
         self.alpha = self._cfg_get(CFG_CF_ALPHA)
         self.cal = self._cfg_get(CFG_GYRO_CAL_EPOCHS)
         self.deg = float(sum(1 for f in range(4) if self.kind[f] == BC_INTERFACE))
+        k = self._cfg_get(CFG_OFFSET_EPOCHS)
+        self.koff = int(k) if 1.0 <= k <= 1.0e6 else 0
+        self.ndev = self._cfg_get(CFG_DEVICES)
         self.step_no = 0
         self.acc = [[-1, [0.0] * XLEN] for _ in range(RING)]
         self.x = [0.0] * XLEN
         self.cur_epoch = -1
         self.cur_local = [0.0] * XLEN
+        self.cur_raw = [0.0] * XLEN
+        self.own_sum = [0.0] * 6
+        self.own_cnt = 0.0
+        self.fus_sum = [0.0] * 3
+        self.fus_cnt = 0.0
+        self.off = [0.0] * 6
+        self.off_ready = False
+        self.fused_dev = 0.0
         self.cons = int(self._cfg_get(CFG_CONSENSUS))
         self.cur_n = 0.0
         self.ghost = [[0.0] * PER_POINT for _ in range(4)]
@@ -329,12 +351,23 @@ class ImuFusionRef:
                 self.fused_n = self.x[0]
                 if self.x[0] > 0.0:
                     self.fused = [self.x[k + 1] / self.x[0] for k in range(6)]
-                    self.cf_fused.update(self.fused, self.e_s, self.alpha, self.cal)
+                    self.cf_fused.update(self.fused, self.e_s, self.alpha, self.cal, float(self.koff))
+                    if self.cur_epoch < self.koff:
+                        for k in range(3):
+                            self.fus_sum[k] += self.fused[k]
+                        self.fus_cnt += 1.0
+                self.fused_dev = float(math.floor(self.x[0] * self.ndev + 0.5))
                 self.local_n = self.cur_n
-                if self.cur_local[0] > 0.0:
-                    self.local = [self.cur_local[k + 1] / self.cur_local[0] for k in range(6)]
-                    self.cf_local.update(self.local, self.e_s, self.alpha, self.cal)
+                if self.cur_raw[0] > 0.0:
+                    self.local = [self.cur_raw[k + 1] / self.cur_raw[0] for k in range(6)]
+                    self.cf_local.update(self.local, self.e_s, self.alpha, self.cal, 0.0)
             e = q - 1
+            if self.koff > 0 and e == self.koff:
+                if self.own_cnt > 0.0:
+                    self.off = [self.own_sum[k] / self.own_cnt for k in range(6)]
+                    for k in range(3):
+                        self.off[k] = self.off[k] - self.fus_sum[k] / self.fus_cnt if self.fus_cnt > 0.0 else 0.0
+                self.off_ready = True
             slot = self.acc[e % RING]
             zs = list(slot[1]) if slot[0] == e else [0.0] * XLEN
             z = [0.0] * XLEN
@@ -343,6 +376,15 @@ class ImuFusionRef:
                 for k in range(6):
                     z[k + 1] = zs[k + 1] / zs[0]
             self.acc[e % RING] = [-1, [0.0] * XLEN]
+            self.cur_raw = list(z)
+            if zs[0] > 0.0:
+                if e < self.koff:
+                    for k in range(6):
+                        self.own_sum[k] += z[k + 1]
+                    self.own_cnt += 1.0
+                elif self.off_ready:
+                    for k in range(6):
+                        z[k + 1] = z[k + 1] - self.off[k]
             if self.cons == CONS_DYNAMIC:
                 self.x = [self.x[k] + (z[k] - self.cur_local[k]) for k in range(XLEN)]
             else:
@@ -355,7 +397,8 @@ class ImuFusionRef:
     def get_all(self):
         return ([float(self.out_epoch), self.fused_n] + list(self.fused) +
                 [self.cf_fused.roll, self.cf_fused.pitch, self.local_n] + list(self.local) +
-                [self.cf_local.roll, self.cf_local.pitch, float(self.late), float(self.early), float(self.missing)])
+                [self.cf_local.roll, self.cf_local.pitch, float(self.late), float(self.early), float(self.missing),
+                 self.fused_dev])
 
 
 class ImuFusionWasm:
