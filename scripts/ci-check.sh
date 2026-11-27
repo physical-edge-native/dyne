@@ -85,7 +85,12 @@
 #      scripts/onnx_check.py: onnxruntime, a same-order reference and the WebAssembly actor agree (tanh and sigmoid
 #      models within 1e-14, from libm differences in the last digit); a ReLU-only model must match the reference in
 #      every output and give the pinned CRC-32 of its .dynm file and outputs; full and small builds agree bit for
-#      bit; truncated files and unsupported operators are rejected. Needs numpy, onnx, onnxruntime and wasmtime:
+#      bit; truncated files and unsupported operators are rejected. Networks laid out exactly as torch.onnx.export
+#      (opset 17, dynamo=False) writes erg's policy (Linear/ReLU, 67->48->48->8; float64 without and with input
+#      normalisation (x - mean) / std folded into the first layer, and float32) must match the reference of the
+#      folded network in every output, give pinned CRC-32 values, and stay within relative 1e-12 (float64) / 1e-5
+#      (float32) of onnxruntime running the unfolded graph; other normalisation forms, single-row Flatten/Reshape,
+#      and the rejection of forms that cannot be folded are checked too (issue #201). Needs numpy, onnx, onnxruntime and wasmtime:
 #      skipped locally when they are missing, required when REQUIRE_ONNX=1 (CI). The PyTorch steps of
 #      scripts/check-onnx.ps1 are not run here (issue #155). Also: the values the ESP32 benchmark firmware must report
 #      (bench-c5/tools/bench_ref.py expect), with the committed assets and with the mlp-actor rebuilt from this tree,
@@ -489,7 +494,7 @@ else
   echo "imu-record       SKIP (numpy or wasmtime not installed)"
 fi
 
-echo "== [21] learned-solver path: ONNX -> .dynm -> mlp-actor (issue #155) =="
+echo "== [21] learned-solver path: ONNX -> .dynm -> mlp-actor (issues #155, #201) =="
 for c in mlp-core mlp-actor mlp-train-actor; do
   if ! (cd "crates/$c" && cargo test --release --quiet > /dev/null 2>&1); then
     echo "$c unit tests  FAIL"; fail=1
