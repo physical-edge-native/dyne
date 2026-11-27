@@ -10,7 +10,17 @@ ONNX (NNの計算グラフと重みの共通交換形式) は PyTorch 等から�
     または MatMul (+ 直後の Add でバイアス)
   - 活性化: Tanh / Relu / Sigmoid (全結合層の直後に1つまで)
   - Identity は素通しとして扱う。Constant は重みの供給元として扱う
+  - 入力の正規化 (issue #201): 最初の全結合層より前で、入力に定数を Sub / Add / Mul / Div する演算
+    (例: PyTorch の (x - mean) / std) は、何個・どの順でも、最初の全結合層の重みとバイアスに畳み込む。
+    定数は 1個 (スカラー) か入力次元と同じ個数 (形 [n] または [1, n])。定数 / x は線形でないので拒否する
+  - 1行の Flatten (axis 0/1/-1) と Reshape (目標の形が [n]・[-1]・[1, n]・[1, -1]・[-1, n] など、
+    最後以外の次元が 1 か -1 のもの) は、[1, n] の行に対しては何もしないので取り除く
 それ以外の演算を含むモデルは、未対応の演算の一覧を示して拒否する。
+
+畳み込みの演算順: 正規化の演算を出力側から順にたどり、Mul / Div は重みの列に掛ける (割る)、
+Sub / Add は「その時点の重み × 定数」をバイアスから引く (足す)。バイアスの和は math.fsum (正しく丸めた和)
+で取るので、BLAS や OS によらず同じビット列になる。浮動小数点の演算の順が元のグラフと変わるので、
+畳み込んだ網の出力は元の網の出力とビット一致しない (照合の許容誤差は scripts/onnx_check.py に書く)。
 
 .dynm 形式 第1版 (リトルエンディアン) の定義は crates/mlp-core/src/lib.rs の冒頭と同じ:
   識別子 b"DYNM" / 版 u16=1 / フラグ u16 (bit0=重みがf32) / 入力次元 u32 /
@@ -35,7 +45,10 @@ FLAG_F32 = 1
 OP_DENSE = 1
 ACT_CODES = {"none": 0, "Tanh": 1, "Relu": 2, "Sigmoid": 3}
 ACT_NAMES = {v: k for k, v in ACT_CODES.items()}
-SUPPORTED_OPS = {"Gemm", "MatMul", "Add", "Tanh", "Relu", "Sigmoid", "Identity", "Constant"}
+SUPPORTED_OPS = {"Gemm", "MatMul", "Add", "Tanh", "Relu", "Sigmoid", "Identity", "Constant",
+                 "Sub", "Mul", "Div", "Flatten", "Reshape"}
+# 最初の全結合層より前でだけ受け付ける、入力の正規化の演算 (定数との要素ごとの演算)
+NORM_OPS = ("Sub", "Add", "Mul", "Div")
 # mlp-actor の上限 (フル版)。縮小版は PARAM_MAX=2048
 PARAM_MAX_FULL = 8192
 PARAM_MAX_SMALL = 2048
@@ -52,6 +65,7 @@ class Layer:
         self.w = np.asarray(w, dtype=np.float64)  # [出力][入力]
         self.b = np.asarray(b, dtype=np.float64).reshape(-1)  # [出力]
         self.act = "none"
+        self.folded = []  # 畳み込んだ入力の正規化の演算名 (最初の層だけ。表示用)
 
     @property
     def n_in(self):
@@ -85,7 +99,8 @@ def parse_onnx(model):
                     inits[n.output[0]] = numpy_helper.to_array(a.t)
                 else:
                     raise ImportError_(f"Constant の属性 {a.name} は未対応です")
-    dtypes = {str(v.dtype) for v in inits.values()}
+    # 重みの型 (Reshape の目標の形のような整数の定数は数えない)
+    dtypes = {str(v.dtype) for v in inits.values() if v.dtype.kind == "f"}
 
     inputs = [i for i in g.input if i.name not in inits]
     if len(inputs) != 1 or len(g.output) != 1:
@@ -111,10 +126,12 @@ def parse_onnx(model):
 
     def init_of(n, name):
         if name not in inits:
-            raise ImportError_(f"{n.op_type} ({n.name}) の {name} が定数 (重み) ではありません")
+            raise ImportError_(f"{n.op_type} ({n.name or '名前なし'}) の {name} が定数 (重み) ではありません")
         return inits[name].astype(np.float64)
 
     layers = []
+    pre = []  # 最初の全結合層より前の正規化: (演算, 定数, 定数が左側か, ノード名) の列
+    shape_checks = []  # Reshape の目標の最後の次元: (その時点の層数, 次元, ノード名)
     used = 0
     n_nodes = sum(1 for n in g.node if n.op_type != "Constant")
     while cur != out_name:
@@ -163,8 +180,44 @@ def parse_onnx(model):
                     cur = a.output[0]
                     used += 1
             layers.append(Layer(w, b))
-        elif op == "Add":
-            raise ImportError_("MatMul の直後以外の Add (残差接続など) は未対応です")
+        elif op in NORM_OPS:
+            if layers:
+                raise ImportError_(
+                    f"{op} ({n.name or '名前なし'}) は最初の全結合層より後にあります。定数との {op} は、"
+                    "入力の正規化として最初の全結合層より前でだけ受け付けます (残差接続などは未対応)"
+                )
+            if len(n.input) != 2 or list(n.input).count(cur) != 1:
+                raise ImportError_(f"{op} ({n.name or '名前なし'}) は入力と定数の演算に限ります")
+            k_name = n.input[1] if n.input[0] == cur else n.input[0]
+            if k_name not in inits:
+                raise ImportError_(f"{op} ({n.name or '名前なし'}) の相手 {k_name} が定数ではありません")
+            k = inits[k_name].astype(np.float64)
+            if k.ndim > 2 or (k.ndim == 2 and k.shape[0] != 1):
+                raise ImportError_(f"{op} ({n.name or '名前なし'}) の定数の形 {k.shape} は未対応です (スカラー、[n]、[1, n] に限ります)")
+            left = n.input[0] == k_name
+            if left and op == "Div":
+                raise ImportError_(f"Div ({n.name or '名前なし'}) の 定数 / 入力 は線形でないので畳み込めません")
+            pre.append((op, k.reshape(-1), left, n.name))
+            cur = n.output[0]
+        elif op == "Flatten":
+            ax = attr(n, "axis", 1)
+            if ax not in (0, 1, -1):
+                raise ImportError_(f"Flatten ({n.name or '名前なし'}) の axis={ax} は未対応です (1行の Flatten に限ります)")
+            cur = n.output[0]
+        elif op == "Reshape":
+            if attr(n, "allowzero", 0) != 0:
+                raise ImportError_(f"Reshape ({n.name or '名前なし'}) の allowzero=1 は未対応です")
+            if len(n.input) != 2 or n.input[0] != cur or n.input[1] not in inits:
+                raise ImportError_(f"Reshape ({n.name or '名前なし'}) の目標の形が定数ではありません")
+            shp = [int(v) for v in inits[n.input[1]].reshape(-1)]
+            if not shp or any(v not in (1, -1) for v in shp[:-1]) or shp.count(-1) > 1 or shp[-1] == 0 or shp[-1] < -1:
+                raise ImportError_(
+                    f"Reshape ({n.name or '名前なし'}) の目標の形 {shp} は未対応です "
+                    "(1行の Reshape に限ります。最後以外の次元は 1 か -1)"
+                )
+            if shp[-1] != -1:
+                shape_checks.append((len(layers), shp[-1], n.name))
+            cur = n.output[0]
         elif op in ("Tanh", "Relu", "Sigmoid"):
             if not layers:
                 raise ImportError_(f"最初の全結合層より前の活性化 ({op}) は未対応です")
@@ -185,11 +238,52 @@ def parse_onnx(model):
     for k in range(1, len(layers)):
         if layers[k].n_in != layers[k - 1].n_out:
             raise ImportError_(f"層 {k} の入力次元 {layers[k].n_in} が前の層の出力 {layers[k - 1].n_out} と合いません")
+    for k, d, name in shape_checks:
+        width = n_in if k == 0 else layers[k - 1].n_out
+        if d != width:
+            raise ImportError_(f"Reshape ({name}) の目標の最後の次元 {d} がその位置の幅 {width} と合いません")
+    if pre:
+        fold_input_affine(layers[0], pre)
     # 入力の形 (最後の次元が決まっていれば照合する)
     dims = inputs[0].type.tensor_type.shape.dim
     if dims and dims[-1].HasField("dim_value") and dims[-1].dim_value != n_in:
         raise ImportError_(f"モデルの入力次元 {dims[-1].dim_value} と最初の層の入力 {n_in} が合いません")
     return n_in, layers, dtypes
+
+
+def fold_input_affine(layer, pre):
+    """入力の正規化 pre (入力に近い順) を最初の層 layer の重みとバイアスに畳み込む。
+
+    出力側から順にたどる。y = W·t(x) + b で t が
+      x - k: b ← b - W·k      x + k: b ← b + W·k     k - x: b ← b + W·k, W ← -W
+      x · k: W ← W·diag(k)    x / k: W ← W·diag(1/k) (列ごとに k で割る。逆数を作らないので丸めは1回)
+    バイアスの和は math.fsum で取る (正しく丸めた和。BLAS や OS によらず同じビット列)"""
+    import math
+
+    n = layer.n_in
+    w = layer.w.copy()
+    b = layer.b.copy()
+    for op, k, left, name in reversed(pre):
+        if k.size not in (1, n):
+            raise ImportError_(f"{op} ({name}) の定数の個数 {k.size} が入力次元 {n} と合いません")
+        kv = np.broadcast_to(k, (n,)).astype(np.float64)
+        if op == "Mul":
+            w = w * kv[None, :]
+        elif op == "Div":
+            if np.any(kv == 0.0):
+                raise ImportError_(f"Div ({name}) の定数に 0 があります")
+            w = w / kv[None, :]
+        else:
+            sign = -1.0 if (op == "Sub" and not left) else 1.0
+            b = np.array([math.fsum([b[j]] + [sign * (w[j, i] * kv[i]) for i in range(n)])
+                          for j in range(w.shape[0])])
+            if op == "Sub" and left:
+                w = -w
+    if not (np.all(np.isfinite(w)) and np.all(np.isfinite(b))):
+        raise ImportError_("入力の正規化を畳み込んだ重みに有限でない値があります")
+    layer.w = w
+    layer.b = b
+    layer.folded = [op for op, *_ in pre]
 
 
 def encode(n_in, layers, f32w):
@@ -240,6 +334,8 @@ def summary(n_in, layers, n_params, f32w, nbytes):
     lines = [f"入力次元 {n_in}、層数 {len(layers)}"]
     for k, l in enumerate(layers):
         lines.append(f"  層{k}: 全結合 {l.n_in}→{l.n_out}、活性化 {l.act}、パラメータ {l.w.size + l.b.size}")
+        if l.folded:
+            lines.append(f"    (入力の正規化 {' → '.join(l.folded)} をこの層の重みとバイアスに畳み込みました)")
     lines.append(f"パラメータ総数 {n_params}、重みの型 {'f32' if f32w else 'f64'}、ファイル {nbytes} バイト")
     return "\n".join(lines)
 
