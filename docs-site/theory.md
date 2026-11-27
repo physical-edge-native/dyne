@@ -88,7 +88,11 @@ Checked in `scripts/ci-check.sh` (step 23, `theory/guarantee/residual_bound.py`)
   (5.1 × 10⁻⁵ against 1.4 × 10⁻⁴ after 39 steps). In every step and every device, the defect is at most the largest
   deviation at the device's ends plus its grid residual; the defect reaches up to 0.87 of that sum, so the check is
   not loose. The deviation at the borders between devices is small (median 1.9 × 10⁻⁷), which shows that the
-  simulator's border points follow the idealised map.
+  simulator's border points follow the idealised map;
+- classical and learned solvers mixed on four devices in the simulator (learned on the second and fourth device,
+  classical on the others, chosen per device with `dyne-sim --wasm-node`; same grid). The bound holds (5.1 × 10⁻⁵
+  against 1.4 × 10⁻⁴), the defect bound holds on both learned devices in every step, and the classical devices
+  reproduce the idealised map up to rounding (the check allows 10⁻¹²; the defect was 0 in the Linux run).
 
 ### In 2D and 3D
 
@@ -118,8 +122,7 @@ zero-gradient ends reaches it (2D: 0.2004 against 0.2100; 3D: 0.1997 against 0.2
 This is a result on the idealised map (training converges exactly up to the defect `δ`); the 2D and 3D learned
 solvers themselves have not been run in the simulator.
 
-Not covered: classical and learned devices mixed in the simulator (the simulator runs one solver on every device),
-learned solvers in 2D and 3D, the wave equation (it needs an energy norm instead of
+Not covered: learned solvers in 2D and 3D, the wave equation (it needs an energy norm instead of
 the maximum norm), and transparent borders.
 
 ## Transparent borders

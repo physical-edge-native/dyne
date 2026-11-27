@@ -9,7 +9,8 @@
 #      run only here, not again as a separate step) (issue #43)
 #   2. build the WebAssembly actors (heat1d, heat1d-pinn, heat2d)
 #   3. 1D: a 16-node split solution must match the single-node solution bit for bit; with --steps 0 neither
-#      side computes a step, so both keep the initial field (issue #138)
+#      side computes a step, so both keep the initial field (issue #138); the per-device solver option --wasm-node,
+#      given the same solver, must stay bit-exact too (issue #197)
 #   4. 2D: several partitions with packet loss / latency / pauses must match bit for bit;
 #      a ring of waiting nodes (2x2, heavy loss) finishes within a time limit (issue #26); --steps 0
 #      computes no step on either side (issue #138)
@@ -100,7 +101,8 @@
 #      idealised map of mixed classical and learned regions (r = 0.1, 0.3, 0.5; fixed-value and zero-gradient ends;
 #      nudging), ||Phi||_inf <= 1 and 200 steps with defects up to delta keep the error under initial error + n·delta,
 #      and a constant defect reaches it; then the learned solver (heat1d-pinn-actor) on one and on four devices in
-#      dyne-sim (issue #197 for four): its
+#      dyne-sim, and on two of four devices mixed with the classical solver (--wasm-node; issue #197; the classical
+#      devices must match the idealised map up to rounding): its
 #      distance from the exact backward-Euler sequence stays under the sum of its one-step defects, and each defect is
 #      at most the end deviation plus the grid residual (per device). The same synthetic check in 2D and 3D (theory/guarantee/heat_nd.py,
 #      issue #197; r up to 1/4 and 1/6), and a classical grid just above that limit must have ||Phi||_inf > 1.
@@ -145,6 +147,8 @@ expect_pass() { # name, command...
 echo "== [3] 1D split vs single node (bit-exact) =="
 expect_pass "1d-16nodes" "$SIM1" --wasm "$W1" --nodes 16 --points 65 --steps 2000
 expect_pass "1d-steps0"  "$SIM1" --wasm "$W1" --nodes 16 --points 65 --steps 0
+# --wasm-node (issue #197): the per-device solver path, here with the same solver, must stay bit-exact
+expect_pass "1d-wasm-node" "$SIM1" --wasm "$W1" --wasm-node 3="$W1" --wasm-node 9="$W1" --nodes 16 --points 65 --steps 2000
 
 echo "== [4] 2D partitions under loss/latency/pause (bit-exact) =="
 expect_pass "basic2x2"   "$SIM2" --wasm "$W2" --quiet --px 2 --py 2 --steps 500
@@ -567,8 +571,8 @@ echo "== [23] error bound with residuals of the learned solver (issue #159) =="
 if [ -n "$PY" ] && "$PY" -c "import numpy" > /dev/null 2>&1; then
   (cd crates/heat1d-pinn-actor && cargo build --release --target wasm32-unknown-unknown)
   WP="crates/heat1d-pinn-actor/target/wasm32-unknown-unknown/release/heat1d_pinn_actor.wasm"
-  if "$PY" theory/guarantee/residual_bound.py --sim "$SIM1" --wasm "$WP" > target/ci-residual-bound.log 2>&1; then
-    grep -E "worst case|just above the limit|learned solver on|defect <=|PASS" target/ci-residual-bound.log
+  if "$PY" theory/guarantee/residual_bound.py --sim "$SIM1" --wasm "$WP" --fd-wasm "$W1" > target/ci-residual-bound.log 2>&1; then
+    grep -E "worst case|just above the limit|learned solver on|defect <=|classical devices|PASS" target/ci-residual-bound.log
   else
     cat target/ci-residual-bound.log; echo "residual-bound   FAIL"; fail=1
   fi
