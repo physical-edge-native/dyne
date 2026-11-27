@@ -12,6 +12,7 @@ Entries for the next release are collected in [`changelog.d/`](changelog.d/READM
 
 Room twin on real hardware (2026-11-21), English documentation site, native PC solvers moved in from barye,
 export to OpenFOAM, VTK and USD, and checks of learned solvers and cooperative-run logs without hardware.
+The tag `v0.2.0` points to 2919654, which also contains #199 (listed below under Added).
 
 ### Added
 - `scripts/first_flash.py`: first USB flash of many ESP32 boards in a row, with boot-log checks and a MAC/node-id CSV (#1).
@@ -47,6 +48,7 @@ export to OpenFOAM, VTK and USD, and checks of learned solvers and cooperative-r
 - Theory: proven error bound for classical and learned regions mixed when training leaves a residual (initial error plus the sum of one-step defects), checked in `scripts/ci-check.sh` on synthetic defects and on the learned solver in the simulator (#159).
 - `dyne-sim2d --perf-log` writes a cooperative-run log (per message and per step times and bytes), and `scripts/coop_perf.py` reports latency and jitter distributions, throughput and steps per second from it (#167).
 - `CONTRIBUTING.md` has a "Your first contribution" section: where to find good first issues and help-wanted issues, how to run the checks, how to hide private details in hardware records, and where to ask (#176).
+- `theory/guarantee/heat_nd.py` and step 23 of `scripts/ci-check.sh`: the error bound for learned regions that leave a residual is extended to the explicit heat scheme in 2D (`r ≤ 1/4`) and 3D (`r ≤ 1/6`), proven on the theory page and checked on synthetic defects (#197).
 
 ### Changed
 - Live twin exporter runs in-process and caches static parts: per-export time 3.3–3.5 s → about 0.5 s (#3).
