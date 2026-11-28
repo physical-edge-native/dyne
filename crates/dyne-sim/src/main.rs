@@ -25,6 +25,8 @@
 //!     --loss 0.10 --lat-ms 5 --lat-jitter-ms 3 --step-ms 79.5 --seed 42 \
 //!     --pause 7@20000:40000 --partition 8@60000:90000
 //!   (pause: ノード7を仮想20〜40秒停止。partition: ノード7|8間を仮想60〜90秒分断)
+//!   --wasm-node 3=heat1d_pinn_actor.wasm … ノード3だけ別のアクターで動かす (繰り返し可。差分法と
+//!                          学習型を混ぜる。2026-11-27、issue #197。指定なしなら従来とビット同一)
 //!
 //! M-S1a後半 (シナリオC = 解釈βの領域拡張ADD):
 //!   --add 5@30000        … ノード5は開始時不在。隣接ノードは当該面を外部境界u=0
@@ -64,6 +66,9 @@ use dyne_core::transparent::TransparentCoef;
 #[derive(Clone)]
 struct Config {
     wasm: String,
+    /// --wasm-node i=path (繰り返し可、2026-11-27、issue #197): ノード i だけ別の WASM アクターで動かす
+    /// (差分法と学習型を混ぜる)。指定の無いノードは --wasm。既定は空 = 従来とビット同一
+    wasm_node: Vec<(usize, String)>,
     nodes: usize,
     points: usize,
     steps: u64,
@@ -263,6 +268,7 @@ fn pinn_key(name: &str) -> u32 {
 fn parse_args() -> Config {
     let mut c = Config {
         wasm: String::new(),
+        wasm_node: Vec::new(),
         nodes: 16,
         points: 65,
         steps: 2000,
@@ -312,6 +318,11 @@ fn parse_args() -> Config {
         let val = || args.get(i + 1).cloned().unwrap_or_default();
         match key {
             "--wasm" => c.wasm = val(),
+            "--wasm-node" => {
+                let v = val();
+                let (n, p) = v.split_once('=').expect("--wasm-node node=path");
+                c.wasm_node.push((n.parse().expect("--wasm-node node=path"), p.to_string()));
+            }
             "--nodes" => c.nodes = val().parse().unwrap(),
             "--points" => c.points = val().parse().unwrap(),
             "--steps" => c.steps = val().parse().unwrap(),
@@ -620,6 +631,8 @@ struct Sim {
     net: VirtNet,
     engine: wasmi::Engine,
     module: wasmi::Module,
+    /// ノードごとの WASM モジュール (--wasm-node で差し替えたノード以外は module と同じ)
+    node_modules: Vec<wasmi::Module>,
     /// 実行中に確定したADD参加の記録
     join_log: Vec<JoinRec>,
     /// 界面残差 |grad_A - grad_B| の時系列: 界面ID -> (step, 残差)。
@@ -928,7 +941,7 @@ impl Sim {
                 }
             }
             // 新インスタンス構築 (旧インスタンスは破棄 = REMOVE、新設 = ADD)
-            let mut actor = Actor::load_with(&self.engine, &self.module, &self.cfg.pinn_cfg);
+            let mut actor = Actor::load_with(&self.engine, &self.node_modules[node], &self.cfg.pinn_cfg);
             // M-S1c: GROW 済みの幅は引き継ぐ (学習型のみ。差分法では dyne_cfg が無く無視)
             if let Some(f) = actor.cfg {
                 f.call(&mut actor.store, (3, self.width[node] as f64)).unwrap();
@@ -1051,7 +1064,7 @@ impl Sim {
                     .iface_adds
                     .push((node, FACE_LEFT, s_join));
             }
-            let mut actor = Actor::load_with(&self.engine, &self.module, &self.cfg.pinn_cfg);
+            let mut actor = Actor::load_with(&self.engine, &self.node_modules[node], &self.cfg.pinn_cfg);
             // 学習型アクター: ADDで参加するインスタンスの温め回数。
             // F2ウォームスタートの既定は 200 (2026-09-14 検収仕様)。--add-warm で上書き可
             let warm_iters = if self.cfg.join_warm {
@@ -1155,7 +1168,7 @@ impl Sim {
             );
             return;
         }
-        let mut actor = Actor::load_with(&self.engine, &self.module, &self.cfg.pinn_cfg);
+        let mut actor = Actor::load_with(&self.engine, &self.node_modules[node], &self.cfg.pinn_cfg);
         // 再initで透過境界の補助変数はリセットされる (残っている未観測面も含む)。
         // これは担当替えのリセット規定 (理論ノートT10) の再init側の帰結で、
         // 複合参照解も参加イベント時に隣接ノードの補助変数をリセットして鏡写しする
@@ -1563,6 +1576,12 @@ fn main() {
     let wasm = std::fs::read(&cfg.wasm).expect("read wasm");
     let engine = wasmi::Engine::default();
     let module = wasmi::Module::new(&engine, &wasm[..]).expect("compile wasm");
+    let mut node_modules: Vec<wasmi::Module> = vec![module.clone(); cfg.nodes];
+    for (n, path) in &cfg.wasm_node {
+        assert!(*n < cfg.nodes, "--wasm-node {n}: no such node");
+        let w = std::fs::read(path).expect("read --wasm-node wasm");
+        node_modules[*n] = wasmi::Module::new(&engine, &w[..]).expect("compile --wasm-node wasm");
+    }
 
     // 格子の分割(重複なし・M0方式の一般化)
     let n_pts = cfg.points;
@@ -1586,8 +1605,10 @@ fn main() {
 
     // RAM上限チェック(実機校正: 線形メモリ+ランタイム概算がノード上限を超えないか)
     let probe = Actor::load_with(&engine, &module, &cfg.pinn_cfg);
+    // --wasm-node で差分法のノードが混ざるなら、学習型でも安定条件を守る
+    let any_classical = node_modules.iter().any(|m| !Actor::load_with(&engine, m, &cfg.pinn_cfg).is_learning());
     if r > 0.5 {
-        if probe.is_learning() {
+        if probe.is_learning() && !any_classical {
             eprintln!(
                 "[sim] r = alpha*dt/h^2 = {r:.3} > 0.5: 差分法の安定条件外だが学習型のため続行 \
                  (N7掃引。判定は Linf と非有限検出で行う)"
@@ -1718,7 +1739,7 @@ fn main() {
         } else {
             BC_INTERFACE
         };
-        let mut actor = Actor::load_with(&engine, &module, &cfg.pinn_cfg);
+        let mut actor = Actor::load_with(&engine, &node_modules[i], &cfg.pinn_cfg);
         if present {
             apply_face_config(&mut actor, i, n_nodes, bc_l, bc_r, &cfg.unobserved_bc, &cfg.outer_bc, &t_coef);
             let rc = actor
@@ -1786,6 +1807,7 @@ fn main() {
         net: VirtNet::new(cfg.loss, cfg.lat_us, cfg.lat_jitter_us, cfg.partitions.clone(), cfg.seed),
         engine,
         module,
+        node_modules,
         join_log: Vec::new(),
         residuals: HashMap::new(),
         resize_log: Vec::new(),
@@ -1877,7 +1899,8 @@ fn main() {
         ref_history = hist;
         r
     };
-    let learning = sim.nodes[0].actor.is_learning();
+    // 学習型のノードが1台でもあれば学習型として報告する (--wasm-node で混ぜたとき)
+    let learning = sim.nodes.iter().any(|n| n.actor.is_learning());
 
     let mut exact = 0usize;
     let mut obs_pts = 0usize;

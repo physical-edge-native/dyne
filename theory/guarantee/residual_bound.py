@@ -35,7 +35,8 @@ Checks (run from the repository root; numpy only, plus dyne-sim for the second p
      ||Phi||_inf > 1 (the limit is sharp).
 
 Usage:
-  python theory/guarantee/residual_bound.py [--sim target/release/dyne-sim --wasm <heat1d_pinn_actor.wasm>]
+  python theory/guarantee/residual_bound.py [--sim target/release/dyne-sim --wasm <heat1d_pinn_actor.wasm>
+                                             [--fd-wasm <heat1d_actor.wasm>]]
 """
 
 import argparse
@@ -187,20 +188,26 @@ def b_inverse_norm(r, m):
     return np.abs(np.linalg.inv(b)).sum(axis=1).max()
 
 
-def sim_blocks(nodes, points):
-    """dyne-sim's split of the grid: no overlap, the first points % nodes devices get one point more."""
+def sim_blocks(nodes, points, learned=None):
+    """dyne-sim's split of the grid: no overlap, the first points % nodes devices get one point more.
+    learned: the devices running the learned solver (None = all)."""
     base, extra = divmod(points, nodes)
-    return [{'type': 'learned', 'points': base + (1 if i < extra else 0)} for i in range(nodes)]
+    return [{'type': 'learned' if learned is None or i in learned else 'fd', 'points': base + (1 if i < extra else 0)}
+            for i in range(nodes)]
 
 
-def simulator(sim, wasm, log, nodes=1, points=17, steps=40, dt=1e-4, alpha=1.0):
+def simulator(sim, wasm, log, nodes=1, points=17, steps=40, dt=1e-4, alpha=1.0, fd_wasm=None, learned=None):
     """Run the learned solver on `nodes` devices in dyne-sim (fixed-value ends) and check, against the idealised map
     of the same split (checker.Model): the distance from the exact sequence stays under the sum of the one-step
     defects, and in every step and every region the defect is at most the largest deviation at the region's ends
     (from the explicit border target, or from 0 at a fixed-value end) plus the backward-Euler residual inside."""
     with tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, 'field.csv')
-        cmd = [sim, '--wasm', wasm, '--nodes', str(nodes), '--points', str(points), '--steps', str(steps),
+        if fd_wasm is None:
+            solvers = ['--wasm', wasm]
+        else:  # classical solver everywhere, the learned one on the devices in `learned` (issue #197)
+            solvers = ['--wasm', fd_wasm] + [a for i in sorted(learned) for a in ('--wasm-node', f'{i}={wasm}')]
+        cmd = [sim] + solvers + ['--nodes', str(nodes), '--points', str(points), '--steps', str(steps),
                '--dt', repr(dt), '--alpha', repr(alpha), '--ram-cap-kb', '100000', '--quiet',
                '--field-csv', path, '--field-every', '1']
         subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -212,7 +219,8 @@ def simulator(sim, wasm, log, nodes=1, points=17, steps=40, dt=1e-4, alpha=1.0):
         gi = int(round(float(row['x']) / h))  # the CSV gives each device's local index and the global x
         field.setdefault(int(row['step']), np.full(points, np.nan))[gi] = float(row['u'])
     r = alpha * dt / (h * h)
-    m = Model({'blocks': sim_blocks(nodes, points), 'boundary': {'left': 'dirichlet', 'right': 'dirichlet'}}, r)
+    m = Model({'blocks': sim_blocks(nodes, points, None if fd_wasm is None else learned),
+               'boundary': {'left': 'dirichlet', 'right': 'dirichlet'}}, r)
     ks = sorted(field)
     assert all(not np.isnan(field[k]).any() for k in ks), 'missing points in the field CSV'
     v = field[ks[0]].copy()
@@ -220,6 +228,7 @@ def simulator(sim, wasm, log, nodes=1, points=17, steps=40, dt=1e-4, alpha=1.0):
     ok = True
     worst = 0.0
     lemma_ok = True
+    fd_defect = 0.0
     for k in ks[:-1]:
         u_prev, u_next = field[k], field[k + 1]
         rho = u_next - m.step(u_prev)
@@ -228,7 +237,10 @@ def simulator(sim, wasm, log, nodes=1, points=17, steps=40, dt=1e-4, alpha=1.0):
         err = np.abs(u_next - v).max()
         ok &= err <= total + 1e-12
         worst = max(worst, err / total if total > 0 else 0.0)
-        for _, s0, e0 in m.blocks:
+        for kind, s0, e0 in m.blocks:
+            if kind == 'fd':  # the classical solver computes the map itself: only rounding differences
+                fd_defect = max(fd_defect, np.abs(rho[s0:e0]).max())
+                continue
             ends = []
             for p, q in ((s0, s0 + 1), (e0 - 1, e0 - 2)):
                 if p in (0, points - 1):
@@ -244,11 +256,17 @@ def simulator(sim, wasm, log, nodes=1, points=17, steps=40, dt=1e-4, alpha=1.0):
             b_vec[-1] += r * u_next[e0 - 1]
             q = np.abs(b @ u_next[s0 + 1:e0 - 1] - b_vec).max()
             lemma_ok &= np.abs(rho[s0:e0]).max() <= max(ends) + q + 1e-12
-    where = 'one device' if nodes == 1 else f'{nodes} devices'
+    if fd_wasm is None:
+        where = 'one device' if nodes == 1 else f'{nodes} devices'
+    else:
+        where = f"{nodes} devices, mixed: learned on {' and '.join(map(str, sorted(learned)))}, classical on the others"
+        ok &= fd_defect <= 1e-12
     log(f"  learned solver on {where} ({points} points, r={r:.4f}, {len(ks) - 1} steps): final error "
         f"{err:.3e}, sum of defects {total:.3e}, largest error/bound {worst:.3f}; ||B^-1||_inf "
         f"{b_inverse_norm(r, points - 2):.12f}")
     log(f"  defect <= end deviation + grid residual in every step and region ({where}): {lemma_ok}")
+    if fd_wasm is not None:
+        log(f"  largest defect on the classical devices (rounding only, at most 1e-12): {fd_defect:.1e}")
     return ok and lemma_ok
 
 
@@ -256,6 +274,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--sim', help='dyne-sim binary (for the simulator check)')
     ap.add_argument('--wasm', help='heat1d_pinn_actor.wasm')
+    ap.add_argument('--fd-wasm', help='heat1d_actor.wasm (for the mixed chain, issue #197)')
     a = ap.parse_args()
     log = print
     log('synthetic defects on the idealised mixed map:')
@@ -266,6 +285,11 @@ def main():
         log('learned solver in the simulator:')
         ok &= simulator(a.sim, a.wasm, log)
         ok &= simulator(a.sim, a.wasm, log, nodes=4, points=65, steps=40, dt=1e-5)
+        if a.fd_wasm:
+            ok &= simulator(a.sim, a.wasm, log, nodes=4, points=65, steps=40, dt=1e-5, fd_wasm=a.fd_wasm,
+                            learned={1, 3})
+        else:
+            log('mixed classical and learned devices skipped (give --fd-wasm)')
     else:
         log('simulator check skipped (give --sim and --wasm)')
     log('PASS' if ok else 'FAIL')
