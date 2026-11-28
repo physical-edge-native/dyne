@@ -136,6 +136,24 @@ powershell -ExecutionPolicy Bypass -File bench-c5\build.ps1 -Target esp32 -Mode 
 
 node-esp32 と同じ基板でも同じ計測ができ、C5 との比較に使えます。
 
+## erg の方策の形を ESP32-S3 で測る (issue #156)
+
+erg (4脚ロボット) の脚の方策は 67→48→48→8 (6,008 パラメータ)、集中の方策は 75→48→48→16 (6,784 パラメータ)、
+どちらも ReLU・倍精度 (erg の erg/ppo.py、2026-11-27 に読んだもの)。縮小版の mlp-actor の上限 2,048 には入らないので、
+フル版の mlp-actor (assets/mlp_actor_full.wasm、上限 8,192) で動かす。重みは決定的な値 (scripts/onnx_check.py の
+det_values) で、学習した方策そのものではないが、計算の量と順序は同じ。erg の制御の周期は 20 ms。
+
+```powershell
+powershell -ExecutionPolicy Bypass -File bench-c5\build.ps1 -Target esp32s3 -Mode classic -Flash COM6
+```
+
+- 基板は Seeed XIAO ESP32S3 (8 MB の Octal PSRAM。sdkconfig.defaults.esp32s3)。フル版の線形メモリ (2 ページ、128 KiB) を PSRAM に置く。
+- `#BENCH bench=mlp ... model=erg_leg_f64 ... us_per_inf_single=...` が1回の推論の時間。`crc` が
+  `expected.txt` の値と同じならビット一致 (`bench_ref.py compare` で照合)。
+- 素の ESP32 (`-Target esp32`) でも同じ行が出る。PSRAM のない設定では読み込めないことがあり、そのときは
+  `#BENCH bench=error` を出して先へ進む。
+- **S3 向けのビルドはまだ一度も試していない** (クラウドに ESP-IDF がないため)。ビルドの失敗はクラウドのセッションへ戻す。
+
 ## 構成
 
 | 経路 | 役割 |

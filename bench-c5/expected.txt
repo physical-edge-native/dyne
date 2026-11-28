@@ -1,5 +1,7 @@
 #EXPECT bench=mlp model=model_a_f64 n_in=2 n_out=1 params=337 rows=64 load=0 pages=1 crc=0x3FF66C90 y0=-0.04021405871310213
 #EXPECT bench=mlp model=model_b_f64 n_in=4 n_out=4 params=1348 rows=64 load=0 pages=1 crc=0x3F94EF5A y0=-0.21614149882747091
 #EXPECT bench=mlp model=model_b_f32 n_in=4 n_out=4 params=1348 rows=64 load=0 pages=1 crc=0xD35B2174 y0=-0.21614150061713441
+#EXPECT bench=mlp model=erg_leg_f64 n_in=67 n_out=8 params=6008 rows=8 load=0 pages=2 crc=0xC98FBD06 y0=0.18847368211626625
+#EXPECT bench=mlp model=erg_central_f64 n_in=75 n_out=16 params=6784 rows=8 load=0 pages=2 crc=0x115A9A2B y0=0.07865881725445649
 #EXPECT bench=heat1d n=65 steps=2000 init=0 pages=1 crc=0x5CFE6FED
 #EXPECT bench=heat1d n=1025 steps=200 init=0 pages=1 crc=0x4A149302
