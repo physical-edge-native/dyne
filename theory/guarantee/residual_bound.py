@@ -22,9 +22,11 @@ Checks (run from the repository root; numpy only, plus dyne-sim for the second p
   1. Synthetic: several mixed chains and r in {0.1, 0.3, 0.5}: ||Phi||_inf <= 1 is confirmed, then 200 steps with
      random and with constant (worst-case) defects of size delta on the learned points; the error must stay under the
      bound, and the constant defect on a single learned region with zero-gradient ends must reach it.
-  2. Simulator: dyne-sim runs the learned solver (crates/heat1d-pinn-actor) on one device with fixed-value ends and
-     writes the field after every step; the defect of every step against the exact backward-Euler step is measured,
-     and the distance from the exact sequence started at the same field must stay under the sum of the defects.
+  2. Simulator: dyne-sim runs the learned solver (crates/heat1d-pinn-actor) on one device, and on four devices
+     (issue #197), with fixed-value ends and writes the field after every step; the defect of every step against the
+     idealised map of the same split is measured, the distance from the exact sequence started at the same field must
+     stay under the sum of the defects, and in every region the defect must be at most the largest deviation at the
+     region's ends plus its backward-Euler residual.
 
   3. Synthetic in 2D and 3D (issue #197; heat_nd.py): the same argument holds for the explicit scheme with
      r <= 1/(2d) (1/4 in 2D, 1/6 in 3D). Mixed arrangements of classical and learned blocks on a 20 x 20 and an
@@ -185,49 +187,68 @@ def b_inverse_norm(r, m):
     return np.abs(np.linalg.inv(b)).sum(axis=1).max()
 
 
-def simulator(sim, wasm, log, points=17, steps=40, dt=1e-4, alpha=1.0):
+def sim_blocks(nodes, points):
+    """dyne-sim's split of the grid: no overlap, the first points % nodes devices get one point more."""
+    base, extra = divmod(points, nodes)
+    return [{'type': 'learned', 'points': base + (1 if i < extra else 0)} for i in range(nodes)]
+
+
+def simulator(sim, wasm, log, nodes=1, points=17, steps=40, dt=1e-4, alpha=1.0):
+    """Run the learned solver on `nodes` devices in dyne-sim (fixed-value ends) and check, against the idealised map
+    of the same split (checker.Model): the distance from the exact sequence stays under the sum of the one-step
+    defects, and in every step and every region the defect is at most the largest deviation at the region's ends
+    (from the explicit border target, or from 0 at a fixed-value end) plus the backward-Euler residual inside."""
     with tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, 'field.csv')
-        cmd = [sim, '--wasm', wasm, '--nodes', '1', '--points', str(points), '--steps', str(steps),
+        cmd = [sim, '--wasm', wasm, '--nodes', str(nodes), '--points', str(points), '--steps', str(steps),
                '--dt', repr(dt), '--alpha', repr(alpha), '--ram-cap-kb', '100000', '--quiet',
                '--field-csv', path, '--field-every', '1']
         subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         with open(path, newline='', encoding='utf-8') as f:
             rows = list(csv.DictReader(f))
+    h = 1.0 / (points - 1)
     field = {}
     for row in rows:
-        field.setdefault(int(row['step']), np.zeros(points))[int(row['i'])] = float(row['u'])
-    h = 1.0 / (points - 1)
+        gi = int(round(float(row['x']) / h))  # the CSV gives each device's local index and the global x
+        field.setdefault(int(row['step']), np.full(points, np.nan))[gi] = float(row['u'])
     r = alpha * dt / (h * h)
-    m = Model({'blocks': [{'type': 'learned', 'points': points}],
-               'boundary': {'left': 'dirichlet', 'right': 'dirichlet'}}, r)
+    m = Model({'blocks': sim_blocks(nodes, points), 'boundary': {'left': 'dirichlet', 'right': 'dirichlet'}}, r)
     ks = sorted(field)
-    u0 = field[ks[0]]
-    v = u0.copy()
+    assert all(not np.isnan(field[k]).any() for k in ks), 'missing points in the field CSV'
+    v = field[ks[0]].copy()
     total = 0.0
     ok = True
     worst = 0.0
     lemma_ok = True
-    b = np.diag([1 + 2 * r] * (points - 2)) + np.diag([-r] * (points - 3), 1) + np.diag([-r] * (points - 3), -1)
     for k in ks[:-1]:
         u_prev, u_next = field[k], field[k + 1]
         rho = u_next - m.step(u_prev)
-        d = np.abs(rho).max()
-        total += d
+        total += np.abs(rho).max()
         v = m.step(v)
         err = np.abs(u_next - v).max()
         ok &= err <= total + 1e-12
         worst = max(worst, err / total if total > 0 else 0.0)
-        # the defect is at most the end deviation plus the backward-Euler residual at the grid points
-        ends = max(abs(u_next[0]), abs(u_next[-1]))
-        b_vec = u_prev[1:-1].copy()
-        b_vec[0] += r * u_next[0]
-        b_vec[-1] += r * u_next[-1]
-        q = np.abs(b @ u_next[1:-1] - b_vec).max()
-        lemma_ok &= d <= ends + q + 1e-12
-    log(f"  learned solver on one device ({points} points, r={r:.4f}, {len(ks) - 1} steps): final error "
-        f"{err:.3e}, sum of defects {total:.3e}, largest error/bound {worst:.3f}; ||B^-1||_inf {b_inverse_norm(r, points - 2):.12f}")
-    log(f"  defect <= end deviation + grid residual in every step: {lemma_ok}")
+        for _, s0, e0 in m.blocks:
+            ends = []
+            for p, q in ((s0, s0 + 1), (e0 - 1, e0 - 2)):
+                if p in (0, points - 1):
+                    target = 0.0  # fixed-value end
+                else:
+                    o = p - 1 if p == s0 else p + 1  # the neighbour's previous value (sent across the border)
+                    target = u_prev[p] + r * (u_prev[o] - 2 * u_prev[p] + u_prev[q])
+                ends.append(abs(u_next[p] - target))
+            n_in = e0 - s0 - 2
+            b = np.diag([1 + 2 * r] * n_in) + np.diag([-r] * (n_in - 1), 1) + np.diag([-r] * (n_in - 1), -1)
+            b_vec = u_prev[s0 + 1:e0 - 1].copy()
+            b_vec[0] += r * u_next[s0]
+            b_vec[-1] += r * u_next[e0 - 1]
+            q = np.abs(b @ u_next[s0 + 1:e0 - 1] - b_vec).max()
+            lemma_ok &= np.abs(rho[s0:e0]).max() <= max(ends) + q + 1e-12
+    where = 'one device' if nodes == 1 else f'{nodes} devices'
+    log(f"  learned solver on {where} ({points} points, r={r:.4f}, {len(ks) - 1} steps): final error "
+        f"{err:.3e}, sum of defects {total:.3e}, largest error/bound {worst:.3f}; ||B^-1||_inf "
+        f"{b_inverse_norm(r, points - 2):.12f}")
+    log(f"  defect <= end deviation + grid residual in every step and region ({where}): {lemma_ok}")
     return ok and lemma_ok
 
 
@@ -244,6 +265,7 @@ def main():
     if a.sim and a.wasm:
         log('learned solver in the simulator:')
         ok &= simulator(a.sim, a.wasm, log)
+        ok &= simulator(a.sim, a.wasm, log, nodes=4, points=65, steps=40, dt=1e-5)
     else:
         log('simulator check skipped (give --sim and --wasm)')
     log('PASS' if ok else 'FAIL')

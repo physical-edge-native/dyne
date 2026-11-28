@@ -81,7 +81,14 @@ Checked in `scripts/ci-check.sh` (step 23, `theory/guarantee/residual_bound.py`)
 - the learned solver (`crates/heat1d-pinn-actor`) running in the simulator on one device (17 points, fixed-value ends):
   its distance from the exact backward-Euler sequence started at the same field stays under the sum of its measured
   one-step defects (0.037 against 0.153 after 39 steps), and each defect is at most the end deviation plus the grid
-  residual.
+  residual;
+- the same solver on four devices in the simulator (65 points split 17, 16, 16, 16, fixed-value ends, `r = 0.041`).
+  The idealised map uses the simulator's split, and each device's border points target the explicit step from the
+  neighbour's previous value, as the solver does. The distance stays under the sum of the defects
+  (5.1 × 10⁻⁵ against 1.4 × 10⁻⁴ after 39 steps). In every step and every device, the defect is at most the largest
+  deviation at the device's ends plus its grid residual; the defect reaches up to 0.87 of that sum, so the check is
+  not loose. The deviation at the borders between devices is small (median 1.9 × 10⁻⁷), which shows that the
+  simulator's border points follow the idealised map.
 
 ### In 2D and 3D
 
@@ -111,8 +118,8 @@ zero-gradient ends reaches it (2D: 0.2004 against 0.2100; 3D: 0.1997 against 0.2
 This is a result on the idealised map (training converges exactly up to the defect `δ`); the 2D and 3D learned
 solvers themselves have not been run in the simulator.
 
-Not covered: several learned devices in the simulator (the simulator's arrangement of border points has not yet been
-matched to the idealised map), learned solvers in 2D and 3D, the wave equation (it needs an energy norm instead of
+Not covered: classical and learned devices mixed in the simulator (the simulator runs one solver on every device),
+learned solvers in 2D and 3D, the wave equation (it needs an energy norm instead of
 the maximum norm), and transparent borders.
 
 ## Transparent borders

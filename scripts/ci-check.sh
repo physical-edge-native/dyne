@@ -103,9 +103,10 @@
 #  23. error bound when learned regions leave a residual (theory/guarantee/residual_bound.py, issue #159): on the
 #      idealised map of mixed classical and learned regions (r = 0.1, 0.3, 0.5; fixed-value and zero-gradient ends;
 #      nudging), ||Phi||_inf <= 1 and 200 steps with defects up to delta keep the error under initial error + n·delta,
-#      and a constant defect reaches it; then the learned solver (heat1d-pinn-actor) on one device in dyne-sim: its
+#      and a constant defect reaches it; then the learned solver (heat1d-pinn-actor) on one and on four devices in
+#      dyne-sim (issue #197 for four): its
 #      distance from the exact backward-Euler sequence stays under the sum of its one-step defects, and each defect is
-#      at most the end deviation plus the grid residual. The same synthetic check in 2D and 3D (theory/guarantee/heat_nd.py,
+#      at most the end deviation plus the grid residual (per device). The same synthetic check in 2D and 3D (theory/guarantee/heat_nd.py,
 #      issue #197; r up to 1/4 and 1/6), and a classical grid just above that limit must have ||Phi||_inf > 1.
 #      Needs numpy (required when REQUIRE_NUMPY=1, CI).
 #  24. cooperative-run log (issue #167): dyne-sim2d --perf-log on a 2x2 heat run with 5 ms latency, 10 ms jitter and
@@ -576,7 +577,7 @@ if [ -n "$PY" ] && "$PY" -c "import numpy" > /dev/null 2>&1; then
   (cd crates/heat1d-pinn-actor && cargo build --release --target wasm32-unknown-unknown)
   WP="crates/heat1d-pinn-actor/target/wasm32-unknown-unknown/release/heat1d_pinn_actor.wasm"
   if "$PY" theory/guarantee/residual_bound.py --sim "$SIM1" --wasm "$WP" > target/ci-residual-bound.log 2>&1; then
-    grep -E "worst case|just above the limit|learned solver on one device|defect <=|PASS" target/ci-residual-bound.log
+    grep -E "worst case|just above the limit|learned solver on|defect <=|PASS" target/ci-residual-bound.log
   else
     cat target/ci-residual-bound.log; echo "residual-bound   FAIL"; fail=1
   fi
