@@ -54,12 +54,15 @@ const SCRATCH_CAP: usize = 512;
 #[derive(Clone, Copy)]
 struct Cfg {
     set: u32,
-    v: [f64; 7],
+    v: [f64; NCFG],
 }
 
+/// 設定のキーの数 (CFG_OFFSET_EPOCHS と CFG_DEVICES を 2026-11-27 に足した。#194)
+const NCFG: usize = 9;
+
 impl Cfg {
-    const ZERO: Cfg = Cfg { set: 0, v: [0.0; 7] };
-    const DEFAULT: [f64; 7] = [10.0, TIME_STAMP as f64, 0.0, 0.0, 0.9, 0.0, CONS_DYNAMIC as f64];
+    const ZERO: Cfg = Cfg { set: 0, v: [0.0; NCFG] };
+    const DEFAULT: [f64; NCFG] = [10.0, TIME_STAMP as f64, 0.0, 0.0, 0.9, 0.0, CONS_DYNAMIC as f64, 0.0, 0.0];
     fn get(&self, key: u32) -> f64 {
         let k = key as usize;
         if (self.set >> k) & 1 == 1 {
@@ -83,9 +86,12 @@ impl Acc {
 }
 
 /// 相補フィルタの状態。角速度のずれ (ゼロ点) の較正つき: 最初の cal 区間は板が静止している
-/// 前提で角速度の平均を取り (その間の角度は加速度からの角度)、以降はそれを引いて積分する
+/// 前提で角速度の平均を取り (その間の角度は加速度からの角度)、以降はそれを引いて積分する。
+/// skip > 0 (ノードごとのゼロ点の除去。#194) のときは、最初の skip 区間は角度を加速度からの角度に
+/// 保つだけで較正に使わない (補正前の値なので、そのずれを2度引かないため)。較正は残りの cal − skip 区間
 #[derive(Clone, Copy)]
 struct Cf {
+    seen: f64,
     init: bool,
     roll: f64,
     pitch: f64,
@@ -94,10 +100,18 @@ struct Cf {
 }
 
 impl Cf {
-    const ZERO: Cf = Cf { init: false, roll: 0.0, pitch: 0.0, cal_n: 0.0, gsum: [0.0; 2] };
-    fn update(&mut self, m: &[f64; 6], e_s: f64, alpha: f64, cal: f64) {
+    const ZERO: Cf = Cf { seen: 0.0, init: false, roll: 0.0, pitch: 0.0, cal_n: 0.0, gsum: [0.0; 2] };
+    fn update(&mut self, m: &[f64; 6], e_s: f64, alpha: f64, cal: f64, skip: f64) {
         let ra = libm::atan2(m[1], m[2]);
         let pa = libm::atan2(-m[0], libm::sqrt(m[1] * m[1] + m[2] * m[2]));
+        if self.seen < skip {
+            self.seen += 1.0;
+            self.roll = ra;
+            self.pitch = pa;
+            self.init = true;
+            return;
+        }
+        let cal = cal - skip; // skip = 0 なら cal と同じビット
         if self.cal_n < cal {
             self.gsum[0] += m[3];
             self.gsum[1] += m[4];
@@ -137,6 +151,9 @@ pub struct Fusion {
     alpha: f64,
     cal: f64,
     deg: f64,
+    /// ゼロ点を見積もる最初の区間の数 (0 = しない) と、全ノードの数 (0 = 不明)。#194
+    koff: i64,
+    ndev: f64,
     // 状態
     step: u64,
     acc: [Acc; RING],
@@ -145,6 +162,18 @@ pub struct Fusion {
     /// 合意の途中の区間の番号 (−1 = なし) と、その区間の自分だけの和
     cur_epoch: i64,
     cur_local: [f64; XLEN],
+    /// その区間の自分の補正前の z (自分だけの出力 G_LOCAL* 用。ゼロ点の除去が無ければ cur_local と同じ)
+    cur_raw: [f64; XLEN],
+    /// ゼロ点の見積もり (#194): 静止区間の自分の平均の和と数、融合した平均 (加速度) の和と数、
+    /// 引くずれ、ずれが決まったか
+    own_sum: [f64; 6],
+    own_cnt: f64,
+    fus_sum: [f64; 3],
+    fus_cnt: f64,
+    off: [f64; 6],
+    off_ready: bool,
+    /// 最後に確定した区間で使ったノードの数 (G_FUSED_DEVICES)
+    fused_dev: f64,
     /// 合意の始め方 (CONS_*)
     cons: u32,
     /// 合意の途中の区間の自分の標本数
@@ -185,11 +214,21 @@ static mut S: Fusion = Fusion {
     alpha: 0.0,
     cal: 0.0,
     deg: 0.0,
+    koff: 0,
+    ndev: 0.0,
     step: 0,
     acc: [Acc::EMPTY; RING],
     x: [0.0; XLEN],
     cur_epoch: -1,
     cur_local: [0.0; XLEN],
+    cur_raw: [0.0; XLEN],
+    own_sum: [0.0; 6],
+    own_cnt: 0.0,
+    fus_sum: [0.0; 3],
+    fus_cnt: 0.0,
+    off: [0.0; 6],
+    off_ready: false,
+    fused_dev: 0.0,
     cons: 0,
     cur_n: 0.0,
     ghost: [[0.0; PP]; 4],
@@ -257,11 +296,22 @@ impl Fusion {
         self.alpha = self.cfg.get(CFG_CF_ALPHA);
         self.cal = self.cfg.get(CFG_GYRO_CAL_EPOCHS);
         self.deg = (0..4).filter(|&f| self.kind[f] == BC_INTERFACE).count() as f64;
+        let k = self.cfg.get(CFG_OFFSET_EPOCHS);
+        self.koff = if k >= 1.0 && k <= 1.0e6 { k as i64 } else { 0 };
+        self.ndev = self.cfg.get(CFG_DEVICES);
         self.step = 0;
         self.acc = [Acc::EMPTY; RING];
         self.x = [0.0; XLEN];
         self.cur_epoch = -1;
         self.cur_local = [0.0; XLEN];
+        self.cur_raw = [0.0; XLEN];
+        self.own_sum = [0.0; 6];
+        self.own_cnt = 0.0;
+        self.fus_sum = [0.0; 3];
+        self.fus_cnt = 0.0;
+        self.off = [0.0; 6];
+        self.off_ready = false;
+        self.fused_dev = 0.0;
         self.cons = self.cfg.get(CFG_CONSENSUS) as u32;
         self.cur_n = 0.0;
         self.ghost = [[0.0; PP]; 4];
@@ -440,18 +490,37 @@ impl Fusion {
                         self.fused[k] = self.x[k + 1] / self.x[0];
                     }
                     let f = self.fused;
-                    self.cf_fused.update(&f, self.e_s, self.alpha, self.cal);
+                    self.cf_fused.update(&f, self.e_s, self.alpha, self.cal, self.koff as f64);
+                    if self.cur_epoch < self.koff {
+                        for k in 0..3 {
+                            self.fus_sum[k] += f[k];
+                        }
+                        self.fus_cnt += 1.0;
+                    }
                 }
+                self.fused_dev = libm::floor(self.x[0] * self.ndev + 0.5);
                 self.local_n = self.cur_n;
-                if self.cur_local[0] > 0.0 {
+                if self.cur_raw[0] > 0.0 {
                     for k in 0..6 {
-                        self.local[k] = self.cur_local[k + 1] / self.cur_local[0];
+                        self.local[k] = self.cur_raw[k + 1] / self.cur_raw[0];
                     }
                     let l = self.local;
-                    self.cf_local.update(&l, self.e_s, self.alpha, self.cal);
+                    self.cf_local.update(&l, self.e_s, self.alpha, self.cal, 0.0);
                 }
             }
             let e = q - 1;
+            if self.koff > 0 && e == self.koff {
+                // ゼロ点の見積もりを閉じる (融合した区間 koff − 1 はちょうど上で確定した)
+                if self.own_cnt > 0.0 {
+                    for k in 0..6 {
+                        self.off[k] = self.own_sum[k] / self.own_cnt;
+                    }
+                    for k in 0..3 {
+                        self.off[k] = if self.fus_cnt > 0.0 { self.off[k] - self.fus_sum[k] / self.fus_cnt } else { 0.0 };
+                    }
+                }
+                self.off_ready = true;
+            }
             let slot = &mut self.acc[(e as usize) % RING];
             let zs = if slot.tag == e { slot.x } else { [0.0; XLEN] };
             // ノードごとに等しい重み: z = [1, 自分の平均 (6)] (標本が無ければ全て0)。標本数で重みを
@@ -465,6 +534,19 @@ impl Fusion {
                 }
             }
             *slot = Acc::EMPTY;
+            self.cur_raw = z;
+            if zs[0] > 0.0 {
+                if e < self.koff {
+                    for k in 0..6 {
+                        self.own_sum[k] += z[k + 1];
+                    }
+                    self.own_cnt += 1.0;
+                } else if self.off_ready {
+                    for k in 0..6 {
+                        z[k + 1] = z[k + 1] - self.off[k];
+                    }
+                }
+            }
             if self.cons == CONS_DYNAMIC {
                 // 動的合意平均: 前の区間の自分の和との差だけを足す (最初の区間は前の和 = 0)
                 for k in 0..XLEN {
@@ -494,6 +576,7 @@ impl Fusion {
             G_LATE => self.late as f64,
             G_EARLY => self.early as f64,
             G_MISSING => self.missing as f64,
+            G_FUSED_DEVICES => self.fused_dev,
             _ => 0.0,
         }
     }
@@ -740,6 +823,60 @@ mod tests {
             }
         }
         [n[0].get(G_FUSED), n[1].get(G_FUSED), n[2].get(G_FUSED)]
+    }
+
+    /// ノードごとのゼロ点の除去 (#194): 静止した2台の角速度のずれと加速度のずれを、最初の3区間で見積もって
+    /// 以降は引いてから共有する。融合した角速度は0、加速度は融合した静止の平均 (重力) を保ち、自分だけの
+    /// 出力は補正しない。傾きのフィルタはずれを2度引かない (CFG_GYRO_CAL_EPOCHS = 3 でも、補正前の区間で
+    /// 見積もった −0.01 を補正後の 0 から引いて傾きが流れることがない)。使ったノードの数も出す
+    #[test]
+    fn zero_offsets_two_nodes() {
+        let mut a = new_node();
+        let mut b = new_node();
+        for f in [&mut a, &mut b] {
+            f.cfg(CFG_EPOCH_STEPS, 1.0);
+            f.cfg(CFG_TIME_MODE, TIME_ARRIVAL as f64);
+            f.cfg(CFG_OFFSET_EPOCHS, 3.0);
+            f.cfg(CFG_GYRO_CAL_EPOCHS, 3.0);
+            f.cfg(CFG_DEVICES, 2.0);
+        }
+        a.set_face(1, BC_INTERFACE, 5);
+        b.set_face(0, BC_INTERFACE, 5);
+        assert_eq!(a.init(0.02), 0);
+        assert_eq!(b.init(0.02), 0);
+        let mut roll = [0.0f64; 40];
+        for e in 0..40 {
+            a.push(0, [0.0, 0.0, 9.9, 0.01, 0.0, 0.0]);
+            b.push(0, [0.0, 0.0, 9.7, -0.03, 0.0, 0.0]);
+            let la = a.outbox_read(SCRATCH_CAP);
+            let lb = b.outbox_read(SCRATCH_CAP);
+            let (ma, mb) = (a.scratch, b.scratch);
+            b.scratch[..la].copy_from_slice(&ma[..la]);
+            a.scratch[..lb].copy_from_slice(&mb[..lb]);
+            assert_eq!(a.inbox_write(lb), INBOX_OK);
+            assert_eq!(b.inbox_write(la), INBOX_OK);
+            assert_eq!(a.step(), STEP_OK);
+            assert_eq!(b.step(), STEP_OK);
+            roll[e] = a.get(G_FUSED_ROLL);
+        }
+        for f in [&a, &b] {
+            assert!(f.get(G_FUSED + 3).abs() < 1e-12, "{}", f.get(G_FUSED + 3));
+            assert!((f.get(G_FUSED + 2) - 9.8).abs() < 1e-12, "{}", f.get(G_FUSED + 2));
+            assert!(f.get(G_FUSED_ROLL).abs() < 1e-12, "{}", f.get(G_FUSED_ROLL));
+            assert_eq!(f.get(G_FUSED_DEVICES), 2.0);
+        }
+        assert_eq!(a.get(G_LOCAL + 3), 0.01);
+        assert_eq!(b.get(G_LOCAL + 2), 9.7);
+        assert!(roll.iter().all(|r| r.abs() < 1e-12), "{:?}", roll);
+        // CFG_DEVICES を渡さないノードでは G_FUSED_DEVICES は 0 (不明)
+        let mut c = new_node();
+        c.cfg(CFG_EPOCH_STEPS, 1.0);
+        c.cfg(CFG_TIME_MODE, TIME_ARRIVAL as f64);
+        assert_eq!(c.init(0.02), 0);
+        c.push(0, [0.0; 6]);
+        c.step();
+        c.step();
+        assert_eq!(c.get(G_FUSED_DEVICES), 0.0);
     }
 
     #[test]

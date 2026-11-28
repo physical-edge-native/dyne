@@ -78,8 +78,11 @@
 #  20b. the 2026-11-21 IMU hardware record (measured/2026-11-21-siteA-imu) replayed through the IMU fusion solver,
 #      seven devices in a ring, first 120 s (scripts/imu_record_replay.py): the WebAssembly solver and its Python
 #      reference agree bit for bit on every output and message, each fused mean equals the one-place mean within 1e-6,
-#      and the CRC-32 of the outputs is pinned. Needs numpy and wasmtime: skipped locally when they are missing,
-#      required when REQUIRE_ONNX=1 (CI) (issue #158).
+#      and the CRC-32 of outputs 0..21 is pinned (unchanged by the output added in issue #194). Then the same replay with
+#      per-device zero offsets removed (CFG_OFFSET_EPOCHS = 10, issue #194): bit-exact against the reference, the
+#      device count of every fused window equals the record's, the fused gyroscope mean is near zero, gravity is kept,
+#      the fused noise is at least 2x lower than one device's, and the CRC-32 is pinned. Needs numpy and wasmtime:
+#      skipped locally when they are missing, required when REQUIRE_ONNX=1 (CI) (issues #158, #194).
 #  21. learned-solver path (ONNX -> .dynm -> crates/mlp-actor): unit tests of mlp-core, mlp-actor and
 #      mlp-train-actor; their WebAssembly modules (full, and --features small for mlp-actor); then
 #      scripts/onnx_check.py: onnxruntime, a same-order reference and the WebAssembly actor agree (tanh and sigmoid
@@ -479,7 +482,7 @@ echo "== [20b] IMU hardware record replayed through the fusion solver (issue #15
 if [ -n "$PY" ] && "$PY" -c "import numpy, wasmtime" > /dev/null 2>&1; then
   (cd crates/imu-fusion-actor && cargo build --release --target wasm32-unknown-unknown)
   if "$PY" scripts/imu_record_replay.py --check > target/ci-imu-record.log 2>&1; then
-    tail -n 5 target/ci-imu-record.log
+    tail -n 7 target/ci-imu-record.log
   else
     cat target/ci-imu-record.log; echo "imu-record       FAIL"; fail=1
   fi
