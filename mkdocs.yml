@@ -50,6 +50,7 @@ nav:
       - Hardware guide: guide/hardware.md
       - "Result: IMU fusion (2026-11-21)": results/imu-2026-11-21.md
       - "Result: how the room twin grows (simulator)": results/twin-growth.md
+      - "What a room twin costs and how long it takes": results/room-twin-cost.md
   - Connecting to other tools: connect.md
   - Verification: verification.md
   - Theory: theory.md
